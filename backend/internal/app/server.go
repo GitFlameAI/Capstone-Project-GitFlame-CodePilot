@@ -165,11 +165,16 @@ func (s *Server) handleApproveIssue(w http.ResponseWriter, issueID string) {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
 	}
-	workflow, err := s.gitWorkflow.CreatePullRequest(session.Request, session.Config)
+	workflowContract, err := s.gitWorkflow.CreatePullRequest(GitWorkflowContractRequest{
+		IssueRequest: session.Request,
+		Config:       session.Config,
+		PlanMarkdown: session.PlanMarkdown,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	workflow := workflowContract.Response
 	session.Status = statusApproved
 	session.GitWorkflow = &workflow
 	s.store.UpdateIssueSession(session)
