@@ -1,12 +1,18 @@
-FROM python:3.12-slim
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN go build -o /bin/gitflame-backend ./cmd/server
+
+FROM alpine:3.20
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY app ./app
+COPY --from=builder /bin/gitflame-backend /app/gitflame-backend
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["/app/gitflame-backend"]
