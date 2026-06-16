@@ -2,7 +2,7 @@
 
 ## Implemented Backend Features
 
-The Sprint 1 backend skeleton is implemented as a Go service using the standard `net/http` package. It exposes a runnable `GET /health` endpoint, an OpenAPI JSON contract, GitFlame issue workflow contracts, a mock ML-service client integration, in-memory Sprint 1 storage, and a mock Git workflow response for branch, PR URL, and reviewer assignment.
+The Sprint 1 backend skeleton is implemented as a Go service using the standard `net/http` package. It exposes a runnable `GET /health` endpoint, an OpenAPI JSON contract, GitFlame issue workflow contracts, a mock ML-service client integration, in-memory Sprint 1 storage, `.yml` config validation, and a mock Git workflow service interface for branch, PR URL, and reviewer assignment.
 
 Implemented API surface:
 
@@ -33,10 +33,46 @@ Swagger/OpenAPI is available after running the backend:
 http://localhost:8000/swagger/
 ```
 
+Docker Compose verification completed successfully:
+
+```bash
+docker compose build backend
+docker compose build ml-service
+docker compose up -d
+```
+
+The approve endpoint returned a Sprint 1 mock Git workflow payload with branch name, pull request URL, reviewer, and provider.
+
 ## Run Command
 
 ```bash
 go run ./cmd/server
+```
+
+## Infrastructure Notes
+
+Docker Compose starts the backend, mock ML service, and PostgreSQL database:
+
+```bash
+docker compose up --build
+```
+
+The backend receives the database connection string through `DATABASE_URL`:
+
+```text
+postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
+```
+
+The PostgreSQL schema is available at:
+
+```text
+backend/db/schema.sql
+```
+
+Sprint 1 infrastructure instructions are documented in:
+
+```text
+infra/README.md
 ```
 
 ## Missing Links

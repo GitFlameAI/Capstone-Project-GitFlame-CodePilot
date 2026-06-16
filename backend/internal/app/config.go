@@ -5,6 +5,7 @@ import "os"
 type Config struct {
 	Addr         string
 	MLServiceURL string
+	DatabaseURL  string
 }
 
 func LoadConfig() Config {
@@ -12,6 +13,7 @@ func LoadConfig() Config {
 	return Config{
 		Addr:         ":" + port,
 		MLServiceURL: envOrDefault("ML_SERVICE_URL", "http://localhost:8001"),
+		DatabaseURL:  envOrDefault("DATABASE_URL", ""),
 	}
 }
 

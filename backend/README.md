@@ -22,7 +22,8 @@ Current Sprint 1 Go backend includes:
   - `DELETE /recommendations/{id}`
 - mock Sprint 1 storage for issue sessions, plans, and recommendation cards
 - ML service client with local fallback when the mock ML service is unavailable
-- mock Git workflow response with branch, PR URL, and reviewer
+- `.yml` config service for branch prefix, include/exclude patterns, approval commands, and reviewer policy
+- mock Git workflow service interface with branch, PR URL, reviewer, and provider response
 
 ## Run locally
 
@@ -34,6 +35,27 @@ Open API docs:
 
 ```text
 http://localhost:8000/swagger/
+```
+
+## Run with Docker Compose
+
+From the repository root:
+
+```bash
+docker compose up --build
+```
+
+The backend receives:
+
+```text
+ML_SERVICE_URL=http://ml-service:8001
+DATABASE_URL=postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
+```
+
+PostgreSQL schema can be applied manually for Sprint 1:
+
+```bash
+psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/schema.sql
 ```
 
 ## Build

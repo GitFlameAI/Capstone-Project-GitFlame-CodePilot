@@ -11,17 +11,19 @@ import (
 )
 
 type Server struct {
-	cfg    Config
-	store  *MemoryStore
-	ml     *MLClient
-	router *http.ServeMux
+	cfg         Config
+	store       *MemoryStore
+	ml          *MLClient
+	gitWorkflow GitWorkflowService
+	router      *http.ServeMux
 }
 
 func NewServer(cfg Config) *Server {
 	server := &Server{
-		cfg:   cfg,
-		store: NewMemoryStore(),
-		ml:    NewMLClient(cfg.MLServiceURL),
+		cfg:         cfg,
+		store:       NewMemoryStore(),
+		ml:          NewMLClient(cfg.MLServiceURL),
+		gitWorkflow: NewMockGitWorkflowService(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.handleHealth)
@@ -163,7 +165,16 @@ func (s *Server) handleApproveIssue(w http.ResponseWriter, issueID string) {
 		writeError(w, http.StatusNotFound, "issue session was not found")
 		return
 	}
-	workflow := createGitWorkflow(session.Request, session.Config.TargetBranchPrefix)
+	workflowContract, err := s.gitWorkflow.CreatePullRequest(GitWorkflowContractRequest{
+		IssueRequest: session.Request,
+		Config:       session.Config,
+		PlanMarkdown: session.PlanMarkdown,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	workflow := workflowContract.Response
 	session.Status = statusApproved
 	session.GitWorkflow = &workflow
 	s.store.UpdateIssueSession(session)

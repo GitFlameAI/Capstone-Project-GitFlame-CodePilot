@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     environment:
       ML_SERVICE_URL: http://ml-service:8001
+      DATABASE_URL: postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
     depends_on:
       - ml-service
       - database
