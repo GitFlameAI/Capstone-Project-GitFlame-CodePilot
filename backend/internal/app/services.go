@@ -11,6 +11,65 @@ import (
 	"time"
 )
 
+type AIConfig struct {
+	Raw                string
+	TargetBranchPrefix string
+	ApproveCommand     string
+	CorrectCommand     string
+	RejectCommand      string
+}
+
+func ParseAIConfig(raw string) (AIConfig, error) {
+	if strings.TrimSpace(raw) == "" {
+		return AIConfig{}, errors.New("missing .yml configuration")
+	}
+	if hasDisabledAnalysis(raw) {
+		return AIConfig{}, errors.New("repository analysis is disabled in .yml configuration")
+	}
+	return AIConfig{
+		Raw:                raw,
+		TargetBranchPrefix: valueAfterKey(raw, "target_branch_prefix", "ai/"),
+		ApproveCommand:     valueAfterKey(raw, "approve_command", "/approve"),
+		CorrectCommand:     valueAfterKey(raw, "correct_command", "/correct"),
+		RejectCommand:      valueAfterKey(raw, "reject_command", "/reject"),
+	}, nil
+}
+
+func hasDisabledAnalysis(raw string) bool {
+	inAnalysis := false
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inAnalysis = strings.HasPrefix(trimmed, "analysis:")
+			continue
+		}
+		if inAnalysis && strings.HasPrefix(trimmed, "enabled:") {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "enabled:"))
+			return strings.EqualFold(value, "false")
+		}
+	}
+	return false
+}
+
+func valueAfterKey(raw, key, fallback string) string {
+	prefix := key + ":"
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		value = strings.Trim(value, `"'`)
+		if value != "" {
+			return value
+		}
+	}
+	return fallback
+}
+
 type MLClient struct {
 	baseURL    string
 	httpClient *http.Client
@@ -120,6 +179,27 @@ func fallbackRecommendations() (string, []RecommendationCard) {
 			Confidence: &confidence,
 			State:      recommendationOpen,
 		},
+	}
+}
+
+func createGitWorkflow(request IssueAnalyzeRequest, branchPrefix string) GitWorkflowResponse {
+	slug := regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(request.Issue.Title, "-")
+	slug = strings.Trim(strings.ToLower(slug), "-")
+	if len(slug) > 48 {
+		slug = slug[:48]
+	}
+	if slug == "" {
+		slug = strings.ToLower(request.Issue.ID)
+	}
+	baseURL := request.Repository.WebURL
+	if baseURL == "" {
+		baseURL = "https://gitflame.local/" + request.Repository.ID
+	}
+	return GitWorkflowResponse{
+		BranchName:     branchPrefix + request.Issue.ID + "-" + slug,
+		PullRequestURL: strings.TrimRight(baseURL, "/") + "/-/merge_requests/mock-" + request.Issue.ID,
+		Reviewer:       request.Issue.Author,
+		Provider:       "mock",
 	}
 }
 

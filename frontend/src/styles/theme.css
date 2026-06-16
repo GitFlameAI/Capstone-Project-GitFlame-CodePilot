@@ -1,0 +1,127 @@
+/*
+ * GitFlame design tokens.
+ * Values were taken from the real GitFlame stylesheet (light theme) so the demo
+ * UI visually matches the product. The signature purple (#905BFB) is the same
+ * colour GitFlame uses for its primary "Access" button, which is what we reuse
+ * for the "Work with AI" action.
+ */
+:root {
+  /* Brand / purple */
+  --gf-purple: #905bfb;
+  --gf-purple-hover: #782eff;
+  --gf-purple-active: #803bff;
+  --gf-purple-soft: #f9f1ff;
+  --gf-purple-soft-2: rgba(174, 76, 251, 0.08);
+  --gf-accent: #7822f9;
+
+  /* Surfaces */
+  --gf-page-bg: #f2f3fa;
+  --gf-surface: #ffffff;
+  --gf-surface-2: #fafafe;
+  --gf-surface-3: #f5f5fb;
+
+  /* Lines / borders */
+  --gf-line: #e8eaf5;
+  --gf-line-2: #dcdcf5;
+
+  /* Text */
+  --gf-text: #272735;
+  --gf-text-2: #605a80;
+  --gf-text-3: #8a87a6;
+
+  /* Status colours */
+  --gf-green: #00b14e;
+  --gf-green-bg: #e7f6e3;
+  --gf-red: #d03232;
+  --gf-red-bg: #fceae6;
+  --gf-amber: #b07400;
+  --gf-amber-bg: #fbf1dc;
+  --gf-blue: #414ee0;
+  --gf-blue-bg: #eef0ff;
+
+  /* Radii */
+  --gf-radius-sm: 10px;
+  --gf-radius: 14px;
+  --gf-radius-lg: 18px;
+
+  /* Shadow */
+  --gf-shadow-sm: 0 1px 2px rgba(39, 39, 53, 0.05);
+  --gf-shadow: 0 1px 2px rgba(39, 39, 53, 0.04), 0 10px 30px rgba(39, 39, 53, 0.07);
+  --gf-shadow-pop: 0 12px 40px rgba(39, 39, 53, 0.16);
+
+  font-family: 'Geologica', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans',
+    Helvetica, Arial, sans-serif;
+  color: var(--gf-text);
+  background: var(--gf-page-bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--gf-page-bg);
+}
+
+a {
+  color: var(--gf-accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+code,
+.mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Reusable card surface that mirrors GitFlame blocks */
+.gf-card {
+  background: var(--gf-surface);
+  border: 1px solid var(--gf-line);
+  border-radius: var(--gf-radius);
+  box-shadow: var(--gf-shadow-sm);
+}
+
+/* Pill chip used for labels, branches, etc. */
+.gf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--gf-line-2);
+  background: var(--gf-surface);
+  color: var(--gf-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gf-muted {
+  color: var(--gf-text-2);
+}
+
+/* Keyboard focus visibility (accessibility floor) */
+:focus-visible {
+  outline: 2px solid var(--gf-purple-active);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
