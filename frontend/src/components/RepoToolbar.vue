@@ -23,15 +23,15 @@ const emit = defineEmits(['work-with-ai'])
 
     <div class="toolbar__spacer" />
 
-    <!-- Right-side actions, mirroring GitFlame: История + Доступ + Work with AI -->
+    <!-- Right-side actions, mirroring GitFlame: History + Access + Work with AI -->
     <GfButton variant="secondary">
       <GfIcon name="history" :size="16" />
-      История
+      History
     </GfButton>
 
     <GfButton variant="secondary">
       <GfIcon name="lock" :size="16" />
-      Доступ
+      Access
     </GfButton>
 
     <!-- Signature purple action that opens the AI flow -->

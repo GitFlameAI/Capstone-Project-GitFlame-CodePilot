@@ -3,8 +3,8 @@
 Vue 3 demo UI that imitates a GitFlame repository page and demonstrates the two
 AI integration points planned for the product:
 
-- a purple **Work with AI** button (next to История / Доступ) that opens a wizard
-  for configuring `.ai.yml` and for running the issue → plan → approve/correct/reject loop;
+- a purple **Work with AI** button (next to "History") that opens a wizard
+  for configuring `.ai.yml` and for running the issue -> plan -> approve/correct/reject loop;
 - an **AI Recommendations** widget on the Code tab, with a dedicated **detailed
   analysis** page (filters, resolve, dismiss).
 
@@ -63,7 +63,7 @@ cp .env.example .env
 npm run dev
 ```
 
-`vite.config.js` proxies `/api` → `http://localhost:8000`, so the browser is not
+`vite.config.js` proxies `/api` -> `http://localhost:8000`, so the browser is not
 affected by CORS during development. The frontend uses exactly the endpoint
 shapes the Go backend exposes, so no code change is needed to switch modes.
 
@@ -78,7 +78,7 @@ Recommendations:
 - `PATCH /recommendations/{id}/close`
 - `DELETE /recommendations/{id}`
 
-Issue → plan workflow:
+Issue -> plan workflow:
 
 - `POST /integrations/gitflame/issues/analyze`
 - `GET  /ai/issues/{id}/plan`

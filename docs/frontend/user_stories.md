@@ -12,7 +12,7 @@ repo, **so that** I can start using code generation and recommendations.
 
 **Acceptance criteria**
 - A purple **Work with AI** button is visible on the repository Code page, next
-  to История / Доступ.
+  to History / Access.
 - Clicking it opens a wizard with two actions: configure AI and work on an issue.
 - _Component:_ `RepoToolbar.vue` → `WorkWithAiWizard.vue`
 

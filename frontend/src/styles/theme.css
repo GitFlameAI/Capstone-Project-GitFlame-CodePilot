@@ -2,7 +2,7 @@
  * GitFlame design tokens.
  * Values were taken from the real GitFlame stylesheet (light theme) so the demo
  * UI visually matches the product. The signature purple (#905BFB) is the same
- * colour GitFlame uses for its primary "Доступ" button, which is what we reuse
+ * colour GitFlame uses for its primary "Access" button, which is what we reuse
  * for the "Work with AI" action.
  */
 :root {
