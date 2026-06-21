@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Poolside Laguna XS.2",
+    "model_id": "poolside/Laguna-XS.2",
+    "parameters": "33B total / 3B active",
+    "architecture": "MoE",
+    "license": "Apache-2.0",
+    "context_tokens": 262144,
+    "quantization_candidates": "FP8, INT4/NVFP4",
+    "role": "primary candidate"
+  },
+  {
+    "name": "Cohere North Mini Code",
+    "model_id": "TBD",
+    "parameters": "30B total / 3B active",
+    "architecture": "MoE",
+    "license": "Apache-2.0",
+    "context_tokens": 256000,
+    "quantization_candidates": "FP8, W4A16",
+    "role": "primary candidate; select the published checkpoint before run"
+  },
+  {
+    "name": "Devstral Small 2",
+    "model_id": "mistralai/Devstral-Small-2-24B-Instruct-2512",
+    "parameters": "24B",
+    "architecture": "Dense",
+    "license": "Apache-2.0",
+    "context_tokens": 256000,
+    "quantization_candidates": "FP8, GGUF/AWQ community variants",
+    "role": "quality baseline"
+  },
+  {
+    "name": "Mellum2 12B Thinking",
+    "model_id": "TBD",
+    "parameters": "12B total / 2.5B active",
+    "architecture": "MoE",
+    "license": "Apache-2.0",
+    "context_tokens": 131072,
+    "quantization_candidates": "GGUF Q4/Q6/Q8, MXFP4",
+    "role": "lightweight candidate; select the published checkpoint before run"
+  },
+  {
+    "name": "Qwen3.6 35B-A3B",
+    "model_id": "Qwen/Qwen3.6-35B-A3B",
+    "parameters": "35B total / 3B active",
+    "architecture": "MoE",
+    "license": "Apache-2.0",
+    "context_tokens": 262144,
+    "quantization_candidates": "FP8, AWQ/GPTQ when available",
+    "role": "optional comparison"
+  }
+]

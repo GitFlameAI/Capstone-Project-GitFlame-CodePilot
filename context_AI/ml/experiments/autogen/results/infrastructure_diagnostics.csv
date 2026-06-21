@@ -1,0 +1,22 @@
+check,result,status
+Jupyter authentication,HTTP API accepted the supplied token,pass
+System memory,251 GiB total and approximately 246 GiB available,pass
+Disk capacity,11 TiB total and approximately 1.1 TiB free,warning
+PyTorch,2.1.0+cu121 installed,pass
+Transformers,installed,pass
+Accelerate,installed,pass
+BitsAndBytes,installed,pass
+vLLM,not installed,missing
+SGLang,not installed,missing
+NVIDIA device nodes,/dev/nvidia1 and control devices present,pass
+NVIDIA visibility,NVIDIA_VISIBLE_DEVICES=1,pass
+NVIDIA driver,550.163.01 with CUDA 12.4,pass
+Initial NVML check,nvidia-smi failed with Unknown Error before container restart,historical_fail
+Initial CUDA check,CUDA_ERROR_NO_DEVICE before container restart,historical_fail
+Initial PyTorch CUDA check,torch.cuda.is_available() returned false before container restart,historical_fail
+GPU recovery on 2026-06-21,NVIDIA A100 80GB PCIe detected with 81920 MiB VRAM,pass
+Current NVML check,nvidia-smi completed successfully,pass
+Current PyTorch CUDA check,torch.cuda.is_available() returned true and device count is 1,pass
+Model inference,GPU is ready; inference runtime and model checkpoint still need installation,ready
+Local model server,"No listener on ports 8000, 8001, 8080, 11434, or 30000",missing
+Model cache,"No downloaded checkpoints in common Hugging Face or model directories",missing

@@ -1,0 +1,22 @@
+{
+  "latency_seconds": 5.377,
+  "prompt_tokens": 2830,
+  "completion_tokens": 787,
+  "tokens_per_second": 146.365,
+  "format_valid": true,
+  "headings_present": 9,
+  "headings_required": 9,
+  "relevant_file_precision": 1.0,
+  "relevant_file_recall": 1.0,
+  "hallucinated_file_count": 8,
+  "hallucinated_files": [
+    "are not provided in the YAML, they might default to zero or negative values, causing validation failures. Solution: Set appropriate defaults in",
+    "config_service.go",
+    "models.go",
+    "rag.max_retrieved_files",
+    "rag.max_retrieved_files",
+    "rag.max_snippets_per_file",
+    "rag.max_snippets_per_file",
+    "section. These values should be validated as positive integers and exposed to the issue analysis flow. The user must not be able to configure model or plan format, and"
+  ]
+}

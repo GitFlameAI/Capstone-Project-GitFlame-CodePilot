@@ -1,0 +1,7 @@
+model,parameters,architecture,license,context_tokens,quantization,status,format_valid_rate,file_precision,file_recall,hallucinated_files,latency_p50_s,tokens_per_second,peak_vram_gb,manual_completeness_1_5,manual_plan_quality_1_5,notes
+Poolside Laguna XS.2,33B total / 3B active,MoE,Apache-2.0,262144,"FP8; INT4/NVFP4",blocked_gpu,,,,,,,,,,
+Cohere North Mini Code,30B total / 3B active,MoE,Apache-2.0,256000,"FP8; W4A16",blocked_gpu,,,,,,,,,,
+Devstral Small 2,24B,Dense,Apache-2.0,256000,"FP8; GGUF/AWQ variants",blocked_gpu,,,,,,,,,,
+Mellum2 12B Thinking,12B total / 2.5B active,MoE,Apache-2.0,131072,"GGUF Q4/Q6/Q8; MXFP4",blocked_gpu,,,,,,,,,,
+Qwen3.6 35B-A3B,35B total / 3B active,MoE,Apache-2.0,262144,"FP8; AWQ/GPTQ when available",optional_not_run,,,,,,,,,,
+

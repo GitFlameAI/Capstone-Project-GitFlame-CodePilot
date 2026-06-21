@@ -1,0 +1,27 @@
+{
+  "id": "issue_05",
+  "title": "Expire recommendation results using repository retention settings",
+  "body": "Recommendation results must be retained for the number of days configured by the repository owner and then removed automatically. Add an explicit expiration timestamp, ensure expired results are not returned by read APIs, and provide a safe cleanup operation that can run repeatedly. Existing close and delete behavior must remain unchanged.",
+  "attached_files": [
+    "backend/db/schema.sql",
+    "backend/internal/app/storage.go",
+    "backend/internal/app/server.go",
+    "backend/models/recommendation_run.go",
+    "backend/models/recommendation.go",
+    "docs/config/ai_config.example.yml"
+  ],
+  "expected_relevant_files": [
+    "backend/db/schema.sql",
+    "backend/internal/app/storage.go",
+    "backend/internal/app/server.go",
+    "backend/models/recommendation_run.go"
+  ],
+  "required_points": [
+    "Persist an expiration timestamp derived from recommendation_ttl_days",
+    "Exclude expired runs from status, summary, and recommendation list responses",
+    "Add an idempotent indexed cleanup query or worker operation",
+    "Preserve close and delete status history",
+    "Test expiry boundaries and repeated cleanup"
+  ]
+}
+

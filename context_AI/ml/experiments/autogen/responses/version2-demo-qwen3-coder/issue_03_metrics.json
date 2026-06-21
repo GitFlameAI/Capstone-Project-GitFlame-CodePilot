@@ -1,0 +1,15 @@
+{
+  "latency_seconds": 4.928,
+  "prompt_tokens": 3492,
+  "completion_tokens": 633,
+  "tokens_per_second": 128.45,
+  "format_valid": true,
+  "headings_present": 9,
+  "headings_required": 9,
+  "relevant_file_precision": 1.0,
+  "relevant_file_recall": 1.0,
+  "hallucinated_file_count": 1,
+  "hallucinated_files": [
+    "config_service.go"
+  ]
+}

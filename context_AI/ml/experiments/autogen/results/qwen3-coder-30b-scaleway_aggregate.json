@@ -1,0 +1,11 @@
+{
+  "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway",
+  "cases": 5,
+  "success_rate": 1.0,
+  "format_valid_rate": 1,
+  "mean_file_precision": 0.7668,
+  "mean_file_recall": 1.0,
+  "hallucinated_files_total": 9,
+  "median_latency_seconds": 4.898,
+  "mean_tokens_per_second": 129.3796
+}

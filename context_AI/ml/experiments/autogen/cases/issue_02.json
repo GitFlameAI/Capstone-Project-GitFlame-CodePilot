@@ -1,0 +1,22 @@
+{
+  "id": "issue_02",
+  "title": "Make ML client resilient to transient failures",
+  "body": "The backend currently fails immediately when the ML service is slow or temporarily unavailable. Add configurable request timeout and bounded retries for connection errors, HTTP 429, and HTTP 5xx responses. Do not retry validation errors or cancelled requests. Return useful errors without exposing sensitive response bodies.",
+  "attached_files": [
+    "backend/internal/app/services.go",
+    "backend/internal/app/config.go",
+    "backend/internal/app/server.go"
+  ],
+  "expected_relevant_files": [
+    "backend/internal/app/services.go",
+    "backend/internal/app/config.go"
+  ],
+  "required_points": [
+    "Add timeout and retry settings to backend configuration",
+    "Use bounded exponential backoff",
+    "Respect context cancellation and request deadlines",
+    "Retry only transient network, 429, and 5xx failures",
+    "Add deterministic tests using an HTTP test server"
+  ]
+}
+
