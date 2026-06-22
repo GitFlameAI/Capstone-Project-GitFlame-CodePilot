@@ -1,0 +1,19 @@
+{
+  "repository": {
+    "id": "demo-repo",
+    "name": "codepilot-demo",
+    "default_branch": "main",
+    "web_url": "https://gitflame.local/gitflame/codepilot-demo"
+  },
+  "issue": {
+    "id": "ISSUE-201",
+    "title": "Replace MemoryStore with PostgreSQL storage",
+    "body": "Persist issue workflow state after backend restart.",
+    "author": "amir"
+  },
+  "yaml_config": "version: 1\nrepository:\n  default_branch: main\n  target_branch_prefix: ai/\nanalysis:\n  enabled: true\n  include:\n    - src/**\ncode_generation:\n  enabled: true\n  require_user_approval: true\n  reviewer_policy: issue_author\n  allowed_actions:\n    approve_command: \"/approve\"\n    correct_command: \"/correct\"\n    reject_command: \"/reject\"\nrecommendations:\n  retention_days: 30\n",
+  "repository_context": [
+    "backend/internal/app/storage.go",
+    "backend/internal/app/server.go"
+  ]
+}

@@ -8,5 +8,6 @@ type AIConfig struct {
 	RawYML           string          `db:"raw_yml" json:"raw_yml"`
 	ParsedConfigJSON json.RawMessage `db:"parsed_config_json" json:"parsed_config_json"`
 	IsValid          bool            `db:"is_valid" json:"is_valid"`
+	RetentionDays    int             `db:"retention_days" json:"retention_days"`
 	Timestamps
 }

@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,7 @@ type AIConfig struct {
 	ApproveCommand     string
 	CorrectCommand     string
 	RejectCommand      string
+	RetentionDays      int
 }
 
 func ParseAIConfig(raw string) (AIConfig, error) {
@@ -28,6 +30,11 @@ func ParseAIConfig(raw string) (AIConfig, error) {
 	}
 
 	doc := parseSimpleYAML(raw)
+	retentionDays, err := retentionDaysFromConfig(doc)
+	if err != nil {
+		return AIConfig{}, err
+	}
+
 	cfg := AIConfig{
 		Raw:                raw,
 		Version:            scalarOrDefault(doc, "version", "1"),
@@ -42,6 +49,7 @@ func ParseAIConfig(raw string) (AIConfig, error) {
 		ApproveCommand:     scalarOrDefault(doc, "code_generation.allowed_actions.approve_command", "/approve"),
 		CorrectCommand:     scalarOrDefault(doc, "code_generation.allowed_actions.correct_command", "/correct"),
 		RejectCommand:      scalarOrDefault(doc, "code_generation.allowed_actions.reject_command", "/reject"),
+		RetentionDays:      retentionDays,
 	}
 
 	if err := validateAIConfig(cfg); err != nil {
@@ -74,6 +82,8 @@ func validateAIConfig(cfg AIConfig) error {
 		return errors.New("correct command must start with /")
 	case !strings.HasPrefix(cfg.RejectCommand, "/"):
 		return errors.New("reject command must start with /")
+	case cfg.RetentionDays < 1 || cfg.RetentionDays > 365:
+		return errors.New("recommendations.retention_days must be between 1 and 365")
 	default:
 		return nil
 	}
@@ -151,6 +161,28 @@ func boolOrDefault(doc simpleYAMLDoc, key string, fallback bool) bool {
 		return fallback
 	}
 	return strings.EqualFold(value, "true")
+}
+
+func intOrDefault(doc simpleYAMLDoc, key string, fallback int) (int, error) {
+	value, ok := doc.scalars[key]
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return parsed, nil
+}
+
+func retentionDaysFromConfig(doc simpleYAMLDoc) (int, error) {
+	if _, ok := doc.scalars["recommendations.retention_days"]; ok {
+		return intOrDefault(doc, "recommendations.retention_days", 30)
+	}
+	if _, ok := doc.scalars["recommendations.recommendation_ttl_days"]; ok {
+		return intOrDefault(doc, "recommendations.recommendation_ttl_days", 30)
+	}
+	return 0, errors.New("recommendations.retention_days is required")
 }
 
 func listOrDefault(doc simpleYAMLDoc, key string, fallback []string) []string {

@@ -9,6 +9,8 @@ type Recommendation struct {
 	Severity            string                    `db:"severity" json:"severity"`
 	Problem             string                    `db:"problem" json:"problem"`
 	Suggestion          string                    `db:"suggestion" json:"suggestion"`
+	Confidence          *float64                  `db:"confidence" json:"confidence,omitempty"`
 	CurrentStatus       RecommendationStatusValue `db:"current_status" json:"current_status"`
 	Timestamps
+	UpdatedTimestamp
 }

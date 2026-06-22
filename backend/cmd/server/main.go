@@ -9,7 +9,11 @@ import (
 
 func main() {
 	cfg := app.LoadConfig()
-	server := app.NewServer(cfg)
+	server, err := app.NewServer(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer server.Close()
 
 	log.Printf("GitFlame CodePilot backend listening on %s", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, server.Router()); err != nil {

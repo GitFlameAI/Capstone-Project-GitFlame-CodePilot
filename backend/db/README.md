@@ -1,29 +1,57 @@
-# Backend Database Schema
+# Backend Database
 
-This folder contains the first PostgreSQL schema files for the GitFlame CodePilot backend storage layer.
+The backend uses PostgreSQL as the main storage layer for Sprint 2. Runtime state is no longer expected to live only in `MemoryStore`.
 
-`schema.sql` creates the Sprint 1 tables:
+## Files
+
+- `migrations/initial_schema.sql` creates the PostgreSQL schema.
+- `verification.sql` inserts sample data and checks that issue workflow state, plan revisions, agent task status, and recommendation retention are stored correctly.
+
+## Schema Scope
+
+The migration creates:
 
 - `repositories`
 - `ai_configs`
 - `issue_sessions`
 - `generated_plans`
+- `plan_revisions`
+- `agent_tasks`
 - `user_responses`
 - `recommendation_runs`
 - `recommendations`
 - `recommendation_statuses`
 
-The schema uses PostgreSQL-friendly types:
+`issue_sessions` stores the GitFlame issue workflow state. `generated_plans` stores the current plan for a session. `plan_revisions` stores the plan history, including correction feedback. `agent_tasks` stores Agent Engine task status values: `queued`, `processing`, `completed`, and `failed`.
 
-- `UUID` for identifiers
-- `JSONB` for parsed `.yml` configuration
-- `TIMESTAMPTZ` for timestamps
-- `TEXT CHECK (...)` constraints for MVP status values
+Recommendation retention is stored on `recommendation_runs` with `retention_days` and `expires_at`. The backend takes `retention_days` from the validated `.yml` configuration; it is not chosen by the database.
 
-After the PostgreSQL container is running, the schema can be applied with:
+## Docker Initialization
 
-```bash
-psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/schema.sql
+`docker-compose.yml` mounts the migration into the PostgreSQL container:
+
+```yaml
+./backend/db/migrations/initial_schema.sql:/docker-entrypoint-initdb.d/initial_schema.sql:ro
 ```
 
-The next verification step is to insert sample issue workflow and recommendation records, then confirm them with `SELECT` queries or a pgAdmin screenshot.
+PostgreSQL applies this file when a new database volume is created.
+
+If the `postgres_data` volume already exists, PostgreSQL will not re-run the initialization file automatically. For a clean local database, recreate the volume:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
+
+## Manual Verification
+
+After the database is running, run:
+
+```bash
+psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/verification.sql
+```
+
+Expected result:
+
+- the issue workflow query returns a saved issue session, generated plan, revision, and completed agent task;
+- the recommendation query returns a saved retention period and a future expiration timestamp.

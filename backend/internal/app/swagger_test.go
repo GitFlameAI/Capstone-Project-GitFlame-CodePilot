@@ -9,7 +9,7 @@ import (
 )
 
 func TestSwaggerEndpoints(t *testing.T) {
-	server := NewServer(Config{Addr: ":8000", MLServiceURL: "http://localhost:8001"})
+	server := NewServerWithStore(Config{Addr: ":8000", MLServiceURL: "http://localhost:8001"}, NewMemoryStore())
 
 	openAPIResponse := httptest.NewRecorder()
 	openAPIRequest := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
