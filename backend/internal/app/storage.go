@@ -760,7 +760,13 @@ func insertAgentTask(ctx context.Context, tx pgx.Tx, sessionID string, generated
 		) VALUES ($1, $2, $3, 'queued', now())
 		RETURNING id::text
 	`, sessionValue, planValue, taskType).Scan(&taskID)
-	return taskID, err
+	if err != nil {
+		return "", err
+	}
+	if err := insertAgentTaskStatus(ctx, tx, taskID, "queued", "Agent task queued."); err != nil {
+		return "", err
+	}
+	return taskID, nil
 }
 
 func updateAgentTaskStatus(ctx context.Context, tx pgx.Tx, taskID string, status string, errorMessage string, toolSummary string) error {
@@ -780,7 +786,31 @@ func updateAgentTaskStatus(ctx context.Context, tx pgx.Tx, taskID string, status
 			updated_at = now()
 		WHERE id = $1::uuid
 	`, taskID, status, errorMessage, toolSummary)
+	if err != nil {
+		return err
+	}
+	return insertAgentTaskStatus(ctx, tx, taskID, status, statusMessage(status, errorMessage, toolSummary))
+}
+
+func insertAgentTaskStatus(ctx context.Context, tx pgx.Tx, taskID string, status string, message string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO agent_task_statuses (
+			agent_task_id,
+			status,
+			message
+		) VALUES ($1, $2, $3)
+	`, taskID, status, message)
 	return err
+}
+
+func statusMessage(status string, errorMessage string, toolSummary string) string {
+	if strings.TrimSpace(errorMessage) != "" {
+		return errorMessage
+	}
+	if strings.TrimSpace(toolSummary) != "" {
+		return toolSummary
+	}
+	return "Agent task status changed to " + status + "."
 }
 
 func upsertPlanRevision(ctx context.Context, tx pgx.Tx, sessionID string, generatedPlanID string, taskID string, revision int, planMarkdown string, feedback string, source string) error {

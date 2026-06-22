@@ -111,6 +111,27 @@ INSERT INTO agent_tasks (
     tool_execution_summary = EXCLUDED.tool_execution_summary,
     updated_at = now();
 
+INSERT INTO agent_task_statuses (
+    agent_task_id,
+    status,
+    message
+) VALUES
+    (
+        '55555555-5555-5555-5555-555555555555',
+        'queued',
+        'Agent task queued.'
+    ),
+    (
+        '55555555-5555-5555-5555-555555555555',
+        'processing',
+        'Plan revision generation started.'
+    ),
+    (
+        '55555555-5555-5555-5555-555555555555',
+        'completed',
+        'Plan revision generated after user correction feedback.'
+    );
+
 INSERT INTO plan_revisions (
     id,
     generated_plan_id,
@@ -179,15 +200,14 @@ WHERE s.external_issue_id = 'ISSUE-101';
 
 SELECT
     'agent task lifecycle persisted' AS verification_case,
-    task_type,
-    status,
-    started_at IS NOT NULL AS has_started_at,
-    completed_at IS NOT NULL AS has_completed_at,
-    tool_execution_summary
-FROM agent_tasks
-WHERE issue_session_id = '33333333-3333-3333-3333-333333333333'
-ORDER BY created_at DESC
-LIMIT 5;
+    at.task_type,
+    ats.status,
+    ats.message,
+    ats.created_at
+FROM agent_tasks at
+JOIN agent_task_statuses ats ON ats.agent_task_id = at.id
+WHERE at.issue_session_id = '33333333-3333-3333-3333-333333333333'
+ORDER BY ats.created_at;
 
 SELECT
     'recommendation retention persisted' AS verification_case,

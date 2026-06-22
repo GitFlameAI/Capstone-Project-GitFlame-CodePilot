@@ -17,12 +17,13 @@ The migration creates:
 - `generated_plans`
 - `plan_revisions`
 - `agent_tasks`
+- `agent_task_statuses`
 - `user_responses`
 - `recommendation_runs`
 - `recommendations`
 - `recommendation_statuses`
 
-`issue_sessions` stores the GitFlame issue workflow state. `generated_plans` stores the current plan for a session. `plan_revisions` stores the plan history, including correction feedback. `agent_tasks` stores Agent Engine task status values: `queued`, `processing`, `completed`, and `failed`.
+`issue_sessions` stores the GitFlame issue workflow state. `generated_plans` stores the current plan for a session. `plan_revisions` stores the plan history, including correction feedback. `agent_tasks` stores the current Agent Engine task status, while `agent_task_statuses` stores the transition history for `queued`, `processing`, `completed`, and `failed`.
 
 Recommendation retention is stored on `recommendation_runs` with `retention_days` and `expires_at`. The backend takes `retention_days` from the validated `.yml` configuration; it is not chosen by the database.
 

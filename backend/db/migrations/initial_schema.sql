@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     )
 );
 
+CREATE TABLE IF NOT EXISTS agent_task_statuses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_task_id UUID NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT agent_task_statuses_status_check CHECK (
+        status IN ('queued', 'processing', 'completed', 'failed')
+    )
+);
+
 CREATE TABLE IF NOT EXISTS plan_revisions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     generated_plan_id UUID NOT NULL REFERENCES generated_plans(id) ON DELETE CASCADE,
@@ -198,6 +209,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session_id
 
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status
     ON agent_tasks(status);
+
+CREATE INDEX IF NOT EXISTS idx_agent_task_statuses_task_id
+    ON agent_task_statuses(agent_task_id);
 
 CREATE INDEX IF NOT EXISTS idx_plan_revisions_issue_session_id
     ON plan_revisions(issue_session_id);

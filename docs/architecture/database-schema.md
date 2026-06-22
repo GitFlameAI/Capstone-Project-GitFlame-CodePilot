@@ -18,6 +18,7 @@ The issue workflow is represented by:
 - `generated_plans`
 - `plan_revisions`
 - `agent_tasks`
+- `agent_task_statuses`
 - `user_responses`
 
 The recommendation workflow is represented by:
@@ -34,7 +35,9 @@ The recommendation workflow is represented by:
 
 `plan_revisions` stores the history of generated plans. Each correction creates a new revision with its own `revision_number`, full `plan_markdown`, and optional `correction_feedback`. Revisions store full Markdown content instead of diffs, because this is simpler to restore and verify in Sprint 2.
 
-`agent_tasks` stores the Agent Engine task state. The planned statuses are `queued`, `processing`, `completed`, and `failed`. The table also stores a short `tool_execution_summary`, but it does not store full model reasoning.
+`agent_tasks` stores the current Agent Engine task state. The planned statuses are `queued`, `processing`, `completed`, and `failed`. The table also stores a short `tool_execution_summary`, but it does not store full model reasoning.
+
+`agent_task_statuses` stores the task transition history. A single task can therefore show that it moved from `queued` to `processing` and then to `completed` or `failed`.
 
 `user_responses` stores user decisions: approve, correct, or reject.
 
@@ -69,5 +72,5 @@ It inserts sample records and checks that:
 - an issue session can be saved;
 - a generated plan can be linked to the session;
 - a plan revision can store correction feedback;
-- an agent task can store its status;
+- an agent task can store its current status and transition history;
 - a recommendation run can store retention data.
