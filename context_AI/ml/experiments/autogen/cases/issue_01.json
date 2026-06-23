@@ -1,0 +1,24 @@
+{
+  "id": "issue_01",
+  "title": "Persist issue-to-plan sessions in PostgreSQL",
+  "body": "Issue sessions and generated plans are lost whenever the backend restarts. Replace the in-memory persistence for the issue-to-plan workflow with PostgreSQL while preserving current API behavior. Store plan revisions and user approve, correct, and reject actions. Existing tests must continue to pass.",
+  "attached_files": [
+    "backend/internal/app/storage.go",
+    "backend/internal/app/server.go",
+    "backend/internal/app/models.go",
+    "backend/db/schema.sql"
+  ],
+  "expected_relevant_files": [
+    "backend/internal/app/storage.go",
+    "backend/internal/app/server.go",
+    "backend/db/schema.sql"
+  ],
+  "required_points": [
+    "Introduce a storage interface so handlers are not coupled to MemoryStore",
+    "Persist issue sessions, generated plan revisions, and user responses",
+    "Use transactions for state changes that write multiple records",
+    "Keep MemoryStore available for isolated tests or replace its test usage",
+    "Add restart-persistence and invalid-transition tests"
+  ]
+}
+

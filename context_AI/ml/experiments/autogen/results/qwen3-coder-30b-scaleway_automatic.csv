@@ -1,0 +1,6 @@
+model,issue_id,success,format_valid,relevant_file_precision,relevant_file_recall,hallucinated_file_count,latency_seconds,prompt_tokens,completion_tokens,tokens_per_second,error
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_01,True,True,0.75,1.0,0,4.404,6416,536,121.701,
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_02,True,True,0.667,1.0,0,4.115,4730,530,128.793,
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_03,True,True,1.0,1.0,8,5.377,2830,787,146.365,
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_04,True,True,0.75,1.0,1,4.898,6399,647,132.099,
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_05,True,True,0.667,1.0,0,5.265,6136,621,117.94,

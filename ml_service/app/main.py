@@ -30,35 +30,7 @@ def generate_issue_plan(payload: IssuePlanRequest) -> IssuePlanResponse:
 @app.post("/recommendations", response_model=RecommendationResponse)
 def generate_recommendations(payload: RecommendationRequest) -> RecommendationResponse:
     return RecommendationResponse(
-        summary=(
-            "Repository analysis found 3 improvement opportunities: one security item, "
-            "one maintainability item, and one performance item. No blocking defects were detected."
-        ),
-        recommendations=[
-            {
-                "severity": "high",
-                "file": "backend/internal/app/server.go",
-                "line": 142,
-                "problem": "Repository identifiers should be validated before they are used in API routes and logs.",
-                "suggestion": "Validate repository ids at the request boundary and keep structured fields separate from log messages.",
-                "confidence": 0.86,
-            },
-            {
-                "severity": "medium",
-                "file": "backend/internal/app/storage.go",
-                "line": 88,
-                "problem": "Recommendation state is stored only in memory, so data is lost after a backend restart.",
-                "suggestion": "Connect the recommendation flow to the PostgreSQL tables from backend/db/schema.sql.",
-                "confidence": 0.78,
-            },
-            {
-                "severity": "low",
-                "file": "README.md",
-                "line": 34,
-                "problem": "The run instructions are correct, but troubleshooting notes are still minimal.",
-                "suggestion": "Add a short troubleshooting section for occupied ports and Docker image pull failures.",
-                "confidence": 0.64,
-            },
-        ],
+        summary="No critical issues detected in the Sprint 1 mock response.",
+        recommendations=[],
     )
 

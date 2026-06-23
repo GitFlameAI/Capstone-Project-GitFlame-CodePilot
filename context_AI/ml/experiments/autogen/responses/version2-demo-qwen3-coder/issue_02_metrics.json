@@ -1,0 +1,13 @@
+{
+  "latency_seconds": 4.725,
+  "prompt_tokens": 5392,
+  "completion_tokens": 589,
+  "tokens_per_second": 124.657,
+  "format_valid": true,
+  "headings_present": 9,
+  "headings_required": 9,
+  "relevant_file_precision": 0.667,
+  "relevant_file_recall": 1.0,
+  "hallucinated_file_count": 0,
+  "hallucinated_files": []
+}

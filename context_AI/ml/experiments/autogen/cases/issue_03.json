@@ -1,0 +1,24 @@
+{
+  "id": "issue_03",
+  "title": "Add snippet limits to the repository AI configuration",
+  "body": "Extend the repository .yml configuration with RAG limits for maximum retrieved files and maximum snippets per file. Validate positive bounds and expose the parsed values to the issue analysis flow. The user must not choose a model or plan format, and allowed_actions must not be part of the public configuration.",
+  "attached_files": [
+    "backend/internal/app/config_service.go",
+    "backend/internal/app/models.go",
+    "backend/models/ai_config.go",
+    "docs/config/ai_config.example.yml"
+  ],
+  "expected_relevant_files": [
+    "backend/internal/app/config_service.go",
+    "backend/internal/app/models.go",
+    "docs/config/ai_config.example.yml"
+  ],
+  "required_points": [
+    "Add max_files and snippets_per_file fields under rag",
+    "Validate both limits with explicit positive upper bounds",
+    "Remove allowed_actions from the public YAML contract",
+    "Keep command behavior as server-side defaults rather than user configuration",
+    "Add parser and validation tests for valid, missing, zero, negative, and oversized values"
+  ]
+}
+

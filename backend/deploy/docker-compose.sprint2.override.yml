@@ -1,4 +1,15 @@
 services:
+  frontend:
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   backend:
     environment:
       AGENT_ENGINE_URL: http://agent-engine:8001
@@ -15,6 +26,20 @@ services:
         condition: service_healthy
       agent-engine:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ml-service:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   agent-worker:
     build:
@@ -62,6 +87,8 @@ services:
       MODEL_MAX_RETRIES: "2"
       RAG_BASE_URL: ${RAG_BASE_URL:-}
       RAG_API_KEY: ${RAG_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3).read()"]
       interval: 10s

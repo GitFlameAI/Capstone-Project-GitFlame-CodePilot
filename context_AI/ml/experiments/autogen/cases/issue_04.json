@@ -1,0 +1,24 @@
+{
+  "id": "issue_04",
+  "title": "Support asynchronous plan generation in the frontend",
+  "body": "Plan generation may take several minutes once real models and the queue are enabled. Update the Work with AI flow so the UI can display queued and processing states, poll for the final plan, stop polling after completion or failure, and allow retry after recoverable errors. Avoid duplicate submissions when the user clicks Generate plan repeatedly.",
+  "attached_files": [
+    "frontend/src/components/IssuePlanPanel.vue",
+    "frontend/src/api/client.js",
+    "frontend/src/api/index.js",
+    "frontend/src/api/mock.js"
+  ],
+  "expected_relevant_files": [
+    "frontend/src/components/IssuePlanPanel.vue",
+    "frontend/src/api/client.js",
+    "frontend/src/api/mock.js"
+  ],
+  "required_points": [
+    "Represent queued, processing, completed, and failed states",
+    "Poll a backend status endpoint with cleanup on unmount",
+    "Prevent duplicate submissions",
+    "Provide retry and actionable failure feedback",
+    "Update the mock API and add component tests for state transitions"
+  ]
+}
+

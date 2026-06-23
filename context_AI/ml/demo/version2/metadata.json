@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-06-21",
+  "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "provider": "scaleway",
+  "api": "Hugging Face Inference Providers",
+  "prompt": "context_AI/ml/autogen_prompt.md",
+  "case": "issue_02",
+  "latency_seconds": 4.725,
+  "prompt_tokens": 5392,
+  "completion_tokens": 589,
+  "tokens_per_second": 124.657,
+  "format_valid": true,
+  "relevant_file_recall": 1.0,
+  "hallucinated_file_count": 0,
+  "response_edited": false
+}

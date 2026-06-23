@@ -1,0 +1,15 @@
+{
+  "latency_seconds": 4.898,
+  "prompt_tokens": 6399,
+  "completion_tokens": 647,
+  "tokens_per_second": 132.099,
+  "format_valid": true,
+  "headings_present": 9,
+  "headings_required": 9,
+  "relevant_file_precision": 0.75,
+  "relevant_file_recall": 1.0,
+  "hallucinated_file_count": 1,
+  "hallucinated_files": [
+    "IssuePlanPanel.vue"
+  ]
+}

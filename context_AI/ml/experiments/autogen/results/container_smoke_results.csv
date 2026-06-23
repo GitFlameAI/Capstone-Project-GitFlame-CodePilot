@@ -1,0 +1,6 @@
+slug,model_id,issue_id,status,loader,runtime_quantization,load_seconds,latency_seconds,prompt_tokens,completion_tokens,tokens_per_second,peak_vram_gb,headings_present,headings_required,format_valid,error
+laguna_xs2,poolside/Laguna-XS.2,issue_02,ok,AutoModelForCausalLM,bnb4,79.292,57.805,5957,639,11.054,61.881,9,9,True,
+north_mini_code,CohereLabs/North-Mini-Code-1.0,issue_02,ok,AutoModelForCausalLM,bnb4,48.418,81.148,5416,1280,15.774,56.771,8,9,False,
+devstral_small_2,mistralai/Devstral-Small-2-24B-Instruct-2512,issue_02,ok,AutoModelForImageTextToText,native,38.756,29.034,5699,658,22.663,46.878,9,9,True,
+mellum2_thinking,JetBrains/Mellum2-12B-A2.5B-Thinking,issue_02,ok,AutoModelForCausalLM,bnb4,40.931,57.924,6746,1280,22.098,23.276,4,9,False,
+qwen36_35b_a3b,Qwen/Qwen3.6-35B-A3B,issue_02,ok,AutoModelForCausalLM,bnb4,62.353,129.355,5901,1280,9.895,63.924,8,9,False,

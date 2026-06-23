@@ -42,6 +42,74 @@ The infrastructure configuration provides Redis 7 through `REDIS_URL=redis://red
 
 PostgreSQL is the authoritative store for issue sessions, plan revisions, correction feedback, agent task attempts and statuses, generated plans, bounded usage metadata, and recommendation retention. Redis is transport only.
 
+## Queue-based architecture Version 2
+
+Version 2 moves model inference out of the backend HTTP request. The Go backend validates the GitFlame payload, stores the session and task in PostgreSQL, and publishes a compact job to Redis Streams. A standalone Agent Worker consumes one job at a time and calls the stateless SERGE-based Agent Engine.
+
+```text
+GitFlame Issue
+      |
+      v
+Go Backend -----> PostgreSQL (authoritative task and plan state)
+      |
+      v
+Redis Streams (queued task transport)
+      |
+      v
+Agent Worker (concurrency 1, timeout and temporary-error retry)
+      |
+      v
+SERGE-based Agent Engine
+      |
+      v
+validated plan.md -> PostgreSQL -> backend task endpoint
+```
+
+Task state follows the persisted lifecycle:
+
+```text
+queued -> processing -> completed
+                     `-> failed
+```
+
+Redis is not the source of truth. Messages are acknowledged after successful or permanently failed processing. Temporary `502`, `503`, and `504` Agent Engine failures are retried up to `WORKER_MAX_RETRIES`; exhausted failures are copied to the dead-letter stream. Queue length is bounded by `AGENT_QUEUE_MAX_LENGTH`.
+
+## Infrastructure artifacts for the weekly report
+
+| Report artifact | Project location |
+| --- | --- |
+| Base Docker Compose | [`docker-compose.yml`](../../../docker-compose.yml) |
+| Sprint 2 Compose override | [`backend/deploy/docker-compose.sprint2.override.yml`](../../deploy/docker-compose.sprint2.override.yml) |
+| Agent Engine Docker image | [`backend/deploy/agent-engine.Dockerfile`](../../deploy/agent-engine.Dockerfile) |
+| Deployment and verification guide | [`infra/README.md`](../../../infra/README.md) |
+| Redis queue contract | [`backend/docs/architecture/redis_job_contract.md`](../architecture/redis_job_contract.md) |
+| Queue/Agent Engine architecture | [`context_AI/architecture/agent_engine.md`](../../../context_AI/architecture/agent_engine.md) |
+
+The Sprint 2 stack is configured with the base file plus the override:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  up -d --build
+```
+
+### Pending evidence
+
+```text
+Missing artifact: docker compose ps screenshot
+Reason: Full Version 2 startup with the selected model runtime has not been performed yet.
+Next step: Capture docker compose ps after all services report running/healthy on the VM.
+
+Missing artifact: infrastructure PR URL
+Reason: The integration branch has not been opened as a pull request yet.
+Next step: Add the PR URL after sprint-2/ruslan-redis-worker is pushed and the PR is created.
+
+Missing artifact: VM URL
+Reason: Version 2 has not been deployed and verified on the university VM yet.
+Next step: Add the verified VM URL after deployment and health checks.
+```
+
 ## Verification
 
 - OpenAPI: `GET /openapi.json`

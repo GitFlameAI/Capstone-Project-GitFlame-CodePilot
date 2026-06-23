@@ -1,0 +1,26 @@
+model,issue_id,format_valid_0_1,file_relevance_1_5,completeness_1_5,hallucinations_1_5,technical_feasibility_1_5,tests_quality_1_5,notes
+Poolside Laguna XS.2,issue_01,,,,,,,
+Poolside Laguna XS.2,issue_02,1,5,5,5,5,5,"Valid strict plan; finds expected files plus relevant server wiring; complete retry, timeout, sanitization, and test coverage."
+Poolside Laguna XS.2,issue_03,,,,,,,
+Poolside Laguna XS.2,issue_04,,,,,,,
+Poolside Laguna XS.2,issue_05,,,,,,,
+Cohere North Mini Code,issue_01,,,,,,,
+Cohere North Mini Code,issue_02,0,5,4,4,4,5,"Finds relevant files and gives strong technical reasoning, but starts with prose and misses strict plan format."
+Cohere North Mini Code,issue_03,,,,,,,
+Cohere North Mini Code,issue_04,,,,,,,
+Cohere North Mini Code,issue_05,,,,,,,
+Devstral Small 2,issue_01,,,,,,,
+Devstral Small 2,issue_02,1,5,4,5,4,4,"Valid plan and fastest output; relevant files are correct, but the plan is less detailed than Laguna/Qwen."
+Devstral Small 2,issue_03,,,,,,,
+Devstral Small 2,issue_04,,,,,,,
+Devstral Small 2,issue_05,,,,,,,
+Mellum2 12B Thinking,issue_01,,,,,,,
+Mellum2 12B Thinking,issue_02,0,5,3,4,3,2,"Relevant reasoning is present, but Thinking output breaks format and never becomes a clean final plan."
+Mellum2 12B Thinking,issue_03,,,,,,,
+Mellum2 12B Thinking,issue_04,,,,,,,
+Mellum2 12B Thinking,issue_05,,,,,,,
+Qwen3.6-35B-A3B,issue_01,,,,,,,
+Qwen3.6-35B-A3B,issue_02,0,5,5,5,5,5,"Very complete and technically feasible plan, but invalid strict format because it starts with reasoning before plan sections."
+Qwen3.6-35B-A3B,issue_03,,,,,,,
+Qwen3.6-35B-A3B,issue_04,,,,,,,
+Qwen3.6-35B-A3B,issue_05,,,,,,,

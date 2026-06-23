@@ -1,0 +1,2 @@
+model,issue_id,success,format_valid,relevant_file_precision,relevant_file_recall,hallucinated_file_count,latency_seconds,prompt_tokens,completion_tokens,tokens_per_second,error
+Qwen/Qwen3-Coder-30B-A3B-Instruct:scaleway,issue_02,True,True,0.667,1.0,0,4.725,5392,589,124.657,
