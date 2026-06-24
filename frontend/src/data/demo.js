@@ -7,6 +7,7 @@ export const demoRepo = {
   owner: 'tiroro-20-10',
   name: 'test',
   defaultBranch: 'main',
+  commitSha: 'a1b2c3d4e5f6',
   webUrl: 'https://gitflametest.ru/tiroro-20-10/test',
   description: 'AI integration sandbox repository for GitFlame CodePilot.',
   branches: ['main', 'develop', 'ai/experiments'],
@@ -14,12 +15,24 @@ export const demoRepo = {
   stars: 12,
   forks: 3,
   lastCommit: {
-    message: 'Add issue workflow endpoints and mock Git workflow',
+    message: 'Add async agent tasks and Redis-backed plan generation',
     author: 'artur',
     hash: 'a1b2c3d',
     when: '2 days ago',
   },
 }
+
+// Repository context (relevant file paths) sent with an issue so the Agent Engine
+// can retrieve and reason over them via RAG. The backend treats these as the
+// `repository_context` field (file paths). The user can edit this list in the
+// "Work on an issue" form before generating a plan.
+export const defaultRepositoryContext = [
+  'backend/internal/httpapi/server.go',
+  'backend/internal/service/workflow.go',
+  'backend/internal/repository/postgres.go',
+  'backend/internal/domain/domain.go',
+  'README.md',
+]
 
 // File listing for the Code tab (icon: 'dir' | 'file').
 export const demoFiles = [

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, ApiError, USING_MOCK } from '../api/index.js'
-import { demoRepo, defaultYaml } from '../data/demo.js'
+import { demoRepo, defaultYaml, defaultRepositoryContext } from '../data/demo.js'
 import GfIcon from './ui/GfIcon.vue'
 import GfButton from './ui/GfButton.vue'
 import GfSpinner from './ui/GfSpinner.vue'
@@ -55,10 +55,11 @@ async function runAnalysis() {
         id: demoRepo.id,
         name: demoRepo.name,
         default_branch: demoRepo.defaultBranch,
+        commit_sha: demoRepo.commitSha,
         web_url: demoRepo.webUrl,
       },
       yaml_config: defaultYaml,
-      repository_context: demoRepo.branches,
+      repository_context: defaultRepositoryContext,
     })
     await load()
   } catch (e) {
