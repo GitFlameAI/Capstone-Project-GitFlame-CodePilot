@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS issue_sessions (
             'processing',
             'plan_generated',
             'approved',
+            'code_generation_queued',
+            'code_generation_processing',
+            'code_generated',
             'correction_requested',
             'rejected',
             'failed'
@@ -88,6 +91,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
         task_type IN (
             'initial_plan',
             'plan_revision',
+            'code_generation',
             'recommendation_analysis'
         )
     ),

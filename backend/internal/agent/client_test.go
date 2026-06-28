@@ -59,3 +59,27 @@ func TestGeneratePlanPreservesSupportedAgentStatus(t *testing.T) {
 		t.Fatalf("unexpected error: %#v", err)
 	}
 }
+
+func TestGenerateFilesUsesSprint3Contract(t *testing.T) {
+	client := NewClient("http://agent-engine:8001/", time.Second)
+	client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost || req.URL.Path != "/v1/files/generate" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		body, _ := io.ReadAll(req.Body)
+		text := string(body)
+		for _, expected := range []string{`"request_id":"codegen-1"`, `"approved_plan_markdown"`, `"configuration_yaml"`, `"repository_files"`} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("request body misses %s: %s", expected, text)
+			}
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"request_id":"codegen-1","status":"completed","summary":"ok","files":[{"action":"modify","path":"main.go","content":"package main\n","diff":"@@\n","explanation":"Updates main."}],"model":"test-codegen","usage":{"total_tokens":12}}`)), Header: make(http.Header)}, nil
+	})
+	result, err := client.GenerateFiles(context.Background(), domain.AgentCodeGenerationRequest{RequestID: "codegen-1", ApprovedPlanMarkdown: "# Implementation Plan", ConfigurationYAML: "version: 1", RepositoryFiles: []domain.RepositoryFile{{Path: "main.go", Content: "package main"}}})
+	if err != nil || result.Summary != "ok" || len(result.Files) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.Files[0].Action != "modify" || result.Usage.TotalTokens != 12 {
+		t.Fatalf("Agent Engine generated files metadata was not decoded: %+v", result)
+	}
+}

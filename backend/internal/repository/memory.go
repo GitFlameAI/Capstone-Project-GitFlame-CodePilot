@@ -164,6 +164,11 @@ func cloneSession(v *domain.IssueSession) *domain.IssueSession {
 	c.Request.RepositoryFiles = append([]domain.RepositoryFile(nil), v.Request.RepositoryFiles...)
 	c.Request.RepositoryContext = append([]string(nil), v.Request.RepositoryContext...)
 	c.FeedbackHistory = append([]string(nil), v.FeedbackHistory...)
+	if v.GeneratedFiles != nil {
+		generated := *v.GeneratedFiles
+		generated.Files = append([]domain.GeneratedFileOperation(nil), v.GeneratedFiles.Files...)
+		c.GeneratedFiles = &generated
+	}
 	return &c
 }
 func cloneTask(v *domain.AgentTask) *domain.AgentTask {

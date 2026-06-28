@@ -34,14 +34,34 @@ Each task stream entry contains one `job` field with JSON:
 }
 ```
 
-`type` is `initial_plan` or `plan_revision`. `request_id` must equal `task_id`.
+For Sprint 3, `type` is `initial_plan`, `plan_revision`, or `code_generation`. Plan tasks use
+`request`; code-generation tasks use `code_generation_request`:
+
+```json
+{
+  "task_id": "uuid",
+  "session_id": "uuid",
+  "type": "code_generation",
+  "attempt": 1,
+  "code_generation_request": {
+    "request_id": "uuid",
+    "issue": {},
+    "repository": {},
+    "approved_plan_markdown": "# Implementation Plan\n...",
+    "configuration_yaml": "version: 1\n",
+    "repository_files": []
+  }
+}
+```
+
+`request_id` must equal `task_id`.
 
 ## Delivery rules
 
 1. Backend persists the session and `queued` task in PostgreSQL.
 2. Backend publishes the job with `XADD`.
 3. Worker consumes with `XREADGROUP` and changes the persisted state to `processing`.
-4. Worker calls Agent Engine, validates `plan.md`, and persists either `completed` or `failed`.
+4. Worker calls Agent Engine, validates `plan.md` or generated file operations, and persists either `completed` or `failed`.
 5. Worker acknowledges successful or permanently failed messages with `XACK`.
 6. HTTP `502`, `503`, and `504` errors are retried up to `WORKER_MAX_RETRIES`.
 7. Permanent failures and exhausted retries are copied to the dead-letter stream before acknowledgement.

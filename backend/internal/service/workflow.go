@@ -16,11 +16,11 @@ import (
 
 type Workflow struct {
 	store     repository.Store
-	generator agent.PlanGenerator
+	generator agent.Generator
 	broker    queue.Broker
 }
 
-func NewWorkflow(store repository.Store, generator agent.PlanGenerator) *Workflow {
+func NewWorkflow(store repository.Store, generator agent.Generator) *Workflow {
 	return &Workflow{store: store, generator: generator}
 }
 
@@ -49,7 +49,7 @@ func (w *Workflow) Analyze(req domain.IssueAnalyzeRequest) (*domain.IssueSession
 			return nil, nil, err
 		}
 	}
-	task, err := w.store.CreateTask(session.ID, req.Issue.ID, "initial_plan")
+	task, err := w.store.CreateTask(session.ID, req.Issue.ID, domain.TaskInitialPlan)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,7 +76,7 @@ func (w *Workflow) Correct(issueID, feedback string) (*domain.AgentTask, error) 
 	if err := w.store.UpdateSession(session); err != nil {
 		return nil, err
 	}
-	task, err := w.store.CreateTask(session.ID, session.Request.Issue.ID, "plan_revision")
+	task, err := w.store.CreateTask(session.ID, session.Request.Issue.ID, domain.TaskPlanRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -108,12 +108,12 @@ func (w *Workflow) Retry(taskID string) (*domain.AgentTask, error) {
 	if err := w.store.UpdateTask(task); err != nil {
 		return nil, err
 	}
-	session.Status = domain.SessionGenerating
+	session.Status = queuedStatusForTask(failed.Type)
 	if err := w.store.UpdateSession(session); err != nil {
 		return nil, err
 	}
 	var previousPlan, feedback *string
-	if failed.Type == "plan_revision" {
+	if failed.Type == domain.TaskPlanRevision {
 		previous := session.PlanMarkdown
 		previousPlan = &previous
 		if len(session.FeedbackHistory) > 0 {
@@ -122,6 +122,10 @@ func (w *Workflow) Retry(taskID string) (*domain.AgentTask, error) {
 		}
 	}
 	job := domain.AgentJob{TaskID: task.ID, SessionID: session.ID, Type: task.Type, Attempt: task.Attempt, Request: agentRequest(task.ID, session, previousPlan, feedback)}
+	if failed.Type == domain.TaskCodeGeneration {
+		job.Request = domain.AgentPlanRequest{}
+		job.CodeGenerationRequest = codeGenerationRequest(task.ID, session)
+	}
 	if err := w.dispatch(job); err != nil {
 		return nil, err
 	}
@@ -161,10 +165,17 @@ func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
 	if err != nil {
 		return err
 	}
-	session.Status = domain.SessionProcessing
+	session.Status = processingStatusForTask(task.Type)
 	if err := w.store.UpdateSession(session); err != nil {
 		return err
 	}
+	if task.Type == domain.TaskCodeGeneration {
+		return w.executeCodeGenerationTask(ctx, task, session, job)
+	}
+	return w.executePlanTask(ctx, task, session, job)
+}
+
+func (w *Workflow) executePlanTask(ctx context.Context, task *domain.AgentTask, session *domain.IssueSession, job domain.AgentJob) error {
 	result, err := w.generator.GeneratePlan(ctx, job.Request)
 	if err != nil {
 		_ = w.failTask(job.TaskID, err)
@@ -202,6 +213,51 @@ func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
 	return w.store.UpdateSession(session)
 }
 
+func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.AgentTask, session *domain.IssueSession, job domain.AgentJob) error {
+	request := job.CodeGenerationRequest
+	if request.RequestID == "" {
+		request = codeGenerationRequest(task.ID, session)
+	}
+	result, err := w.generator.GenerateFiles(ctx, request)
+	if err != nil {
+		_ = w.failTask(job.TaskID, err)
+		return err
+	}
+	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
+		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
+		_ = w.failTask(job.TaskID, invalid)
+		return invalid
+	}
+	for index := range result.Files {
+		result.Files[index].Path = normalizePlanPath(result.Files[index].Path)
+		result.Files[index].Status = "valid"
+	}
+	contract := branchPRPayload(session)
+	contract.RequestID = result.RequestID
+	contract.TaskID = task.ID
+	contract.Summary = result.Summary
+	contract.Files = result.Files
+
+	task.Status = domain.TaskCompleted
+	task.Model = result.Model
+	task.Usage = result.Usage
+	task.ToolExecutionSummary = fmt.Sprintf(
+		"model=%s; file_operations=%d; prompt_tokens=%d; completion_tokens=%d; total_tokens=%d; reasoning_chars=%d; generation_seconds=%.3f",
+		result.Model, len(result.Files), result.Usage.PromptTokens, result.Usage.CompletionTokens,
+		result.Usage.TotalTokens, result.Usage.ReasoningChars, result.Usage.GenerationTimeSeconds,
+	)
+	if err := w.store.UpdateTask(task); err != nil {
+		return err
+	}
+	session, err = w.store.Session(task.SessionID)
+	if err != nil {
+		return err
+	}
+	session.GeneratedFiles = &contract
+	session.Status = domain.SessionCodeGenerated
+	return w.store.UpdateSession(session)
+}
+
 func (w *Workflow) RetryTask(job domain.AgentJob) error {
 	task, err := w.store.Task(job.TaskID)
 	if err != nil {
@@ -216,7 +272,7 @@ func (w *Workflow) RetryTask(job domain.AgentJob) error {
 	if err != nil {
 		return err
 	}
-	session.Status = domain.SessionGenerating
+	session.Status = queuedStatusForTask(task.Type)
 	return w.store.UpdateSession(session)
 }
 
@@ -241,26 +297,33 @@ func (w *Workflow) failTask(taskID string, cause error) error {
 func (w *Workflow) Task(id string) (*domain.AgentTask, error)       { return w.store.Task(id) }
 func (w *Workflow) Session(id string) (*domain.IssueSession, error) { return w.store.Session(id) }
 
-func (w *Workflow) Approve(issueID string) (*domain.IssueSession, error) {
+func (w *Workflow) Approve(issueID string) (*domain.IssueSession, *domain.AgentTask, error) {
 	session, err := w.store.Session(issueID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if session.Status != domain.SessionPlanGenerated {
-		return nil, fmt.Errorf("plan cannot be approved while session status is %s", session.Status)
+		return nil, nil, fmt.Errorf("plan cannot be approved while session status is %s", session.Status)
 	}
-	slug := regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(strings.ToLower(session.Request.Issue.Title), "-")
-	slug = strings.Trim(slug, "-")
-	if len(slug) > 40 {
-		slug = slug[:40]
-	}
-	branch := session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug
-	session.GeneratedFiles = &domain.GeneratedFilesContract{BranchName: branch, Files: []domain.GeneratedFileOperation{}, CommitMessage: "Implement " + session.Request.Issue.Title, PRTitle: session.Request.Issue.Title, Reviewer: session.Request.Issue.Author}
+	contract := branchPRPayload(session)
+	session.GeneratedFiles = &contract
 	session.Status = domain.SessionApproved
 	if err := w.store.UpdateSession(session); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return session, nil
+	task, err := w.store.CreateTask(session.ID, session.Request.Issue.ID, domain.TaskCodeGeneration)
+	if err != nil {
+		return nil, nil, err
+	}
+	session.Status = domain.SessionCodeGenerationQueued
+	if err := w.store.UpdateSession(session); err != nil {
+		return nil, nil, err
+	}
+	job := domain.AgentJob{TaskID: task.ID, SessionID: session.ID, Type: task.Type, Attempt: 1, CodeGenerationRequest: codeGenerationRequest(task.ID, session)}
+	if err := w.dispatch(job); err != nil {
+		return nil, nil, err
+	}
+	return session, task, nil
 }
 
 func (w *Workflow) Reject(issueID string) (*domain.IssueSession, error) {
@@ -268,7 +331,8 @@ func (w *Workflow) Reject(issueID string) (*domain.IssueSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	if session.Status == domain.SessionApproved {
+	if session.Status == domain.SessionApproved || session.Status == domain.SessionCodeGenerationQueued ||
+		session.Status == domain.SessionCodeGenerationProcessing || session.Status == domain.SessionCodeGenerated {
 		return nil, errors.New("approved plan cannot be rejected")
 	}
 	session.Status = domain.SessionRejected
@@ -292,6 +356,56 @@ func agentRequest(taskID string, session *domain.IssueSession, previousPlan, fee
 		ConfigurationYAML: session.Config.Raw,
 		RepositoryFiles:   files, PreviousPlan: previousPlan, CorrectionFeedback: feedback,
 	}
+}
+
+func codeGenerationRequest(taskID string, session *domain.IssueSession) domain.AgentCodeGenerationRequest {
+	files := append([]domain.RepositoryFile(nil), session.Request.RepositoryFiles...)
+	if len(files) == 0 {
+		for _, path := range session.Request.RepositoryContext {
+			files = append(files, domain.RepositoryFile{Path: path})
+		}
+	}
+	return domain.AgentCodeGenerationRequest{
+		RequestID:            taskID,
+		Issue:                domain.AgentIssue{ID: session.Request.Issue.ID, Title: session.Request.Issue.Title, Body: session.Request.Issue.Body},
+		Repository:           domain.AgentRepository{ID: session.Request.Repository.ID, DefaultBranch: session.Request.Repository.DefaultBranch, CommitSHA: session.Request.Repository.CommitSHA},
+		ApprovedPlanMarkdown: session.PlanMarkdown,
+		ConfigurationYAML:    session.Config.Raw,
+		RepositoryFiles:      files,
+	}
+}
+
+func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract {
+	slug := regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(strings.ToLower(session.Request.Issue.Title), "-")
+	slug = strings.Trim(slug, "-")
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	if slug == "" {
+		slug = "issue"
+	}
+	branch := session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug
+	return domain.GeneratedFilesContract{
+		BranchName:    branch,
+		Files:         []domain.GeneratedFileOperation{},
+		CommitMessage: "Implement " + session.Request.Issue.Title,
+		PRTitle:       session.Request.Issue.Title,
+		Reviewer:      session.Request.Issue.Author,
+	}
+}
+
+func queuedStatusForTask(taskType string) string {
+	if taskType == domain.TaskCodeGeneration {
+		return domain.SessionCodeGenerationQueued
+	}
+	return domain.SessionGenerating
+}
+
+func processingStatusForTask(taskType string) string {
+	if taskType == domain.TaskCodeGeneration {
+		return domain.SessionCodeGenerationProcessing
+	}
+	return domain.SessionProcessing
 }
 
 func ValidateAnalyze(v domain.IssueAnalyzeRequest) error {
@@ -338,6 +452,60 @@ func validateRepositoryFiles(files []domain.RepositoryFile) error {
 			return fmt.Errorf("repository_files contains duplicate path %q", normalized)
 		}
 		seen[normalized] = struct{}{}
+	}
+	return nil
+}
+
+func ValidateGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) error {
+	if len(files) == 0 {
+		return errors.New("generated files response must contain at least one file operation")
+	}
+	if len(files) > 500 {
+		return errors.New("generated files response cannot contain more than 500 file operations")
+	}
+	existing := make(map[string]struct{}, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		existing[normalizePlanPath(file.Path)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		filePath := normalizePlanPath(file.Path)
+		if !safePlanPath(filePath) {
+			return fmt.Errorf("generated file contains unsafe path: %s", file.Path)
+		}
+		if _, exists := seen[filePath]; exists {
+			return fmt.Errorf("generated files response contains duplicate path: %s", filePath)
+		}
+		seen[filePath] = struct{}{}
+		if strings.TrimSpace(file.Explanation) == "" {
+			return fmt.Errorf("generated file %s must include an explanation", filePath)
+		}
+		_, alreadyExists := existing[filePath]
+		switch file.Action {
+		case "create":
+			if alreadyExists {
+				return fmt.Errorf("create operation targets an existing file: %s", filePath)
+			}
+			if strings.TrimSpace(file.Content) == "" {
+				return fmt.Errorf("create operation for %s requires non-empty content", filePath)
+			}
+		case "modify":
+			if !alreadyExists {
+				return fmt.Errorf("modify operation targets an unavailable file: %s", filePath)
+			}
+			if strings.TrimSpace(file.Content) == "" {
+				return fmt.Errorf("modify operation for %s requires non-empty content", filePath)
+			}
+		case "delete":
+			if !alreadyExists {
+				return fmt.Errorf("delete operation targets an unavailable file: %s", filePath)
+			}
+			if file.Content != "" || file.Diff != "" {
+				return fmt.Errorf("delete operation for %s must not include content or diff", filePath)
+			}
+		default:
+			return fmt.Errorf("generated file %s has unsupported action %q", filePath, file.Action)
+		}
 	}
 	return nil
 }

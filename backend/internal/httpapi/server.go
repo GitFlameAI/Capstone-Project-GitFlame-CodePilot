@@ -47,7 +47,7 @@ func New(cfg config.Config) (*Server, error) {
 	}
 	return newServer(service.NewWorkflow(store, engine), store, checks), nil
 }
-func NewWithDependencies(store repository.Store, generator agent.PlanGenerator) *Server {
+func NewWithDependencies(store repository.Store, generator agent.Generator) *Server {
 	return newServer(service.NewWorkflow(store, generator), store, map[string]func(context.Context) error{"storage": store.Ping})
 }
 
@@ -65,6 +65,7 @@ func newServer(workflow *service.Workflow, store repository.Store, checks map[st
 	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
 	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
 	mux.HandleFunc("POST /ai/issues/{id}/approve", s.approve)
+	mux.HandleFunc("GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
 	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
 	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
 	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
@@ -137,18 +138,19 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 }
 
 type taskResponse struct {
-	TaskID               string                `json:"task_id"`
-	SessionID            string                `json:"session_id"`
-	IssueID              string                `json:"issue_id"`
-	Type                 string                `json:"type"`
-	Status               string                `json:"status"`
-	Attempt              int                   `json:"attempt"`
-	PlanMarkdown         string                `json:"plan_markdown,omitempty"`
-	ToolExecutionSummary string                `json:"tool_execution_summary,omitempty"`
-	RelevantFiles        []domain.RelevantFile `json:"relevant_files,omitempty"`
-	Model                string                `json:"model,omitempty"`
-	Usage                domain.AgentUsage     `json:"usage,omitempty"`
-	Error                *domain.TaskError     `json:"error,omitempty"`
+	TaskID               string                         `json:"task_id"`
+	SessionID            string                         `json:"session_id"`
+	IssueID              string                         `json:"issue_id"`
+	Type                 string                         `json:"type"`
+	Status               string                         `json:"status"`
+	Attempt              int                            `json:"attempt"`
+	PlanMarkdown         string                         `json:"plan_markdown,omitempty"`
+	ToolExecutionSummary string                         `json:"tool_execution_summary,omitempty"`
+	RelevantFiles        []domain.RelevantFile          `json:"relevant_files,omitempty"`
+	Model                string                         `json:"model,omitempty"`
+	Usage                domain.AgentUsage              `json:"usage,omitempty"`
+	Error                *domain.TaskError              `json:"error,omitempty"`
+	GeneratedFiles       *domain.GeneratedFilesContract `json:"generated_files_contract,omitempty"`
 }
 
 func (s *Server) task(w http.ResponseWriter, r *http.Request) {
@@ -157,11 +159,17 @@ func (s *Server) task(w http.ResponseWriter, r *http.Request) {
 		resourceError(w, err, "task_not_found", "agent task was not found")
 		return
 	}
-	write(w, 200, taskResponse{
+	response := taskResponse{
 		TaskID: v.ID, SessionID: v.SessionID, IssueID: v.IssueID, Type: v.Type,
 		Status: v.Status, Attempt: v.Attempt, PlanMarkdown: v.PlanMarkdown, ToolExecutionSummary: v.ToolExecutionSummary,
 		RelevantFiles: v.RelevantFiles, Model: v.Model, Usage: v.Usage, Error: v.Error,
-	})
+	}
+	if v.Type == domain.TaskCodeGeneration {
+		if session, err := s.workflow.Session(v.SessionID); err == nil {
+			response.GeneratedFiles = session.GeneratedFiles
+		}
+	}
+	write(w, 200, response)
 }
 
 func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
@@ -206,12 +214,34 @@ type actionResponse struct {
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
-	v, err := s.workflow.Approve(r.PathValue("id"))
+	v, task, err := s.workflow.Approve(r.PathValue("id"))
 	if err != nil {
 		workflowError(w, err)
 		return
 	}
-	write(w, 200, actionResponse{SessionID: v.ID, IssueID: v.Request.Issue.ID, Status: v.Status, Message: "Plan approved. Contract is ready for a future code-generation worker.", GeneratedFiles: v.GeneratedFiles})
+	write(w, http.StatusAccepted, actionResponse{SessionID: v.ID, IssueID: v.Request.Issue.ID, Status: v.Status, Message: "Plan approved. Code generation task queued.", TaskID: task.ID, StatusURL: "/ai/issues/" + v.Request.Issue.ID + "/code-generation", GeneratedFiles: v.GeneratedFiles})
+}
+
+func (s *Server) codeGenerationStatus(w http.ResponseWriter, r *http.Request) {
+	session, err := s.workflow.Session(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "session_not_found", "issue session was not found")
+		return
+	}
+	task, err := s.store.LatestTask(session.ID)
+	if err != nil {
+		resourceError(w, err, "task_not_found", "code generation task was not found")
+		return
+	}
+	if task.Type != domain.TaskCodeGeneration {
+		problem(w, http.StatusConflict, "code_generation_not_started", "code generation has not been queued for this issue")
+		return
+	}
+	write(w, 200, taskResponse{
+		TaskID: task.ID, SessionID: task.SessionID, IssueID: task.IssueID, Type: task.Type,
+		Status: task.Status, Attempt: task.Attempt, ToolExecutionSummary: task.ToolExecutionSummary,
+		Model: task.Model, Usage: task.Usage, Error: task.Error, GeneratedFiles: session.GeneratedFiles,
+	})
 }
 func (s *Server) correct(w http.ResponseWriter, r *http.Request) {
 	var req struct {

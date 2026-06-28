@@ -2,19 +2,20 @@
 
 The backend service exposes GitFlame integration endpoints, validates repository configuration, stores workflow state, and communicates with Agent Engine.
 
-Current Sprint 2 Go backend includes:
+Current Sprint 3 Go backend includes:
 
 - `GET /health`
 - `GET /ready` with storage, Redis, and Agent Engine dependency checks
 - OpenAPI contract at `GET /openapi.json`
 - Swagger UI at `GET /swagger/` and `GET /docs`
-- asynchronous SERGE-based Agent Engine integration through `POST /v1/plans/generate`
+- asynchronous Agent Engine integration through `POST /v1/plans/generate` and `POST /v1/files/generate`
 - issue workflow endpoints:
   - `POST /integrations/gitflame/issues/analyze`
   - `GET /ai/tasks/{taskId}`
   - `POST /ai/tasks/{taskId}/retry`
   - `GET /ai/issues/{id}/plan`
   - `POST /ai/issues/{id}/approve`
+  - `GET /ai/issues/{id}/code-generation`
   - `POST /ai/issues/{id}/correct`
   - `POST /ai/issues/{id}/reject`
 - recommendation endpoints:
@@ -27,7 +28,7 @@ Current Sprint 2 Go backend includes:
 - asynchronous task states: `queued`, `processing`, `completed`, and `failed`
 - correction requests that send both the previous plan and user feedback to Agent Engine
 - Agent Engine error mapping for `400`, `404`, `422`, `502`, `503`, and `504`
-- generated-files contract prepared on approval for future code generation
+- code-generation task queued after approval with generated file operations and a GitFlame branch/commit/PR payload
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations
 - Redis Streams broker with consumer groups, retry, queue limit, acknowledgement, and dead-letter handling
 - standalone `cmd/agent-worker` with concurrency `1`
@@ -126,4 +127,5 @@ db                      SQL schema and verification scripts
 ```
 
 See [`docs/architecture/backend.md`](docs/architecture/backend.md) for the boundaries and request flow.
+Sprint 3 backend report material is in [`docs/report/backend_version_3.md`](docs/report/backend_version_3.md).
 The Redis payload and delivery rules are documented in [`docs/architecture/redis_job_contract.md`](docs/architecture/redis_job_contract.md).

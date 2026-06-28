@@ -23,6 +23,10 @@ func TestDatabaseSchemaContainsBackendWorkerContract(t *testing.T) {
 		"usage_json JSONB",
 		"'initial_plan'",
 		"'plan_revision'",
+		"'code_generation'",
+		"'code_generation_queued'",
+		"'code_generation_processing'",
+		"'code_generated'",
 		"retention_days INTEGER",
 		"expires_at TIMESTAMPTZ",
 	} {

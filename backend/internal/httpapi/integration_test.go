@@ -17,9 +17,11 @@ import (
 )
 
 type fakeGenerator struct {
-	mu       sync.Mutex
-	requests []domain.AgentPlanRequest
-	err      error
+	mu           sync.Mutex
+	requests     []domain.AgentPlanRequest
+	fileRequests []domain.AgentCodeGenerationRequest
+	err          error
+	fileErr      error
 }
 
 func (f *fakeGenerator) GeneratePlan(_ context.Context, req domain.AgentPlanRequest) (domain.AgentPlanResponse, error) {
@@ -60,6 +62,29 @@ Expose observable generation state.
 - TBD.
 `
 	return domain.AgentPlanResponse{RequestID: req.RequestID, Status: domain.TaskCompleted, PlanMarkdown: plan, Model: "test-model", Usage: domain.AgentUsage{ToolCalls: 2}}, nil
+}
+
+func (f *fakeGenerator) GenerateFiles(_ context.Context, req domain.AgentCodeGenerationRequest) (domain.AgentGeneratedFilesResponse, error) {
+	f.mu.Lock()
+	f.fileRequests = append(f.fileRequests, req)
+	f.mu.Unlock()
+	if f.fileErr != nil {
+		return domain.AgentGeneratedFilesResponse{}, f.fileErr
+	}
+	return domain.AgentGeneratedFilesResponse{
+		RequestID: req.RequestID,
+		Status:    domain.TaskCompleted,
+		Summary:   "Generated test file operations.",
+		Files: []domain.GeneratedFileOperation{{
+			Action:      "modify",
+			Path:        req.RepositoryFiles[0].Path,
+			Content:     "package httpapi\n// updated",
+			Diff:        "@@\n+// updated\n",
+			Explanation: "Applies the approved plan.",
+		}},
+		Model: "test-codegen-model",
+		Usage: domain.AgentUsage{TotalTokens: 42},
+	}, nil
 }
 
 func TestIssueToPlanCorrectionAndApprovalFlow(t *testing.T) {
@@ -107,9 +132,26 @@ func TestIssueToPlanCorrectionAndApprovalFlow(t *testing.T) {
 	generator.mu.Unlock()
 
 	approve := request(t, server.Router(), http.MethodPost, "/ai/issues/42/approve", "")
-	if approve.Code != http.StatusOK || !strings.Contains(approve.Body.String(), `"generated_files_contract"`) || !strings.Contains(approve.Body.String(), `"reviewer":"artur"`) {
+	if approve.Code != http.StatusAccepted || !strings.Contains(approve.Body.String(), `"generated_files_contract"`) || !strings.Contains(approve.Body.String(), `"reviewer":"artur"`) || !strings.Contains(approve.Body.String(), `"task_id"`) {
 		t.Fatalf("approve response = %d: %s", approve.Code, approve.Body.String())
 	}
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	codegenTask := waitTask(t, server.Router(), approved.TaskID)
+	if codegenTask.Status != domain.TaskCompleted || codegenTask.GeneratedFiles == nil || len(codegenTask.GeneratedFiles.Files) != 1 {
+		t.Fatalf("unexpected code generation task: %+v", codegenTask)
+	}
+	status := request(t, server.Router(), http.MethodGet, "/ai/issues/42/code-generation", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"type":"code_generation"`) || !strings.Contains(status.Body.String(), `"action":"modify"`) {
+		t.Fatalf("code generation status = %d: %s", status.Code, status.Body.String())
+	}
+	generator.mu.Lock()
+	if len(generator.fileRequests) != 1 || generator.fileRequests[0].ApprovedPlanMarkdown == "" {
+		t.Fatalf("code generation request did not include approved plan: %+v", generator.fileRequests)
+	}
+	generator.mu.Unlock()
 }
 
 func TestAgentEngineErrorIsStoredOnTask(t *testing.T) {
@@ -152,8 +194,11 @@ func TestValidationAndOpenAPI(t *testing.T) {
 	spec := request(t, server.Router(), http.MethodGet, "/openapi.json", "")
 	var document map[string]any
 	decodeResponse(t, spec, &document)
-	if document["openapi"] != "3.0.3" || !strings.Contains(spec.Body.String(), "/ai/tasks/{taskId}") || !strings.Contains(spec.Body.String(), `"/ready"`) {
-		t.Fatal("Sprint 2 task endpoint is missing from OpenAPI")
+	if document["openapi"] != "3.0.3" || !strings.Contains(spec.Body.String(), "/ai/tasks/{taskId}") ||
+		!strings.Contains(spec.Body.String(), "/ai/issues/{id}/code-generation") ||
+		!strings.Contains(spec.Body.String(), `"code_generation"`) ||
+		!strings.Contains(spec.Body.String(), `"/ready"`) {
+		t.Fatal("Sprint 3 task endpoint is missing from OpenAPI")
 	}
 }
 

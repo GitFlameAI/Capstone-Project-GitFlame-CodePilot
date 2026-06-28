@@ -8,13 +8,20 @@ const (
 	TaskCompleted  = "completed"
 	TaskFailed     = "failed"
 
-	SessionGenerating          = "queued"
-	SessionProcessing          = "processing"
-	SessionPlanGenerated       = "plan_generated"
-	SessionApproved            = "approved"
-	SessionCorrectionRequested = "correction_requested"
-	SessionRejected            = "rejected"
-	SessionFailed              = "failed"
+	SessionGenerating               = "queued"
+	SessionProcessing               = "processing"
+	SessionPlanGenerated            = "plan_generated"
+	SessionApproved                 = "approved"
+	SessionCodeGenerationQueued     = "code_generation_queued"
+	SessionCodeGenerationProcessing = "code_generation_processing"
+	SessionCodeGenerated            = "code_generated"
+	SessionCorrectionRequested      = "correction_requested"
+	SessionRejected                 = "rejected"
+	SessionFailed                   = "failed"
+
+	TaskInitialPlan    = "initial_plan"
+	TaskPlanRevision   = "plan_revision"
+	TaskCodeGeneration = "code_generation"
 )
 
 type RepositoryMetadata struct {
@@ -81,11 +88,12 @@ type AgentTask struct {
 }
 
 type AgentJob struct {
-	TaskID    string           `json:"task_id"`
-	SessionID string           `json:"session_id"`
-	Type      string           `json:"type"`
-	Attempt   int              `json:"attempt"`
-	Request   AgentPlanRequest `json:"request"`
+	TaskID                string                     `json:"task_id"`
+	SessionID             string                     `json:"session_id"`
+	Type                  string                     `json:"type"`
+	Attempt               int                        `json:"attempt"`
+	Request               AgentPlanRequest           `json:"request,omitempty"`
+	CodeGenerationRequest AgentCodeGenerationRequest `json:"code_generation_request,omitempty"`
 }
 
 type TaskError struct {
@@ -111,6 +119,24 @@ type AgentPlanResponse struct {
 	RelevantFiles []RelevantFile `json:"relevant_files"`
 	Model         string         `json:"model"`
 	Usage         AgentUsage     `json:"usage"`
+}
+
+type AgentCodeGenerationRequest struct {
+	RequestID            string           `json:"request_id"`
+	Issue                AgentIssue       `json:"issue"`
+	Repository           AgentRepository  `json:"repository"`
+	ApprovedPlanMarkdown string           `json:"approved_plan_markdown"`
+	ConfigurationYAML    string           `json:"configuration_yaml"`
+	RepositoryFiles      []RepositoryFile `json:"repository_files"`
+}
+
+type AgentGeneratedFilesResponse struct {
+	RequestID string                   `json:"request_id"`
+	Status    string                   `json:"status"`
+	Summary   string                   `json:"summary"`
+	Files     []GeneratedFileOperation `json:"files"`
+	Model     string                   `json:"model"`
+	Usage     AgentUsage               `json:"usage"`
 }
 
 type AgentIssue struct {
@@ -141,6 +167,9 @@ type AgentUsage struct {
 }
 
 type GeneratedFilesContract struct {
+	RequestID     string                   `json:"request_id,omitempty"`
+	TaskID        string                   `json:"task_id,omitempty"`
+	Summary       string                   `json:"summary,omitempty"`
 	BranchName    string                   `json:"branch_name"`
 	Files         []GeneratedFileOperation `json:"files"`
 	CommitMessage string                   `json:"commit_message"`
@@ -149,9 +178,13 @@ type GeneratedFilesContract struct {
 }
 
 type GeneratedFileOperation struct {
-	Path      string `json:"path"`
-	Operation string `json:"operation"`
-	Content   string `json:"content,omitempty"`
+	Action          string `json:"action"`
+	Path            string `json:"path"`
+	Content         string `json:"content,omitempty"`
+	Diff            string `json:"diff,omitempty"`
+	Explanation     string `json:"explanation,omitempty"`
+	Status          string `json:"status,omitempty"`
+	ValidationError string `json:"validation_error,omitempty"`
 }
 
 type RecommendationCard struct {
