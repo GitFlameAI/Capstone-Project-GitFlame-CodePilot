@@ -16,6 +16,10 @@ class InvalidPlanError(AgentEngineError):
     code = "invalid_output"
 
 
+class InvalidGeneratedFilesError(AgentEngineError):
+    code = "invalid_generated_files"
+
+
 class EmptyModelOutputError(AgentEngineError):
     code = "empty_output"
 

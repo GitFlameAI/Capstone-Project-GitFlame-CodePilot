@@ -3,10 +3,20 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ModelEndpoint:
+    model: str
+    openai_base_url: str
+    openai_api_key: str | None = None
+
+
+@dataclass(frozen=True)
 class AgentSettings:
     model: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     openai_base_url: str = "http://127.0.0.1:8000/v1"
     openai_api_key: str | None = None
+    fallback_model: str | None = None
+    fallback_openai_base_url: str | None = None
+    fallback_openai_api_key: str | None = None
     request_timeout_seconds: float = 180.0
     agent_timeout_seconds: float = 600.0
     max_steps: int = 12
@@ -24,6 +34,9 @@ class AgentSettings:
             model=os.getenv("AGENT_MODEL", cls.model),
             openai_base_url=os.getenv("OPENAI_BASE_URL", cls.openai_base_url).rstrip("/"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
+            fallback_model=os.getenv("AGENT_FALLBACK_MODEL") or None,
+            fallback_openai_base_url=os.getenv("FALLBACK_OPENAI_BASE_URL", "").rstrip("/") or None,
+            fallback_openai_api_key=os.getenv("FALLBACK_OPENAI_API_KEY") or None,
             request_timeout_seconds=float(
                 os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", str(cls.request_timeout_seconds))
             ),
@@ -45,3 +58,21 @@ class AgentSettings:
             rag_base_url=os.getenv("RAG_BASE_URL", "").rstrip("/") or None,
             rag_api_key=os.getenv("RAG_API_KEY"),
         )
+
+    def model_endpoints(self) -> list[ModelEndpoint]:
+        endpoints = [
+            ModelEndpoint(
+                model=self.model,
+                openai_base_url=self.openai_base_url,
+                openai_api_key=self.openai_api_key,
+            )
+        ]
+        if self.fallback_model:
+            endpoints.append(
+                ModelEndpoint(
+                    model=self.fallback_model,
+                    openai_base_url=self.fallback_openai_base_url or self.openai_base_url,
+                    openai_api_key=self.fallback_openai_api_key or self.openai_api_key,
+                )
+            )
+        return endpoints

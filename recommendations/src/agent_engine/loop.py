@@ -22,7 +22,11 @@ class ChatClient(Protocol):
     async def ready(self) -> bool: ...
 
     async def complete(
-        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        response_schema: dict[str, Any] | None = None,
     ) -> ChatCompletion: ...
 
 
@@ -32,6 +36,7 @@ class LoopMetrics:
     tool_calls: int
     reasoning_chars: int
     generation_time_seconds: float
+    model: str
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,7 @@ class AgentLoop:
         total_tool_calls = 0
         reasoning_chars = 0
         generation_time = 0.0
+        model = self.settings.model
         last_validation_errors: list[str] = []
 
         for _step in range(self.settings.max_steps):
@@ -82,6 +88,7 @@ class AgentLoop:
             generation_time += time.perf_counter() - started
             total_usage += completion.usage
             reasoning_chars += len(completion.reasoning)
+            model = completion.model or model
 
             if completion.tool_calls:
                 total_tool_calls += len(completion.tool_calls)
@@ -123,6 +130,7 @@ class AgentLoop:
                         tool_calls=total_tool_calls,
                         reasoning_chars=reasoning_chars,
                         generation_time_seconds=generation_time,
+                        model=model,
                     ),
                 )
             messages.extend(

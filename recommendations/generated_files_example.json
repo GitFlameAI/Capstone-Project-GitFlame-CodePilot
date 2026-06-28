@@ -1,0 +1,37 @@
+{
+  "request_id": "codegen-123",
+  "status": "completed",
+  "summary": "Generated file operations for the approved token expiration plan.",
+  "files": [
+    {
+      "action": "modify",
+      "path": "src/auth.py",
+      "content": "def validate(token):\n    if token.expired:\n        return False\n    return token.valid\n",
+      "diff": "--- a/src/auth.py\n+++ b/src/auth.py\n@@\n+    if token.expired:\n+        return False\n",
+      "explanation": "Adds the approved expiration guard before successful validation."
+    },
+    {
+      "action": "create",
+      "path": "src/token_errors.py",
+      "content": "class ExpiredTokenError(Exception):\n    pass\n",
+      "diff": null,
+      "explanation": "Adds a dedicated error type for expired token handling."
+    },
+    {
+      "action": "delete",
+      "path": "src/legacy_tokens.py",
+      "content": null,
+      "diff": null,
+      "explanation": "Removes the legacy token helper replaced by the approved implementation."
+    }
+  ],
+  "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "usage": {
+    "prompt_tokens": 1200,
+    "completion_tokens": 420,
+    "total_tokens": 1620,
+    "tool_calls": 0,
+    "reasoning_chars": 240,
+    "generation_time_seconds": 8.4
+  }
+}

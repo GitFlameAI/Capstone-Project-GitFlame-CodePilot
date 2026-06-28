@@ -1,12 +1,12 @@
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 
 from agent_engine.errors import EmptyModelOutputError, InferenceTimeoutError, ModelUnavailableError
-from agent_engine.settings import AgentSettings
+from agent_engine.settings import AgentSettings, ModelEndpoint
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,7 @@ class ChatCompletion:
     reasoning: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: CompletionUsage = field(default_factory=CompletionUsage)
+    model: str = ""
 
 
 class OpenAICompatibleClient:
@@ -48,47 +49,89 @@ class OpenAICompatibleClient:
     ) -> None:
         self.settings = settings
         self._client = client
+        self.endpoints = settings.model_endpoints()
 
     async def ready(self) -> bool:
-        try:
-            data = await self._request_json("GET", "/models")
-        except (ModelUnavailableError, InferenceTimeoutError):
-            return False
-        models = data.get("data", [])
-        return any(
-            item.get("id") == self.settings.model
-            for item in models
-            if isinstance(item, dict)
-        )
+        for endpoint in self.endpoints:
+            try:
+                data = await self._request_json("GET", "/models", endpoint=endpoint)
+            except (ModelUnavailableError, InferenceTimeoutError):
+                continue
+            models = data.get("data", [])
+            if any(
+                item.get("id") == endpoint.model
+                for item in models
+                if isinstance(item, dict)
+            ):
+                return True
+        return False
 
     async def complete(
         self,
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        response_schema: dict[str, Any] | None = None,
+    ) -> ChatCompletion:
+        last_error: Exception | None = None
+        for endpoint in self.endpoints:
+            try:
+                response = await self._complete_with_endpoint(
+                    endpoint,
+                    messages=messages,
+                    tools=tools,
+                    response_schema=response_schema,
+                )
+                return replace(response, model=response.model or endpoint.model)
+            except (ModelUnavailableError, InferenceTimeoutError) as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+
+    async def _complete_with_endpoint(
+        self,
+        endpoint: ModelEndpoint,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        response_schema: dict[str, Any] | None,
     ) -> ChatCompletion:
         payload = {
-            "model": self.settings.model,
+            "model": endpoint.model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "temperature": 0,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        response = await self._request_stream("POST", "/chat/completions", json=payload)
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        if response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_engine_structured_response",
+                    "schema": response_schema,
+                    "strict": True,
+                },
+            }
+        response = await self._request_stream(
+            "POST", "/chat/completions", endpoint=endpoint, json=payload
+        )
         if not response.content.strip() and not response.tool_calls:
             raise EmptyModelOutputError("model returned neither plan content nor tool calls")
         return response
 
-    async def _request_stream(self, method: str, path: str, **kwargs: Any) -> ChatCompletion:
+    async def _request_stream(
+        self, method: str, path: str, *, endpoint: ModelEndpoint, **kwargs: Any
+    ) -> ChatCompletion:
         last_error: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
             owns_client = self._client is None
-            client = self._client or self._new_client()
+            client = self._client or self._new_client(endpoint)
             try:
                 async with client.stream(
-                    method, path, headers=self._headers(), **kwargs
+                    method, path, headers=self._headers(endpoint), **kwargs
                 ) as response:
                     if response.status_code == 429 or response.status_code >= 500:
                         body = (await response.aread()).decode(errors="replace")
@@ -127,11 +170,13 @@ class OpenAICompatibleClient:
         assert last_error is not None
         raise last_error
 
-    async def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    async def _request_json(
+        self, method: str, path: str, *, endpoint: ModelEndpoint, **kwargs: Any
+    ) -> dict[str, Any]:
         owns_client = self._client is None
-        client = self._client or self._new_client()
+        client = self._client or self._new_client(endpoint)
         try:
-            response = await client.request(method, path, headers=self._headers(), **kwargs)
+            response = await client.request(method, path, headers=self._headers(endpoint), **kwargs)
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
@@ -145,15 +190,15 @@ class OpenAICompatibleClient:
             if owns_client:
                 await client.aclose()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, endpoint: ModelEndpoint) -> dict[str, str]:
         headers = {"Accept": "text/event-stream"}
-        if self.settings.openai_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.openai_api_key}"
+        if endpoint.openai_api_key:
+            headers["Authorization"] = f"Bearer {endpoint.openai_api_key}"
         return headers
 
-    def _new_client(self) -> httpx.AsyncClient:
+    def _new_client(self, endpoint: ModelEndpoint) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=self.settings.openai_base_url,
+            base_url=endpoint.openai_base_url,
             timeout=self.settings.request_timeout_seconds,
         )
 

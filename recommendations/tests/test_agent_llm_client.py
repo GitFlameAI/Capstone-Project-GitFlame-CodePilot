@@ -66,3 +66,50 @@ async def test_openai_client_ready_checks_exact_model():
 
     assert await client.ready() is True
     await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_openai_client_uses_fallback_model_when_primary_is_unavailable():
+    seen_models = []
+    seen_response_format = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_response_format
+        payload = json.loads(request.content)
+        seen_models.append(payload["model"])
+        if payload["model"] == "primary-model":
+            return httpx.Response(503, json={"error": "primary down"})
+        seen_response_format = payload.get("response_format")
+        body = (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": '{"summary":"ok","files":[]}'}}]})
+            + "\n\n"
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://model/v1"
+    )
+    client = OpenAICompatibleClient(
+        AgentSettings(
+            model="primary-model",
+            fallback_model="fallback-model",
+            fallback_openai_base_url="http://fallback/v1",
+            max_retries=0,
+        ),
+        client=http_client,
+    )
+
+    result = await client.complete(
+        messages=[{"role": "user", "content": "generate"}],
+        tools=[],
+        response_schema={"type": "object", "additionalProperties": False},
+    )
+
+    assert seen_models == ["primary-model", "fallback-model"]
+    assert result.model == "fallback-model"
+    assert result.content == '{"summary":"ok","files":[]}'
+    assert seen_response_format["type"] == "json_schema"
+    assert seen_response_format["json_schema"]["strict"] is True
+    await http_client.aclose()

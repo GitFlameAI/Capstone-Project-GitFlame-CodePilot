@@ -1,4 +1,62 @@
-# Sprint 2 Agent Engine - Karim Deliverables
+# Agent Engine - Karim Deliverables
+
+## Sprint 3 Version 3: approved plan to generated files
+
+Version 3 extends the Sprint 2 `issue -> plan.md` Agent Engine with a second, post-approval flow:
+
+```text
+approved plan.md
+-> Agent Engine /v1/files/generate
+-> validated generated files contract
+-> backend/GitFlame branch, commit, and PR workflow
+```
+
+The Agent Engine receives the approved plan, issue metadata, repository metadata, YAML
+configuration, and GitFlame-supplied repository files. It performs one structured model call and
+returns file operations. It does not write to the repository filesystem and does not create
+branches, commits, pull requests, or reviewers.
+
+### Generated files validation
+
+The generated files response is validated with strict Pydantic models:
+
+- `action` must be `create`, `modify`, or `delete`;
+- `path` must be repository-relative and cannot use absolute paths, parent traversal, Windows drive
+  paths, or `.git`;
+- `create` and `modify` require non-empty `content`;
+- `delete` must not include `content` or `diff`;
+- duplicate file paths are rejected;
+- `modify` and `delete` can target only files supplied in the request after YAML filtering;
+- `create` cannot target an existing supplied file and must pass YAML include/exclude rules.
+
+### Fallback model support
+
+Agent Engine model selection remains operator-controlled. Primary settings still use
+`AGENT_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`. Version 3 adds optional fallback settings:
+
+- `AGENT_FALLBACK_MODEL`;
+- `FALLBACK_OPENAI_BASE_URL`;
+- `FALLBACK_OPENAI_API_KEY`.
+
+If the primary OpenAI-compatible endpoint is unavailable or times out, the client tries the
+configured fallback model endpoint. This is model fallback only; there is no rule-based mock
+fallback for generated files.
+
+### Version 3 links
+
+- Endpoint implementation: `src/agent_engine/app.py`
+- Service flow: `src/agent_engine/service.py`
+- Generated files schema and validator: `src/agent_engine/models.py`
+- Code generation prompt: `src/agent_engine/prompt.py`
+- Fallback model client: `src/agent_engine/llm_client.py`
+- Fallback config: `src/agent_engine/settings.py`
+- Generated files contract docs: `../context_AI/ml/generated_files_contract.md`
+- Code generation prompt docs: `../context_AI/ml/code_generation_prompt.md`
+- Example response: `generated_files_example.json`
+- Tests: `tests/test_agent_api.py`, `tests/test_agent_models.py`,
+  `tests/test_agent_llm_client.py`
+
+## Sprint 2 Agent Engine
 
 ## Version 2 compared with the Sprint 1 mock service
 

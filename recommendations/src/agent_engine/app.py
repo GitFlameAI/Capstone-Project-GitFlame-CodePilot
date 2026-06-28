@@ -7,6 +7,7 @@ from agent_engine.errors import (
     ConfigurationError,
     EmptyModelOutputError,
     InferenceTimeoutError,
+    InvalidGeneratedFilesError,
     InvalidPlanError,
     ModelUnavailableError,
     RagUnavailableError,
@@ -14,6 +15,8 @@ from agent_engine.errors import (
 )
 from agent_engine.models import (
     ErrorResponse,
+    GenerateFilesRequest,
+    GenerateFilesResponse,
     GeneratePlanRequest,
     GeneratePlanResponse,
     HealthResponse,
@@ -37,8 +40,10 @@ def create_app(
     )
     app = FastAPI(
         title="GitFlame SERGE-based Agent Engine",
-        version="2.0.0",
-        description="Stateless issue-to-plan service with bounded read-only repository tools.",
+        version="3.0.0",
+        description=(
+            "Stateless issue-to-plan and approved-plan-to-generated-files Agent Engine."
+        ),
     )
 
     @app.exception_handler(ConfigurationError)
@@ -57,6 +62,7 @@ def create_app(
         ModelUnavailableError: 503,
         RagUnavailableError: 503,
         InvalidPlanError: 502,
+        InvalidGeneratedFilesError: 502,
         EmptyModelOutputError: 502,
         ToolLimitExceededError: 422,
         InferenceTimeoutError: 504,
@@ -93,6 +99,19 @@ def create_app(
     )
     async def generate(request: GeneratePlanRequest) -> GeneratePlanResponse:
         return await service.generate(request)
+
+    @app.post(
+        "/v1/files/generate",
+        response_model=GenerateFilesResponse,
+        responses={
+            422: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+            504: {"model": ErrorResponse},
+        },
+    )
+    async def generate_files(request: GenerateFilesRequest) -> GenerateFilesResponse:
+        return await service.generate_files(request)
 
     return app
 

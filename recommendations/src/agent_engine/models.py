@@ -1,3 +1,4 @@
+from pathlib import PurePath
 from typing import Any, Literal
 
 import yaml
@@ -8,7 +9,12 @@ from agent_engine.errors import ConfigurationError
 
 def _safe_repo_path(value: str) -> str:
     normalized = value.replace("\\", "/").removeprefix("./").strip("/")
-    if not normalized or value.startswith(("/", "\\")) or ".." in normalized.split("/"):
+    if (
+        not normalized
+        or value.startswith(("/", "\\"))
+        or ".." in normalized.split("/")
+        or ":" in PurePath(normalized).parts[0]
+    ):
         raise ValueError("path must be a safe repository-relative path")
     if normalized == ".git" or normalized.startswith(".git/"):
         raise ValueError(".git paths are not allowed")
@@ -130,6 +136,53 @@ class GeneratePlanRequest(BaseModel):
         return self
 
 
+class GenerateFilesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=200)
+    issue: Issue
+    repository: Repository
+    approved_plan_markdown: str = Field(min_length=1, max_length=200_000)
+    configuration_yaml: str = Field(default="{}", max_length=100_000)
+    repository_files: list[RepositoryFile] = Field(default_factory=list, max_length=2_000)
+
+    @field_validator("repository_files")
+    @classmethod
+    def paths_must_be_unique(cls, value: list[RepositoryFile]) -> list[RepositoryFile]:
+        paths = [item.path for item in value]
+        if len(paths) != len(set(paths)):
+            raise ValueError("repository_files contains duplicate paths")
+        return value
+
+
+GeneratedFileAction = Literal["create", "modify", "delete"]
+
+
+class GeneratedFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: GeneratedFileAction
+    path: str = Field(min_length=1, max_length=500)
+    content: str | None = Field(default=None, max_length=1_000_000)
+    diff: str | None = Field(default=None, max_length=1_000_000)
+    explanation: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _safe_repo_path(value)
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "GeneratedFile":
+        if self.action in {"create", "modify"} and not (self.content or "").strip():
+            raise ValueError("content is required for create and modify actions")
+        if self.action == "delete" and (
+            (self.content or "").strip() or (self.diff or "").strip()
+        ):
+            raise ValueError("delete actions must not include content or diff")
+        return self
+
+
 class RelevantFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -149,6 +202,31 @@ class Usage(BaseModel):
     generation_time_seconds: float = 0.0
 
 
+class GeneratedFilesContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=1_000)
+    files: list[GeneratedFile] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def paths_must_be_unique(self) -> "GeneratedFilesContract":
+        paths = [item.path for item in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("generated files response contains duplicate paths")
+        return self
+
+
+class GenerateFilesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    status: Literal["completed"] = "completed"
+    summary: str = Field(min_length=1, max_length=1_000)
+    files: list[GeneratedFile] = Field(min_length=1, max_length=50)
+    model: str
+    usage: Usage
+
+
 class GeneratePlanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -165,7 +243,7 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok", "ready"]
     model: str
-    version: str = "2.0.0"
+    version: str = "3.0.0"
 
 
 class ErrorResponse(BaseModel):

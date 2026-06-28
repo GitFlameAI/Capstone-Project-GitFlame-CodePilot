@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -67,6 +69,34 @@ class FakeChatClient:
         return self.completions.pop(0)
 
 
+class FakeGeneratedFilesClient:
+    def __init__(self, contract, *, ready=True, error=None, model="test-codegen-model"):
+        self.contract = contract
+        self.is_ready = ready
+        self.error = error
+        self.model = model
+        self.messages = []
+        self.tools = None
+        self.response_schema = None
+
+    async def ready(self) -> bool:
+        return self.is_ready
+
+    async def complete(self, *, messages, tools, response_schema=None):
+        self.messages.append(messages)
+        self.tools = tools
+        self.response_schema = response_schema
+        if self.error:
+            raise self.error
+        content = self.contract if isinstance(self.contract, str) else json.dumps(self.contract)
+        return ChatCompletion(
+            content,
+            "hidden codegen reasoning",
+            usage=CompletionUsage(120, 80, 200),
+            model=self.model,
+        )
+
+
 @pytest.fixture
 def agent_request() -> dict:
     return {
@@ -91,6 +121,18 @@ def agent_request() -> dict:
         ],
         "previous_plan": None,
         "correction_feedback": None,
+    }
+
+
+@pytest.fixture
+def generated_files_request(agent_request) -> dict:
+    return {
+        "request_id": "codegen-123",
+        "issue": agent_request["issue"],
+        "repository": agent_request["repository"],
+        "approved_plan_markdown": valid_plan(),
+        "configuration_yaml": agent_request["configuration_yaml"],
+        "repository_files": agent_request["repository_files"],
     }
 
 
@@ -201,3 +243,131 @@ async def test_agent_request_validation_uses_error_contract(agent_request):
 
     assert response.status_code == 422
     assert response.json()["code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_generate_files_returns_contract_without_writing_files(
+    generated_files_request, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Implemented expiration validation.",
+            "files": [
+                {
+                    "action": "modify",
+                    "path": "src/auth.py",
+                    "content": (
+                        "def validate(token):\n"
+                        "    if token.expired:\n"
+                        "        return False\n"
+                        "    return token.valid\n"
+                    ),
+                    "diff": (
+                        "--- a/src/auth.py\n"
+                        "+++ b/src/auth.py\n"
+                        "@@\n"
+                        "+    if token.expired:\n"
+                        "+        return False\n"
+                    ),
+                    "explanation": "Adds the approved expiration guard.",
+                },
+                {
+                    "action": "create",
+                    "path": "src/token_errors.py",
+                    "content": "class ExpiredTokenError(Exception):\n    pass\n",
+                    "diff": None,
+                    "explanation": "Adds a typed error for expired tokens.",
+                },
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["request_id"] == "codegen-123"
+    assert payload["status"] == "completed"
+    assert payload["model"] == "test-codegen-model"
+    assert payload["usage"]["prompt_tokens"] == 120
+    assert payload["usage"]["reasoning_chars"] == len("hidden codegen reasoning")
+    assert payload["files"][0]["action"] == "modify"
+    assert payload["files"][1]["path"] == "src/token_errors.py"
+    assert model.tools == []
+    assert model.response_schema["additionalProperties"] is False
+    assert "hidden codegen reasoning" not in json.dumps(payload)
+    assert not (tmp_path / "src" / "token_errors.py").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_file",
+    [
+        {
+            "action": "rename",
+            "path": "src/auth.py",
+            "content": "x = 1\n",
+            "explanation": "Unsupported action.",
+        },
+        {
+            "action": "modify",
+            "path": "../secrets.py",
+            "content": "x = 1\n",
+            "explanation": "Unsafe traversal.",
+        },
+        {
+            "action": "create",
+            "path": "src/new.py",
+            "content": "",
+            "explanation": "Empty create content.",
+        },
+        {
+            "action": "delete",
+            "path": "src/auth.py",
+            "content": "should not be here",
+            "explanation": "Delete with content.",
+        },
+    ],
+)
+async def test_generate_files_rejects_invalid_model_contract(generated_files_request, bad_file):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Bad output.",
+            "files": [bad_file],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "invalid_generated_files"
+
+
+@pytest.mark.asyncio
+async def test_generate_files_rejects_modify_for_unknown_file(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Bad output.",
+            "files": [
+                {
+                    "action": "modify",
+                    "path": "src/missing.py",
+                    "content": "x = 1\n",
+                    "explanation": "Invented file.",
+                }
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "invalid_generated_files"
+    assert "unknown supplied file" in response.json()["detail"]
