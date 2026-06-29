@@ -214,3 +214,26 @@ docker compose \
 
 Before starting Version 2, edit `.env` and set a reachable `OPENAI_BASE_URL`. Add `OPENAI_API_KEY` only when the selected model provider requires it.
 
+## Sprint 3 Version 3 Deployment
+
+Sprint 3 deployment, smoke-test, and demo instructions are documented in:
+
+```text
+infra/sprint3-deployment.md
+```
+
+Version 3 keeps the same Compose entrypoint and extends the Agent Engine flow with approved-plan-to-code-generation:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  up -d --build
+```
+
+The external model or vLLM server requirements are documented in:
+
+```text
+infra/vllm-server-requirements.md
+```
+
