@@ -8,7 +8,7 @@ from agent_engine.context import ContextCompressor
 from agent_engine.errors import (
     InferenceTimeoutError,
     InvalidPlanError,
-    RagUnavailableError,
+    #RagUnavailableError,
     ToolLimitExceededError,
 )
 from agent_engine.llm_client import ChatCompletion, CompletionUsage
@@ -93,8 +93,8 @@ class AgentLoop:
                 for call in completion.tool_calls:
                     try:
                         output = await self.sandbox.execute(call.name, call.arguments)
-                    except RagUnavailableError:
-                        raise
+                    #except RagUnavailableError:
+                    #    raise
                     except Exception as exc:
                         output = json.dumps(
                             {"error": type(exc).__name__, "detail": str(exc)},

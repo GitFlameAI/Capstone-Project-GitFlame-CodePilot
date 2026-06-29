@@ -31,6 +31,15 @@ Return only valid Markdown with exactly these headings in this order:
 ## Tests and Verification
 ## Risks and Open Questions
 
+In "Relevant Files" and "Expected Files to Change", every line must be a bullet in EXACTLY this
+shape — a hyphen, the file path wrapped in backticks, an optional " (create)" for a new file, then
+a colon and a short reason. Each of these two sections must have at least one such bullet:
+- `path/from/the/evidence.ext`: why this file matters
+- `path/to/a/new_file.ext` (create): what will be added here
+Use only paths that appear in the repository evidence (mark new files with (create)). Do not use
+bold, sub-headings, or prose lines instead of these bullets. "Implementation Steps" must be a
+numbered list that starts at "1.".
+
 Every section must contain concrete content. Keep implementation steps ordered and testable. Do
 not include text before or after the plan and do not include fenced code blocks."""
 
@@ -64,10 +73,14 @@ def build_initial_prompt(
 
 
 def build_validation_feedback(errors: list[str]) -> str:
-    return "\n".join(
-        [
-            "The previous candidate did not satisfy the plan contract:",
-            *(f"- {error}" for error in errors),
-            "Return a corrected complete plan only. Do not discuss these validation errors.",
-        ]
-    )
+    lines = [
+        "The previous candidate did not satisfy the plan contract:",
+        *(f"- {error}" for error in errors),
+    ]
+    if any("path bullets" in error for error in errors):
+        lines.append(
+            "Each file bullet must look exactly like: - `path/to/file.ext`: short reason "
+            "(add ' (create)' before the colon for new files)."
+        )
+    lines.append("Return a corrected complete plan only. Do not discuss these validation errors.")
+    return "\n".join(lines)
