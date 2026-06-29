@@ -387,6 +387,7 @@ func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract
 	branch := session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug
 	return domain.GeneratedFilesContract{
 		BranchName:    branch,
+		BaseBranch:    session.Request.Repository.DefaultBranch,
 		Files:         []domain.GeneratedFileOperation{},
 		CommitMessage: "Implement " + session.Request.Issue.Title,
 		PRTitle:       session.Request.Issue.Title,

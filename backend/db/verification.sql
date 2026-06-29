@@ -41,6 +41,23 @@ recommendations:
     is_valid = EXCLUDED.is_valid,
     retention_days = EXCLUDED.retention_days;
 
+INSERT INTO repository_files (
+    id,
+    repository_id,
+    file_path,
+    file_name,
+    commit_sha
+) VALUES (
+    '88888888-8888-8888-8888-888888888888',
+    '11111111-1111-1111-1111-111111111111',
+    'backend/internal/service/workflow.go',
+    'workflow.go',
+    'demo-sha'
+) ON CONFLICT (repository_id, file_path) DO UPDATE SET
+    file_name = EXCLUDED.file_name,
+    commit_sha = EXCLUDED.commit_sha,
+    updated_at = now();
+
 INSERT INTO issue_sessions (
     id,
     repository_id,
@@ -157,6 +174,84 @@ Updated plan with persistence verification.',
     correction_feedback = EXCLUDED.correction_feedback,
     source = EXCLUDED.source;
 
+INSERT INTO plan_revisions (
+    id,
+    generated_plan_id,
+    issue_session_id,
+    agent_task_id,
+    revision_number,
+    plan_markdown,
+    correction_feedback,
+    source
+) VALUES (
+    '99999999-9999-9999-9999-999999999999',
+    '44444444-4444-4444-4444-444444444444',
+    '33333333-3333-3333-3333-333333333333',
+    NULL,
+    3,
+    '# Implementation Plan
+
+User edited plan before approval.',
+    '',
+    'user_edit'
+) ON CONFLICT (generated_plan_id, revision_number) DO UPDATE SET
+    plan_markdown = EXCLUDED.plan_markdown,
+    correction_feedback = EXCLUDED.correction_feedback,
+    source = EXCLUDED.source;
+
+INSERT INTO git_workflow_payloads (
+    id,
+    issue_session_id,
+    agent_task_id,
+    branch_name,
+    base_branch,
+    commit_message,
+    pr_title,
+    reviewer,
+    status
+) VALUES (
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    '33333333-3333-3333-3333-333333333333',
+    '55555555-5555-5555-5555-555555555555',
+    'ai/ISSUE-101-replace-memorystore',
+    'main',
+    'Implement Replace MemoryStore with PostgreSQL storage',
+    'Replace MemoryStore with PostgreSQL storage',
+    'amir',
+    'generated'
+) ON CONFLICT (issue_session_id) DO UPDATE SET
+    agent_task_id = EXCLUDED.agent_task_id,
+    branch_name = EXCLUDED.branch_name,
+    base_branch = EXCLUDED.base_branch,
+    commit_message = EXCLUDED.commit_message,
+    pr_title = EXCLUDED.pr_title,
+    reviewer = EXCLUDED.reviewer,
+    status = EXCLUDED.status,
+    updated_at = now();
+
+DELETE FROM generated_files
+WHERE issue_session_id = '33333333-3333-3333-3333-333333333333';
+
+INSERT INTO generated_files (
+    issue_session_id,
+    agent_task_id,
+    file_path,
+    action,
+    content,
+    explanation,
+    status,
+    validation_error
+) VALUES (
+    '33333333-3333-3333-3333-333333333333',
+    '55555555-5555-5555-5555-555555555555',
+    'backend/internal/service/workflow.go',
+    'modify',
+    'package service',
+    'Updates the workflow implementation.',
+    'valid',
+    ''
+);
+
 INSERT INTO recommendation_runs (
     id,
     repository_id,
@@ -208,6 +303,39 @@ FROM agent_tasks at
 JOIN agent_task_statuses ats ON ats.agent_task_id = at.id
 WHERE at.issue_session_id = '33333333-3333-3333-3333-333333333333'
 ORDER BY ats.created_at;
+
+SELECT
+    'repository file paths persisted' AS verification_case,
+    r.external_id AS repository,
+    rf.file_path,
+    rf.commit_sha
+FROM repository_files rf
+JOIN repositories r ON r.id = rf.repository_id
+WHERE r.external_id = 'demo-repo';
+
+SELECT
+    'user edited plan persisted' AS verification_case,
+    pr.revision_number,
+    pr.source,
+    pr.plan_markdown LIKE '%User edited%' AS has_user_edit
+FROM plan_revisions pr
+WHERE pr.generated_plan_id = '44444444-4444-4444-4444-444444444444'
+  AND pr.source = 'user_edit';
+
+SELECT
+    'code generation payload persisted' AS verification_case,
+    gwp.branch_name,
+    gwp.base_branch,
+    gwp.commit_message,
+    gwp.pr_title,
+    gwp.reviewer,
+    gf.file_path,
+    gf.action,
+    gf.status,
+    gf.validation_error
+FROM git_workflow_payloads gwp
+JOIN generated_files gf ON gf.issue_session_id = gwp.issue_session_id
+WHERE gwp.issue_session_id = '33333333-3333-3333-3333-333333333333';
 
 SELECT
     'recommendation retention persisted' AS verification_case,

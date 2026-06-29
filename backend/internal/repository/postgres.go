@@ -2,8 +2,11 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +65,9 @@ func (s *PostgresStore) CreateSession(req domain.IssueAnalyzeRequest, cfg domain
 	}
 	configID, err := insertAIConfig(ctx, tx, repositoryID, cfg)
 	if err != nil {
+		return nil, false, err
+	}
+	if err := upsertRepositoryFiles(ctx, tx, repositoryID, req); err != nil {
 		return nil, false, err
 	}
 	requestJSON, err := json.Marshal(req)
@@ -145,6 +151,9 @@ func (s *PostgresStore) scanSession(row pgx.Row) (*domain.IssueSession, error) {
 	if workflowJSON.Valid && workflowJSON.String != "null" {
 		_ = json.Unmarshal([]byte(workflowJSON.String), &session.GeneratedFiles)
 	}
+	if err := s.loadGeneratedFiles(context.Background(), &session); err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(context.Background(), `
 		SELECT correction_feedback FROM plan_revisions
 		WHERE issue_session_id=$1::uuid AND correction_feedback<>'' ORDER BY revision_number`, session.ID)
@@ -183,6 +192,11 @@ func (s *PostgresStore) UpdateSession(session *domain.IssueSession) error {
 	}
 	if command.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if session.GeneratedFiles != nil {
+		if err := saveGeneratedFiles(ctx, tx, session.ID, session.GeneratedFiles); err != nil {
+			return err
+		}
 	}
 	switch session.Status {
 	case domain.SessionCorrectionRequested:
@@ -240,6 +254,51 @@ func (s *PostgresStore) UpdateSession(session *domain.IssueSession) error {
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) loadGeneratedFiles(ctx context.Context, session *domain.IssueSession) error {
+	var contract domain.GeneratedFilesContract
+	var taskID pgtype.Text
+	var payloadStatus string
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(agent_task_id::text,''),branch_name,base_branch,commit_message,pr_title,reviewer,status
+		FROM git_workflow_payloads WHERE issue_session_id=$1::uuid`, session.ID).
+		Scan(&taskID, &contract.BranchName, &contract.BaseBranch, &contract.CommitMessage, &contract.PRTitle, &contract.Reviewer, &payloadStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if taskID.Valid {
+		contract.TaskID = taskID.String
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT file_path,action,content,diff,explanation,status,validation_error
+		FROM generated_files WHERE issue_session_id=$1::uuid ORDER BY created_at,id`, session.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var file domain.GeneratedFileOperation
+		if err := rows.Scan(&file.Path, &file.Action, &file.Content, &file.Diff, &file.Explanation, &file.Status, &file.ValidationError); err != nil {
+			return err
+		}
+		contract.Files = append(contract.Files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if session.GeneratedFiles != nil {
+		contract.RequestID = session.GeneratedFiles.RequestID
+		contract.Summary = session.GeneratedFiles.Summary
+		if contract.TaskID == "" {
+			contract.TaskID = session.GeneratedFiles.TaskID
+		}
+	}
+	session.GeneratedFiles = &contract
+	return nil
 }
 
 func (s *PostgresStore) CreateTask(sessionID, issueID, taskType string) (*domain.AgentTask, error) {
@@ -465,6 +524,88 @@ func upsertRepository(ctx context.Context, tx pgx.Tx, repository domain.Reposito
 		name=EXCLUDED.name,default_branch=EXCLUDED.default_branch,web_url=EXCLUDED.web_url,updated_at=now()
 		RETURNING id::text`, repository.ID, name, repository.DefaultBranch, repository.WebURL).Scan(&id)
 	return id, err
+}
+
+func upsertRepositoryFiles(ctx context.Context, tx pgx.Tx, repositoryID string, req domain.IssueAnalyzeRequest) error {
+	files := append([]domain.RepositoryFile(nil), req.RepositoryFiles...)
+	if len(files) == 0 {
+		for _, filePath := range req.RepositoryContext {
+			files = append(files, domain.RepositoryFile{Path: filePath})
+		}
+	}
+	for _, file := range files {
+		filePath := strings.TrimSpace(file.Path)
+		if filePath == "" {
+			continue
+		}
+		hash := ""
+		if file.Content != "" {
+			sum := sha256.Sum256([]byte(file.Content))
+			hash = fmt.Sprintf("%x", sum)
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO repository_files (repository_id,file_path,file_name,content_hash,commit_sha,updated_at)
+			VALUES ($1::uuid,$2,$3,$4,$5,now())
+			ON CONFLICT (repository_id,file_path) DO UPDATE SET
+			file_name=EXCLUDED.file_name,content_hash=EXCLUDED.content_hash,
+			commit_sha=EXCLUDED.commit_sha,updated_at=now()`,
+			repositoryID, filePath, path.Base(filePath), hash, req.Repository.CommitSHA)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func saveGeneratedFiles(ctx context.Context, tx pgx.Tx, sessionID string, contract *domain.GeneratedFilesContract) error {
+	taskID := contract.TaskID
+	baseBranch := contract.BaseBranch
+	if strings.TrimSpace(baseBranch) == "" {
+		baseBranch = "main"
+	}
+	status := "pending"
+	if len(contract.Files) > 0 {
+		status = "generated"
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO git_workflow_payloads (
+			issue_session_id,agent_task_id,branch_name,base_branch,commit_message,pr_title,reviewer,status,updated_at
+		) VALUES (
+			$1::uuid,NULLIF($2::text,'')::uuid,$3,$4,$5,$6,$7,$8,now()
+		) ON CONFLICT (issue_session_id) DO UPDATE SET
+			agent_task_id=EXCLUDED.agent_task_id,
+			branch_name=EXCLUDED.branch_name,
+			base_branch=EXCLUDED.base_branch,
+			commit_message=EXCLUDED.commit_message,
+			pr_title=EXCLUDED.pr_title,
+			reviewer=EXCLUDED.reviewer,
+			status=EXCLUDED.status,
+			updated_at=now()`,
+		sessionID, taskID, contract.BranchName, baseBranch, contract.CommitMessage, contract.PRTitle, contract.Reviewer, status)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM generated_files WHERE issue_session_id=$1::uuid`, sessionID)
+	if err != nil {
+		return err
+	}
+	for _, file := range contract.Files {
+		fileStatus := file.Status
+		if strings.TrimSpace(fileStatus) == "" {
+			fileStatus = "pending"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO generated_files (
+				issue_session_id,agent_task_id,file_path,action,content,diff,explanation,status,validation_error,updated_at
+			) VALUES (
+				$1::uuid,NULLIF($2::text,'')::uuid,$3,$4,$5,$6,$7,$8,$9,now()
+			)`,
+			sessionID, taskID, file.Path, file.Action, file.Content, file.Diff, file.Explanation, fileStatus, file.ValidationError)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func insertAIConfig(ctx context.Context, tx pgx.Tx, repositoryID string, cfg domain.AIConfig) (string, error) {

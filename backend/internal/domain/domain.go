@@ -171,6 +171,7 @@ type GeneratedFilesContract struct {
 	TaskID        string                   `json:"task_id,omitempty"`
 	Summary       string                   `json:"summary,omitempty"`
 	BranchName    string                   `json:"branch_name"`
+	BaseBranch    string                   `json:"base_branch,omitempty"`
 	Files         []GeneratedFileOperation `json:"files"`
 	CommitMessage string                   `json:"commit_message"`
 	PRTitle       string                   `json:"pr_title"`
