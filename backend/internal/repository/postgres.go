@@ -402,8 +402,8 @@ func (s *PostgresStore) SaveRecommendations(repository domain.RepositoryMetadata
 	var runID string
 	err = tx.QueryRow(ctx, `INSERT INTO recommendation_runs
 		(repository_id,ai_config_id,summary,status,retention_days,expires_at,updated_at)
-		VALUES ($1::uuid,$2::uuid,$3,'completed',$4,now()+($4::text||' days')::interval,now()) RETURNING id::text`,
-		repositoryID, configID, summary, cfg.RetentionDays).Scan(&runID)
+		VALUES ($1::uuid,$2::uuid,$3,'completed',$4::int,now()+make_interval(days => $5::int),now()) RETURNING id::text`,
+		repositoryID, configID, summary, cfg.RetentionDays, cfg.RetentionDays).Scan(&runID)
 	if err != nil {
 		return nil, err
 	}

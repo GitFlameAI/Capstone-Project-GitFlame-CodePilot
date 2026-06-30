@@ -7,7 +7,7 @@ INSERT INTO repositories (
     web_url
 ) VALUES (
     '11111111-1111-1111-1111-111111111111',
-    'demo-repo',
+    'verification-demo-repo',
     'codepilot-demo',
     'gitflame',
     'main',
@@ -311,7 +311,7 @@ SELECT
     rf.commit_sha
 FROM repository_files rf
 JOIN repositories r ON r.id = rf.repository_id
-WHERE r.external_id = 'demo-repo';
+WHERE r.external_id = 'verification-demo-repo';
 
 SELECT
     'user edited plan persisted' AS verification_case,
