@@ -1,38 +1,32 @@
-// In-memory mock of the GitFlame CodePilot backend.
+// In-memory mock of the GitFlame CodePilot backend (Sprint 3 / Version 3).
 //
 // It returns the SAME response shapes as the Go backend so that switching to the
-// real backend (via VITE_API_BASE) requires no UI changes. It is used so the demo
-// is fully runnable WITHOUT the Go backend, Redis, PostgreSQL and the Agent Engine
-// (which needs a GPU). This keeps the master branch demoable for screenshots/GIFs.
+// real backend (via VITE_API_BASE) requires no UI changes. It lets the demo run
+// fully WITHOUT the Go backend, Redis, PostgreSQL and the Agent Engine (GPU).
 //
-// Sprint 2: the issue -> plan flow is asynchronous. analyzeIssue / correctIssue
-// return an agent *task* that the UI polls via getTask() until it is `completed`
-// or `failed`. The mock advances the task status over time so the queued ->
-// processing -> completed progression is visible, and can simulate a recoverable
-// failure (to demo the retry state) when the issue title contains "fail" or
-// "timeout".
+// Sprint 3 adds the code-generation step after approval:
+//   analyze   -> initial_plan task    (queued -> processing -> completed)  -> plan.md
+//   correct   -> plan_revision task    (async)                              -> revised plan
+//   approve   -> 202 + code_generation task (async) + branch/PR contract    -> generated files
+//   reject    -> rejected
 //
-// Recommendation card shape (matches backend domain.RecommendationCard, plus the
-// optional `category` field that the ML recommendation_schema.json provides):
-//   { id, severity, category?, file, line?, problem, suggestion, confidence?, state }
+// The mock advances task status over time so each loading state is visible, and
+// can simulate a recoverable failure (Retry state) when the issue title contains
+// "fail" or "timeout".
 
 import { ApiError } from './client.js'
 
-const LATENCY = 600 // ms, makes the loading spinner visible
+const LATENCY = 600
 const delay = (ms = LATENCY) => new Promise((r) => setTimeout(r, ms))
 
 let nextId = 100
 const uid = (prefix) => `${prefix}-${(nextId++).toString(36)}-${Date.now().toString(36)}`
 
-// repositoryId -> { summary, recommendations[], status }
-const reports = new Map()
-// sessionId -> session ; issueId -> sessionId (alias index)
-const sessions = new Map()
-const issueAlias = new Map()
-// taskId -> task
-const tasks = new Map()
+const reports = new Map() // repositoryId -> { summary, recommendations[], status }
+const sessions = new Map() // sessionId -> session
+const issueAlias = new Map() // issueId -> sessionId
+const tasks = new Map() // taskId -> task
 
-// Task lifecycle timing (ms from creation).
 const QUEUED_MS = 700
 const PROCESSING_MS = 2000
 
@@ -49,43 +43,66 @@ function plannedOutcome(issue) {
   return { kind: 'completed' }
 }
 
-function buildPlan(issue) {
+// Plan follows context_AI/ml/plan_format.md (Sprint 3): no Tests section and no
+// duplicated "Proposed steps" block — the two concerns the frontend asked to drop.
+function buildPlan(issue, context) {
+  const files = (context && context.length ? context : ['backend/internal/httpapi/server.go'])
+    .slice(0, 5)
+    .map((p) => `- \`${p}\`: update to satisfy the issue`)
+    .join('\n')
   return `# Implementation Plan
 
-## Issue summary
+## Issue Summary
 ${issue.title}
 
-## Context
-${issue.body ? issue.body.trim() : 'No additional description was provided.'}
+## Goal
+${issue.body ? issue.body.trim() : 'Deliver the behaviour described in the issue.'}
 
-## Relevant files
-- backend/internal/httpapi/server.go
-- backend/internal/service/workflow.go
+## Implementation Steps
+1. Read the relevant repository files and confirm the current behaviour.
+2. Add the new behaviour required by the issue in the smallest change that works.
+3. Keep error handling and existing checks intact.
+4. Update the API documentation if the public contract changes.
 
-## Implementation steps
-1. Validate the repository \`.yml\` configuration and branch rules.
-2. Review the issue and the relevant repository files retrieved via RAG.
-3. Identify the files most likely to change for this request.
-4. Implement the change on an AI-generated branch after user approval.
-5. Open a pull request and assign the issue author as reviewer.
+## Expected Files to Change
+${files}
+- \`backend/internal/httpapi/openapi.json\`: document the changed contract
 
-## Tests
-- Add unit tests for the new behaviour.
-- Keep existing checks green.
-
-## Risks
-- Touching shared orchestration code may affect other flows.
-
-## Open questions
-- Should pagination defaults be configurable via \`.yml\`?
+## Risks and Open Questions
+- Touching shared orchestration code may affect other flows; keep the change scoped.
+- TBD: confirm whether defaults should be configurable via \`.ai.yml\`.
 `
+}
+
+// File operations following docs/ml/generated_files_contract.md: each file has
+// only { path, action, description } — the Agent Engine never returns content,
+// diffs or GitFlame workflow metadata (the backend wrapper adds branch/PR data).
+function buildGeneratedFiles(session) {
+  const title = session.title || 'the issue'
+  return [
+    {
+      path: 'backend/internal/httpapi/server.go',
+      action: 'modify',
+      description: `Update the affected HTTP handler to satisfy "${title}".`,
+    },
+    {
+      path: 'backend/internal/httpapi/pagination.go',
+      action: 'create',
+      description: 'Add a small helper type introduced by the approved plan.',
+    },
+    {
+      path: 'backend/internal/httpapi/openapi.json',
+      action: 'modify',
+      description: 'Document the changed contract in the OpenAPI specification.',
+    },
+  ]
 }
 
 function taskView(task) {
   const elapsed = Date.now() - task.createdAt
   let status = 'queued'
   if (elapsed >= QUEUED_MS) status = 'processing'
-  if (elapsed >= PROCESSING_MS) status = task.outcome.kind // completed | failed
+  if (elapsed >= PROCESSING_MS) status = task.outcome.kind
 
   const base = {
     task_id: task.id,
@@ -97,8 +114,28 @@ function taskView(task) {
   }
 
   if (status === 'completed') {
-    // Apply terminal side-effects to the session exactly once.
     const session = sessions.get(task.sessionId)
+    if (task.type === 'code_generation') {
+      // Build and attach the generated-files contract once on completion.
+      if (session && (!session.generatedFiles || !session.generatedFiles.files.length)) {
+        session.generatedFiles = {
+          ...session.generatedFiles,
+          request_id: task.id,
+          task_id: task.id,
+          summary: 'Generated file operations for the approved plan.',
+          files: buildGeneratedFiles(session),
+        }
+        session.status = 'code_generated'
+      }
+      return {
+        ...base,
+        generated_files_contract: session ? session.generatedFiles : null,
+        model: 'mock-coder',
+        usage: { prompt_tokens: 1200, completion_tokens: 420, total_tokens: 1620, tool_calls: 0, reasoning_chars: 240, generation_time_seconds: 8.4 },
+        tool_execution_summary: 'model=mock-coder; file_operations=2; total_tokens=1620; generation_seconds=8.400',
+      }
+    }
+    // plan task
     if (session) {
       session.planMarkdown = task.plan
       session.status = 'plan_generated'
@@ -107,34 +144,19 @@ function taskView(task) {
     return {
       ...base,
       plan_markdown: task.plan,
-      tool_execution_summary:
-        'model=mock-coder; tool_calls=4; prompt_tokens=1820; completion_tokens=540; total_tokens=2360; generation_seconds=2.000',
+      tool_execution_summary: 'model=mock-coder; tool_calls=4; total_tokens=2360; generation_seconds=2.000',
       relevant_files: [
         { path: 'backend/internal/httpapi/server.go', reason: 'Owns the affected endpoint', create: false },
         { path: 'backend/internal/service/workflow.go', reason: 'Orchestration logic', create: false },
       ],
       model: 'mock-coder',
-      usage: {
-        prompt_tokens: 1820,
-        completion_tokens: 540,
-        total_tokens: 2360,
-        tool_calls: 4,
-        reasoning_chars: 0,
-        generation_time_seconds: 2.0,
-      },
+      usage: { prompt_tokens: 1820, completion_tokens: 540, total_tokens: 2360, tool_calls: 4, reasoning_chars: 0, generation_time_seconds: 2.0 },
     }
   }
   if (status === 'failed') {
     const session = sessions.get(task.sessionId)
     if (session) session.status = 'failed'
-    return {
-      ...base,
-      error: {
-        http_status: task.outcome.status,
-        code: task.outcome.code,
-        detail: task.outcome.detail,
-      },
-    }
+    return { ...base, error: { http_status: task.outcome.status, code: task.outcome.code, detail: task.outcome.detail } }
   }
   return base
 }
@@ -232,18 +254,20 @@ export const mockApi = {
     throw new ApiError('recommendation was not found', 404, 'recommendation_not_found')
   },
 
-  // --- Issue -> plan flow ("Work with AI"), async in Sprint 2 ---
+  // --- Issue -> plan -> approve -> code generation flow ---
   async analyzeIssue(payload) {
     await delay(500)
-    if (!payload.yaml_config || !payload.yaml_config.trim()) {
-      throw new ApiError('yaml_config is required', 422, 'validation_error')
-    }
+    if (!payload.yaml_config || !payload.yaml_config.trim()) throw new ApiError('yaml_config is required', 422, 'validation_error')
     const issue = payload.issue || {}
     if (!issue.title || !issue.title.trim()) throw new ApiError('issue.title is required', 422, 'validation_error')
     if (!issue.body || !issue.body.trim()) throw new ApiError('issue.body is required', 422, 'validation_error')
     if (!issue.author || !issue.author.trim()) throw new ApiError('issue.author is required', 422, 'validation_error')
-    const ctx = payload.repository_files?.length || payload.repository_context?.length
-    if (!ctx) throw new ApiError('repository_files must contain at least one file', 422, 'validation_error')
+    // Repository context is prepared by the Agent Engine via RAG (see
+    // context_AI/ml/autogen_prompt.md), so the client is not required to send it.
+    const files = payload.repository_files || (payload.repository_context || []).map((p) => ({ path: p }))
+    const contextPaths = files.length
+      ? files.map((f) => f.path)
+      : ['backend/internal/httpapi/server.go', 'backend/internal/service/workflow.go']
 
     const session = {
       sessionId: uid('sess'),
@@ -256,6 +280,8 @@ export const mockApi = {
       author: issue.author || 'demo-user',
       yamlConfig: payload.yaml_config,
       targetBranchPrefix: 'ai/',
+      contextPaths: contextPaths,
+      generatedFiles: null,
     }
     sessions.set(session.sessionId, session)
     issueAlias.set(session.issueId, session.sessionId)
@@ -263,18 +289,11 @@ export const mockApi = {
     const task = {
       id: uid('task'), sessionId: session.sessionId, issueId: session.issueId,
       type: 'initial_plan', attempt: 1, createdAt: Date.now(),
-      outcome: plannedOutcome(issue), plan: buildPlan(issue), revision: 1,
+      outcome: plannedOutcome(issue), plan: buildPlan(issue, session.contextPaths), revision: 1,
     }
     tasks.set(task.id, task)
 
-    return {
-      session_id: session.sessionId,
-      task_id: task.id,
-      issue_id: session.issueId,
-      repository_id: session.repositoryId,
-      status: 'queued',
-      status_url: `/ai/tasks/${task.id}`,
-    }
+    return { session_id: session.sessionId, task_id: task.id, issue_id: session.issueId, repository_id: session.repositoryId, status: 'queued', status_url: `/ai/tasks/${task.id}` }
   },
 
   async getTask(taskId) {
@@ -288,7 +307,6 @@ export const mockApi = {
     await delay(300)
     const task = tasks.get(taskId)
     if (!task) throw new ApiError('agent task was not found', 404, 'task_not_found')
-    // On retry the mock always succeeds, so the recovery path is demoable.
     const newTask = {
       id: uid('task'), sessionId: task.sessionId, issueId: task.issueId,
       type: task.type, attempt: task.attempt + 1, createdAt: Date.now(),
@@ -297,10 +315,7 @@ export const mockApi = {
     tasks.set(newTask.id, newTask)
     const session = sessions.get(task.sessionId)
     if (session) session.status = 'queued'
-    return {
-      session_id: newTask.sessionId, issue_id: newTask.issueId, status: 'queued',
-      message: 'Retry task queued.', task_id: newTask.id, status_url: `/ai/tasks/${newTask.id}`,
-    }
+    return { session_id: newTask.sessionId, issue_id: newTask.issueId, status: 'queued', message: 'Retry task queued.', task_id: newTask.id, status_url: `/ai/tasks/${newTask.id}` }
   },
 
   async getIssuePlan(idOrIssueId) {
@@ -308,22 +323,19 @@ export const mockApi = {
     const session = resolveSession(idOrIssueId)
     if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
     if (!session.planMarkdown) throw new ApiError('plan generation has not completed', 409, 'plan_not_ready')
-    return {
-      session_id: session.sessionId, issue_id: session.issueId, repository_id: session.repositoryId,
-      status: session.status, plan_markdown: session.planMarkdown, revision: session.revision,
-    }
+    return { session_id: session.sessionId, issue_id: session.issueId, repository_id: session.repositoryId, status: session.status, plan_markdown: session.planMarkdown, revision: session.revision }
   },
 
-  async approveIssue(idOrIssueId) {
+  // Approve queues a code-generation task and returns the branch/PR contract
+  // (without files yet). The optional planMarkdown lets the UI persist a plan the
+  // user edited before approving; the real backend ignores extra body fields.
+  async approveIssue(idOrIssueId, planMarkdown) {
     await delay(600)
     const session = resolveSession(idOrIssueId)
     if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
-    if (session.status !== 'plan_generated') {
-      throw new ApiError(`plan cannot be approved while session status is ${session.status}`, 422, 'invalid_workflow_state')
-    }
-    session.status = 'approved'
-    const slug = (session.title || idOrIssueId).toString().toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
+    if (session.status !== 'plan_generated') throw new ApiError(`plan cannot be approved while session status is ${session.status}`, 422, 'invalid_workflow_state')
+    if (planMarkdown && planMarkdown.trim()) session.planMarkdown = planMarkdown
+    const slug = (session.title || idOrIssueId).toString().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
     const contract = {
       branch_name: `${session.targetBranchPrefix}${session.issueId}-${slug || 'change'}`,
       files: [],
@@ -332,11 +344,35 @@ export const mockApi = {
       reviewer: session.author,
     }
     session.generatedFiles = contract
+    session.status = 'code_generation_queued'
+
+    const task = {
+      id: uid('task'), sessionId: session.sessionId, issueId: session.issueId,
+      type: 'code_generation', attempt: 1, createdAt: Date.now(),
+      outcome: { kind: 'completed' },
+    }
+    tasks.set(task.id, task)
+
     return {
       session_id: session.sessionId, issue_id: session.issueId, status: session.status,
-      message: 'Plan approved. Contract is ready for a future code-generation worker.',
-      generated_files_contract: contract,
+      message: 'Plan approved. Code generation task queued.', task_id: task.id,
+      status_url: `/ai/issues/${session.issueId}/code-generation`, generated_files_contract: contract,
     }
+  },
+
+  async getCodeGeneration(idOrIssueId) {
+    await delay(250)
+    const session = resolveSession(idOrIssueId)
+    if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
+    // Find the latest code-generation task for the session.
+    let latest = null
+    for (const task of tasks.values()) {
+      if (task.sessionId === session.sessionId && task.type === 'code_generation') {
+        if (!latest || task.createdAt >= latest.createdAt) latest = task
+      }
+    }
+    if (!latest) throw new ApiError('code generation has not been queued for this issue', 409, 'code_generation_not_started')
+    return taskView(latest)
   },
 
   async correctIssue(idOrIssueId, feedback) {
@@ -344,33 +380,30 @@ export const mockApi = {
     const session = resolveSession(idOrIssueId)
     if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
     if (!feedback || !feedback.trim()) throw new ApiError('feedback is required', 422, 'validation_error')
-    if (session.status !== 'plan_generated') {
-      throw new ApiError(`plan cannot be corrected while session status is ${session.status}`, 422, 'invalid_workflow_state')
-    }
+    if (session.status !== 'plan_generated') throw new ApiError(`plan cannot be corrected while session status is ${session.status}`, 422, 'invalid_workflow_state')
     session.status = 'correction_requested'
-    const revisedPlan =
-      `${session.planMarkdown}\n\n## Revision feedback (revision ${session.revision + 1})\n- ${feedback.trim()}\n- Updated implementation steps to address the feedback above.\n`
+    const revisedPlan = `${session.planMarkdown}\n\n## Revision feedback (revision ${session.revision + 1})\n- ${feedback.trim()}\n- Updated the implementation steps above to address this feedback.\n`
     const task = {
       id: uid('task'), sessionId: session.sessionId, issueId: session.issueId,
       type: 'plan_revision', attempt: 1, createdAt: Date.now(),
       outcome: { kind: 'completed' }, plan: revisedPlan, revision: session.revision + 1,
     }
     tasks.set(task.id, task)
-    return {
-      session_id: session.sessionId, issue_id: session.issueId, status: 'queued',
-      message: 'Correction task queued.', task_id: task.id, status_url: `/ai/tasks/${task.id}`,
-    }
+    return { session_id: session.sessionId, issue_id: session.issueId, status: 'queued', message: 'Correction task queued.', task_id: task.id, status_url: `/ai/tasks/${task.id}` }
   },
 
   async rejectIssue(idOrIssueId) {
     await delay(400)
     const session = resolveSession(idOrIssueId)
     if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
-    if (session.status === 'approved') throw new ApiError('approved plan cannot be rejected', 422, 'invalid_workflow_state')
+    if (session.status === 'approved' || String(session.status).startsWith('code_generation') || session.status === 'code_generated') {
+      throw new ApiError('approved plan cannot be rejected', 422, 'invalid_workflow_state')
+    }
     session.status = 'rejected'
     return { session_id: session.sessionId, issue_id: session.issueId, status: session.status, message: 'Plan rejected.' }
   },
 }
 
-// Pre-seed the demo repository so the recommendations widget shows data on first load.
-seedReport('demo-repo')
+// Pre-seed the demo repository so the recommendations widget shows data on first
+// load for the repository pre-filled on the landing screen.
+seedReport('tiroro-20-10-test')

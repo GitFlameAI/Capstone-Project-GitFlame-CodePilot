@@ -1,21 +1,32 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import RepositoryView from './views/RepositoryView.vue'
-import DetailedAnalysisView from './views/DetailedAnalysisView.vue'
+import GitFlameDemoView from './views/GitFlameDemoView.vue'
+import LandingView from './views/LandingView.vue'
+import WorkspaceView from './views/WorkspaceView.vue'
 
+// Three screens, matching the demo flow:
+//   /            mock GitFlame repository page with the "Work with AI" button
+//   /codepilot   CodePilot service landing + repository connect form
+//   /workspace   the 4-tab workspace (Repository / Config / Autogen / Recommendations)
 const routes = [
   {
     path: '/',
-    name: 'repository',
-    component: RepositoryView,
-    meta: { title: 'Repository · GitFlame CodePilot' },
+    name: 'gitflame',
+    component: GitFlameDemoView,
+    meta: { title: 'Repository · GitFlame' },
   },
   {
-    path: '/recommendations',
-    name: 'recommendations',
-    component: DetailedAnalysisView,
-    meta: { title: 'Detailed analysis · GitFlame CodePilot' },
+    path: '/codepilot',
+    name: 'codepilot',
+    component: LandingView,
+    meta: { title: 'GitFlame CodePilot' },
   },
-  // Unknown paths fall back to the repository view.
+  {
+    path: '/workspace',
+    name: 'workspace',
+    component: WorkspaceView,
+    meta: { title: 'Workspace · GitFlame CodePilot' },
+  },
+  // Unknown paths fall back to the demo GitFlame page.
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

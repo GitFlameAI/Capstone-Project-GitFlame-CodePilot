@@ -91,6 +91,10 @@ export const httpApi = {
     request('GET', `/ai/issues/${encodeURIComponent(sessionOrIssueId)}/plan`),
   approveIssue: (sessionOrIssueId) =>
     request('POST', `/ai/issues/${encodeURIComponent(sessionOrIssueId)}/approve`),
+  // Sprint 3: poll target for the code-generation task created on approve.
+  // Returns the agent task plus generated_files_contract once completed.
+  getCodeGeneration: (sessionOrIssueId) =>
+    request('GET', `/ai/issues/${encodeURIComponent(sessionOrIssueId)}/code-generation`),
   // Returns 202 with a new agent task (the correction is generated asynchronously).
   correctIssue: (sessionOrIssueId, feedback) =>
     request('POST', `/ai/issues/${encodeURIComponent(sessionOrIssueId)}/correct`, { feedback }),

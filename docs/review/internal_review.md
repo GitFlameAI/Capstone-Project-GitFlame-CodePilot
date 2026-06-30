@@ -1,3 +1,110 @@
+# Internal Review
+
+Per-sprint integration reviews. The **Sprint 3** review is current; the **Sprint 2**
+review is kept below for history.
+
+---
+
+# Internal Review — Sprint 3 (Version 3)
+
+Reviewer: Roman (frontend) · Date: Sprint 3 / Week 4
+Scope: the frontend ↔ backend contracts for the issue → plan → **code-generation** flow,
+the **configuration** contract, and the recommendations path, reviewed across the Sprint 3
+branches (`danil-codegen-contracts`, `arthur-backend`, `amir-db-storage`, `karim`,
+`ruslan-deployment`).
+
+## 1. Verified scenarios (frontend, mock mode)
+
+| # | Scenario | Result |
+| --- | --- | --- |
+| S1 | GitFlame page → Work with AI → landing; eyebrow/top chip link to gitflame.ru | PASS |
+| S2 | Connect form validation (empty token / unticked consent → red underline, blocked) | PASS |
+| S3 | Service usage policy opens in a modal; Continue is centered | PASS |
+| S4 | Repository tab: Connection/Files/Config stacked vertically; edit connection switches repo and re-locks AI tabs | PASS |
+| S5 | Config tab: only the 4 contract fields; exclude paths as a chip picker; empty categories ⇒ "no recommendations"; Save unlocks tabs | PASS |
+| S6 | Autogeneration: pick existing issue (auto-fills) or create new; no context field | PASS |
+| S7 | Plan Edit/Preview; edited plan persists on approve | PASS |
+| S8 | Approve → code-generation task polled → file ops `{action, path, description}`; Back to issues / Go to PR | PASS |
+| S9 | Approve and Reject show independent spinners | PASS |
+| S10 | Correction → new task polled → revised plan; Reject → rejected | PASS |
+| S11 | Recoverable failure (`fail`/`timeout` titles) → Retry / keep-waiting | PASS |
+| S12 | Recommendations grid → detail overlay with ←/→, delete, create issue (→ Autogeneration pre-filled) | PASS |
+| S13 | Category filter (all on → all show; all off → none); no "resolved" state present | PASS |
+
+## 2. Findings
+
+### F9 — Configuration contract drift: spec vs backend parser (severity: high) — NEW
+The authoritative Sprint 3 config spec (`docs/config/ai_config_spec.md`, danil branch) is
+intentionally small: `repository.default_branch`, `analysis.enabled` + `analysis.exclude`,
+`recommendations.enabled` + `recommendations.categories`, and
+`storage.recommendation_ttl_days`. The frontend Config form now emits exactly this shape.
+However the Go parser `ParseAIConfig` (`backend/internal/service/config.go`, arthur/amir
+branches) still enforces the **older, larger** schema and will reject the new config:
+
+- it requires `version: 1` (the new spec has no `version`);
+- it requires a non-empty `analysis.include` (dropped from the spec);
+- it requires a `code_generation` block with `require_user_approval: true` and
+  `reviewer_policy: issue_author` (the whole section was dropped from the spec);
+- it reads retention from `recommendations.retention_days`, **not** the spec's
+  `storage.recommendation_ttl_days`, so the configured TTL would be ignored.
+
+Impact: in live mode a config saved from the UI would be rejected (or its retention
+ignored). Mock mode is unaffected (it does not strictly parse the YAML).
+**Recommendation:** align the backend parser to the agreed spec — drop the `version`,
+`analysis.include` and `code_generation` requirements, and read
+`storage.recommendation_ttl_days`. The spec is the agreement, so the parser should follow
+it. **Follow-up issue:** "Align ParseAIConfig with ai_config_spec.md (drop version/include/
+code_generation; read storage.recommendation_ttl_days)".
+
+### F7 — `SaveRecommendations` fails with SQLSTATE 42P08 (severity: high) — OPEN
+The live recommendations save errors with `inconsistent types deduced for parameter $4`
+because the retention placeholder is used as both an int column value and inside a text
+interval expression. Mock mode is unaffected. A ready-to-apply fix is in
+`docs/review/sql_42P08_fix_for_amir.md` (split into two typed parameters / use
+`make_interval`). **Owner:** Amir.
+
+### F1 — Recommendation card still has no `category` (severity: medium) — STILL OPEN
+`domain.RecommendationCard` exposes no `category`, while the ML schema and the Sprint 3 UI
+(card grid + category filter) rely on it. The mock supplies `category`; the live backend
+card must add it. **Recommendation:** add `category` to the backend card + OpenAPI.
+
+### F2 — Recommendations endpoint wiring (severity: high) — TRACK
+Confirm the backend persists real ML cards (and that F7 unblocks the save). Until then live
+mode shows placeholder/empty data while mock shows the seeded report.
+
+### F8 — Code-generation polling has two valid sources (severity: info) — NOTED
+After approve, files arrive either by polling `GET /ai/tasks/{taskId}` (the approve response
+carries the code-generation `task_id`) or via `GET /ai/issues/{id}/code-generation`. The UI
+polls the task id; `getCodeGeneration()` stays in the client for parity. No action.
+
+### F-cleanup — Dead components removed (severity: info) — NEW
+Superseded Sprint 2 components and the now-orphaned `RecommendationCard.vue` /
+`SeverityBadge.vue` were removed (the new Recommendations tab renders its own cards).
+No remaining imports reference them; `npm run build` is clean (70 modules).
+
+> Sprint 2 findings F3 (OpenAPI client), F4 (id resolution), F5 (CORS / proxy-only) remain
+> open and are tracked below; none block Sprint 3.
+
+## 3. Follow-up issues to open
+
+- [ ] **Align `ParseAIConfig` with `ai_config_spec.md`** (drop version/include/code_generation; read `storage.recommendation_ttl_days`). (F9)
+- [ ] **Fix 42P08 in `SaveRecommendations`** (typed params / `make_interval`). (F7)
+- [ ] Add `category` to the backend `RecommendationCard` + OpenAPI. (F1)
+- [ ] Confirm backend recommendations endpoint persists real ML cards. (F2)
+- [ ] Generate a typed frontend API client from OpenAPI. (F3, carried over)
+- [ ] Unify issue/session id resolution across memory and Postgres stores. (F4, carried over)
+- [ ] Document proxy-only access or add CORS. (F5, carried over)
+
+## 4. Notes for the integration merge
+
+- Frontend talks only to the Go backend; no direct Agent Engine calls. Confirmed.
+- Frontend builds cleanly in both mock and `VITE_API_BASE=/api` modes.
+- The Config form emits the agreed Sprint 3 contract; live use depends on F9 being resolved.
+- Recommended merge order keeps this branch after backend/db/redis/agent; F7 and F9 should
+  land with the backend/db branches.
+
+---
+
 # Internal Review — Sprint 2 (Version 2)
 
 Reviewer: Roman (frontend) · Date: Sprint 2 / Week 3

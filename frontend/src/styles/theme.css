@@ -14,6 +14,11 @@
   --gf-purple-soft-2: rgba(174, 76, 251, 0.08);
   --gf-accent: #7822f9;
 
+  /* Signature GitFlame hero gradient (taken from gitflame.ru landing) */
+  --gf-hero: linear-gradient(91.77deg, #ba62ff -3.37%, #776def 90.77%);
+  --gf-hero-soft: linear-gradient(180deg, #f7f1ff 0%, #f2f3fa 100%);
+  --gf-locked: #b9b6cf;
+
   /* Surfaces */
   --gf-page-bg: #f2f3fa;
   --gf-surface: #ffffff;

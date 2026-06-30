@@ -1,54 +1,80 @@
-# GitFlame CodePilot — Frontend (Sprint 2 / Version 2)
+# GitFlame CodePilot — Frontend (Sprint 3 / Version 3)
 
-Vue 3 demo UI that imitates a GitFlame repository page and demonstrates the two
-AI integration points planned for the product:
+Vue 3 demo UI for the **GitFlame CodePilot** AI integration service.
 
-- a purple **Work with AI** button (next to "History") that opens a wizard
-  for configuring `.ai.yml` and for running the **issue → plan → approve/correct/reject** loop;
-- an **AI Recommendations** widget on the Code tab, with a dedicated **detailed
-  analysis** page (filters, resolve, dismiss).
+CodePilot is an AI service that GitFlame connects to. This UI demonstrates the
+integration from the outside, as the GitFlame team and the TAs would experience it.
+The frontend stays **thin** (no business logic), talks **only to the Go backend**, and
+never calls the SERGE-based Agent Engine directly.
 
-The UI is intentionally independent of GitFlame's internal code: GitFlame is
-treated as an external product that sends us `.yml`, issue data and repo metadata,
-and renders our structured responses. The frontend talks **only to the Go backend**
-and never calls the SERGE-based Agent Engine directly.
-
-## What changed in Sprint 2 (Version 2)
-
-In Sprint 1 the issue → plan call was **synchronous**: one POST returned the plan.
-In Sprint 2 the backend creates an **asynchronous agent task**, so the flow is now:
+## The Sprint 3 flow
 
 ```
-POST /integrations/gitflame/issues/analyze   -> 202 { session_id, task_id, status: "queued" }
-GET  /ai/tasks/{taskId}  (poll)              -> status: queued | processing | completed | failed
-   completed -> task.plan_markdown            (rendered as plan.md)
-   failed    -> task.error { http_status, code, detail }  (+ Retry if recoverable)
-POST /ai/tasks/{taskId}/retry                -> 202 (only for recoverable Agent Engine errors)
-POST /ai/issues/{id}/approve                 -> generated_files_contract
-POST /ai/issues/{id}/correct  { feedback }   -> 202 { task_id }  (async again — poll the new task)
-POST /ai/issues/{id}/reject                  -> 200
+/            Mock GitFlame repository page — the only integration point is the purple
+             "Work with AI" button (the eyebrow and the top chip link to gitflame.ru).
+                              │  Work with AI
+                              ▼
+/codepilot   CodePilot landing: what it does (autogeneration vs recommendations), a
+             connect form (repository URL, default branch, access token, webhook URL),
+             an AI disclaimer + consent (with a readable service usage policy), Continue.
+                              │  Continue
+                              ▼
+/workspace   Four tabs, left → right:
+             Repository · Config · Autogeneration · Recommendations
+             Autogeneration and Recommendations stay LOCKED until a .ai.yml is saved.
 ```
 
-The frontend now implements the full state machine for this flow:
-**loading / queued / processing / completed / failed / timeout / retry**, plus
-form **validation errors** and **Agent Engine errors** surfaced from `task.error`.
+### Repository tab
+Three blocks stacked top to bottom: **Connection** (editable — you can switch to a
+different repository / branch / token; changing the repository re-locks the AI tabs
+because the `.ai.yml` is per-repository), **Files** (a name/path-only tree), and
+**Recommendations** (a short analysis summary, or a prompt to configure / analyse).
 
-> Note: `{id}` in the `/ai/issues/{id}/...` routes accepts either the
-> `session_id` or the original `issue_id`. This frontend consistently uses the
-> `session_id` returned by `analyze`.
+### Config tab
+The form follows the agreed configuration contract in
+`docs/config/ai_config_spec.md` (branch `sprint-3/danil-codegen-contracts`), which is
+intentionally small. Only four things are configurable:
+
+| Field | Maps to |
+| --- | --- |
+| Default branch | `repository.default_branch` |
+| Exclude paths (chip multi-select) | `analysis.exclude` |
+| Recommendation categories (toggles) | `recommendations.categories` |
+| Keep reports for (days) | `storage.recommendation_ttl_days` |
+
+If **no category** is selected, the system produces **no recommendations**. A live
+`.ai.yml` preview updates as the form changes; **Save** unlocks the last two tabs.
+
+### Autogeneration tab
+Pick an **existing repository issue** (fields auto-fill) or **create a new one** (empty
+form). The user does **not** enter repository context — the Agent Engine prepares it via
+RAG (`context_AI/ml/autogen_prompt.md`). Submitting polls the plan task; the plan is
+**editable** (Edit / Preview). **Approve & generate code** queues a code-generation task
+and lists the **generated file operations** — each is `{ action, path, description }`,
+matching `generated_files_contract.md` (no diffs/content; branch/commit/PR/reviewer come
+from the backend wrapper). The result panel has **Back to issues** (returns to the issue
+picker) and **Go to pull request**. **Request correction** and **Reject** are also
+available; Approve and Reject show independent loading states.
+
+### Recommendations tab
+A compact **grid of small cards** (category + confidence + severity + short problem).
+Clicking a card opens a **detail overlay** (dim background) where you can page through
+recommendations with ←/→, **delete** one, or **create an issue** from it (which hands off
+to the Autogeneration tab with the title/description pre-filled). Filters sit in one row: a **confidence sort** toggle (ascending / descending), a
+**Categories** multi-select and a **Severity** multi-select (each with All / None).
+There is no "resolved" state — a recommendation is either turned into an issue or
+dismissed. Severity is kept and explained in a legend and in the overlay.
 
 ## Tech stack
 
-- Vue 3 (`<script setup>` SFCs) + Vue Router 4
-- Vite 6 build tooling
-- Plain JavaScript (no TypeScript) so the code runs as-is after `npm install`
-- No UI/icon libraries — icons are inline SVG, styling follows the GitFlame
-  palette (signature purple `#905BFB`, Geologica font)
+- Vue 3 (`<script setup>` SFCs) + Vue Router 4, Vite 6
+- Plain JavaScript (no TypeScript) — runs as-is after `npm install`
+- No UI/icon libraries — inline SVG icons, GitFlame palette (purple `#905BFB`,
+  Geologica font), tokens in `src/styles/theme.css`
 
 ## Requirements
 
-- Node.js 18+ (tested on Node 22)
-- npm 9+
+- Node.js 18+ (tested on Node 22), npm 9+
 
 ## Quick start (standalone, no backend)
 
@@ -58,98 +84,72 @@ npm install
 npm run dev
 ```
 
-Open the printed URL (default http://localhost:5173).
+Open the printed URL (default http://localhost:5173). The app runs **standalone in mock
+mode** by default — no backend, database, Redis or GPU required. The in-browser mock
+seeds a demo report and simulates the full async task lifecycle, so every loading state
+is visible. This is what the Version 3 screenshots / video are captured from.
 
-The app runs **standalone in mock mode** by default — no backend required. The
-mock backend lives entirely in the browser, seeds a demo report, and now
-simulates the **full async task lifecycle** (queued → processing → completed)
-with small delays so every loading state is visible. This is what the Version 2
-screenshots/GIFs are captured from.
+### Demo walkthrough
 
-### Triggering the error / retry / timeout states in mock mode
+1. On `/`, press **Work with AI**.
+2. On the landing screen, read the explainer and the **service usage policy** link, fill
+   the connect form (repo URL is pre-filled; enter any access token and tick both consent
+   boxes — leaving them blank shows the red-underline validation), press **Continue**.
+3. **Config:** note the "i-in-circle" hints, adjust exclude paths / categories, then
+   **Save .ai.yml** (unlocks the last two tabs).
+4. **Autogeneration:** pick an existing issue or create a new one, **Generate plan**, edit
+   the plan, then **Approve & generate code** to see the generated file operations.
+5. **Recommendations:** browse the card grid, sort by confidence or filter by category & severity, open a card to page
+   through, delete, or **Create issue** (jumps to Autogeneration pre-filled).
 
-The mock reads the **issue title** to decide the outcome, so you can demo every
-branch without a backend:
+### Triggering error / retry / timeout states in mock mode
 
-| Put this in the issue title | Result |
-| --- | --- |
-| anything normal (e.g. "Add pagination") | task **completes**, plan is shown |
-| contains **`fail`** | task **fails** with `502 agent_engine_error` → **Retry** appears (retry then succeeds) |
-| contains **`timeout`** | task **fails** with `504 inference_timeout` → **Retry** appears |
-| leave title or repository context empty | **validation error** on the form |
+The mock reads the **issue title**: a title containing `fail` → `502 agent_engine_error`
+(Retry appears); `timeout` → `504 inference_timeout`; an empty title/description/author →
+a validation error.
 
 ## Mock mode vs. live backend
 
-Mode is selected automatically by the `VITE_API_BASE` environment variable.
+Mode is selected by `VITE_API_BASE` (empty = mock; set, e.g. `/api`, = live HTTP). To run
+against the Go backend (port 8000): `cp .env.example .env` (it contains
+`VITE_API_BASE=/api`) and `npm run dev`. `vite.config.js` proxies `/api` →
+`http://localhost:8000`.
 
-| Mode | When | What it does |
-| --- | --- | --- |
-| Mock (default) | `VITE_API_BASE` is **unset / empty** | In-browser backend, no server needed |
-| Live | `VITE_API_BASE` is set (e.g. `/api`) | Real HTTP calls to the Go backend |
-
-To run against the team's Go backend (Artur's service, port 8000):
-
-```bash
-# 1. start the Go backend so it listens on :8000
-#    (full stack: docker-compose up — backend + postgres + redis + agent-worker)
-
-# 2. point the frontend at it
-cp .env.example .env
-# .env already contains: VITE_API_BASE=/api
-
-npm run dev
-```
-
-`vite.config.js` proxies `/api` → `http://localhost:8000`, so the browser is not
-affected by CORS during development. The frontend uses exactly the endpoint
-shapes the Go backend exposes, so no code change is needed to switch modes.
+> Contract note: the Config form emits the Sprint 3 configuration contract
+> (`docs/config/ai_config_spec.md`). The backend YAML parser still enforces the older,
+> larger schema; reconciling the two is tracked in `docs/review/internal_review.md`
+> (finding F9). Mock mode is unaffected.
 
 ## Endpoints consumed
 
-Issue → plan workflow (Version 2, async):
-
-- `POST   /integrations/gitflame/issues/analyze`  → `202 { session_id, task_id, status }`
-- `GET    /ai/tasks/{taskId}`                      → task status + `plan_markdown` / `error`
-- `POST   /ai/tasks/{taskId}/retry`               → re-queue a recoverable failed task
-- `POST   /ai/issues/{id}/approve`                → `generated_files_contract`
-- `POST   /ai/issues/{id}/correct`  `{ feedback }`→ `202 { task_id }` (poll again)
-- `POST   /ai/issues/{id}/reject`
+Issue → plan → code-generation:
+`POST /integrations/gitflame/issues/analyze` → `GET /ai/tasks/{taskId}` (poll) →
+`POST /ai/tasks/{taskId}/retry` · `POST /ai/issues/{id}/approve` →
+`GET /ai/issues/{id}/code-generation` (poll) · `POST /ai/issues/{id}/correct` ·
+`POST /ai/issues/{id}/reject`.
 
 Recommendations:
-
-- `POST   /integrations/gitflame/repositories/{id}/recommendations/analyze`
-- `GET    /repositories/{id}/recommendations/status`
-- `GET    /repositories/{id}/recommendations/summary`
-- `GET    /repositories/{id}/recommendations`
-- `PATCH  /recommendations/{id}/close`
-- `DELETE /recommendations/{id}`
+`POST /integrations/gitflame/repositories/{id}/recommendations/analyze` ·
+`GET /repositories/{id}/recommendations[/status|/summary]` ·
+`DELETE /recommendations/{id}` (Sprint 3 UI uses analyze / summary / list / delete;
+`PATCH /recommendations/{id}/close` remains in the client for backend parity but is no
+longer used by the UI).
 
 ## Project structure
 
 ```
-frontend/
-├── index.html              # loads fonts, mounts #app
-├── vite.config.js          # @ alias, dev proxy /api -> :8000
-├── .env.example            # VITE_API_BASE toggle
-├── src/
-│   ├── main.js             # app entry
-│   ├── App.vue             # router shell
-│   ├── router.js           # / and /recommendations
-│   ├── api/
-│   │   ├── index.js        # selects mock vs http + pollTask() helper
-│   │   ├── client.js       # real fetch client + ApiError (carries error code)
-│   │   └── mock.js         # in-browser backend, async task lifecycle + seed data
-│   ├── data/demo.js        # demo repo, files, default .ai.yml, repository context
-│   ├── styles/theme.css    # GitFlame design tokens
-│   ├── components/
-│   │   ├── ui/             # GfButton, GfModal, GfIcon, GfSpinner
-│   │   ├── RepoChrome.vue, RepoToolbar.vue, FileBrowser.vue
-│   │   ├── RecommendationsWidget.vue, RecommendationCard.vue, SeverityBadge.vue
-│   │   ├── WorkWithAiWizard.vue, YamlConfigPanel.vue, IssuePlanPanel.vue
-│   └── views/
-│       ├── RepositoryView.vue        # / — Code page + widget + wizard
-│       └── DetailedAnalysisView.vue  # /recommendations — full report
-└── README.md
+frontend/src/
+  router.js                 # / , /codepilot , /workspace
+  store/session.js          # reactive() singleton: connection + config + pendingIssue
+  data/demo.js              # demo repo, issues, file tree, exclude options, .ai.yml build/parse
+  utils/markdown.js         # dependency-free Markdown renderer
+  api/{index,client,mock}.js
+  components/
+    ui/                     # GfButton, GfIcon, GfSpinner, GfModal, GfTooltip
+    RepoChrome, RepoToolbar, FileBrowser     # mock GitFlame page
+    FileTree, ContextPicker, MarkdownView    # workspace building blocks
+    workspace/{RepositoryTab,ConfigTab,AutogenTab,RecommendationsTab}.vue
+  views/{GitFlameDemoView,LandingView,WorkspaceView}.vue
 ```
 
 ## Build
