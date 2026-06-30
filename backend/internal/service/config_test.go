@@ -9,17 +9,36 @@ func TestParseAIConfigRejectsInvalidYAMLAndModelSelection(t *testing.T) {
 	if _, err := ParseAIConfig("version: 1\nagent_model: attacker/model\n"); err == nil {
 		t.Fatal("expected repository-controlled model selection to be rejected")
 	}
-	if _, err := ParseAIConfig("version: 1\nrecommendations:\n  retention_days: nope\n"); err == nil {
+	if _, err := ParseAIConfig("storage:\n  recommendation_ttl_days: nope\n"); err == nil {
 		t.Fatal("expected invalid retention period to be rejected")
 	}
 }
 
-func TestParseAIConfigSupportsInlineLists(t *testing.T) {
-	cfg, err := ParseAIConfig("version: 1\nanalysis:\n  enabled: true\n  include: [internal/**, cmd/**]\n")
+func TestParseAIConfigSupportsSprint3Spec(t *testing.T) {
+	cfg, err := ParseAIConfig(`repository:
+  default_branch: develop
+analysis:
+  enabled: true
+  exclude:
+    - node_modules/**
+    - dist/**
+recommendations:
+  enabled: true
+  categories:
+    - security
+storage:
+  recommendation_ttl_days: 14
+`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.IncludePatterns) != 2 || cfg.IncludePatterns[0] != "internal/**" || cfg.IncludePatterns[1] != "cmd/**" {
-		t.Fatalf("unexpected inline include patterns: %#v", cfg.IncludePatterns)
+	if cfg.DefaultBranch != "develop" {
+		t.Fatalf("unexpected default branch: %s", cfg.DefaultBranch)
+	}
+	if cfg.RetentionDays != 14 {
+		t.Fatalf("unexpected retention days: %d", cfg.RetentionDays)
+	}
+	if len(cfg.ExcludePatterns) != 2 || cfg.ExcludePatterns[0] != "node_modules/**" || cfg.ExcludePatterns[1] != "dist/**" {
+		t.Fatalf("unexpected exclude patterns: %#v", cfg.ExcludePatterns)
 	}
 }

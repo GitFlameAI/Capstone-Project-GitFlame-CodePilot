@@ -33,7 +33,7 @@ The migration creates:
 
 `generated_plans` stores the current plan for a session. `plan_revisions` stores the plan history, including correction feedback and user-edited plan versions through the `user_edit` source value. `agent_tasks` stores the current Agent Engine task status, including `initial_plan`, `plan_revision`, and `code_generation`, while `agent_task_statuses` stores the transition history for `queued`, `processing`, `completed`, and `failed`.
 
-Recommendation retention is stored on `recommendation_runs` with `retention_days` and `expires_at`. The backend takes `retention_days` from the validated `.yml` configuration; it is not chosen by the database.
+Recommendation retention is stored on `recommendation_runs` with `retention_days` and `expires_at`. The backend takes this value from `storage.recommendation_ttl_days` in the validated `.yml` configuration; it is not chosen by the database.
 
 ## Docker Initialization
 

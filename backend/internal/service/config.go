@@ -26,7 +26,7 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 		return domain.AIConfig{}, errors.New("model selection is operator-controlled")
 	}
 	doc := parseSimpleYAML(raw)
-	retentionDays, err := strictInteger(doc, "recommendations.retention_days", 30)
+	retentionDays, err := strictInteger(doc, "storage.recommendation_ttl_days", 30)
 	if err != nil {
 		return domain.AIConfig{}, err
 	}
@@ -47,31 +47,14 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 		CorrectCommand:     scalar(doc, "code_generation.allowed_actions.correct_command", "/correct"),
 		RejectCommand:      scalar(doc, "code_generation.allowed_actions.reject_command", "/reject"),
 	}
-	if cfg.Version != "1" {
-		return cfg, fmt.Errorf("unsupported .yml version %q", cfg.Version)
-	}
 	if !cfg.AnalysisEnabled {
 		return cfg, errors.New("repository analysis is disabled in .yml configuration")
 	}
 	if strings.TrimSpace(cfg.DefaultBranch) == "" || strings.TrimSpace(cfg.TargetBranchPrefix) == "" {
 		return cfg, errors.New("repository branch configuration is required")
 	}
-	if len(cfg.IncludePatterns) == 0 {
-		return cfg, errors.New("analysis.include must contain at least one pattern")
-	}
 	if cfg.RetentionDays < 1 || cfg.RetentionDays > 365 {
-		return cfg, errors.New("recommendations.retention_days must be between 1 and 365")
-	}
-	if !cfg.RequireApproval {
-		return cfg, errors.New("code_generation.require_user_approval must be true")
-	}
-	if cfg.ReviewerPolicy != "issue_author" {
-		return cfg, fmt.Errorf("unsupported reviewer policy %q", cfg.ReviewerPolicy)
-	}
-	for name, value := range map[string]string{"approve": cfg.ApproveCommand, "correct": cfg.CorrectCommand, "reject": cfg.RejectCommand} {
-		if !strings.HasPrefix(value, "/") {
-			return cfg, fmt.Errorf("%s command must start with /", name)
-		}
+		return cfg, errors.New("storage.recommendation_ttl_days must be between 1 and 365")
 	}
 	return cfg, nil
 }
