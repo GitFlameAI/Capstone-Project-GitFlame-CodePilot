@@ -7,10 +7,12 @@ import (
 )
 
 type Config struct {
-	Addr, AgentEngineURL, RedisURL, DatabaseURL      string
-	AgentQueueName, AgentConsumerGroup, DispatchMode string
-	AgentTimeout                                     time.Duration
-	QueueMaxLength, WorkerMaxRetries                 int
+	Addr, AgentEngineURL, RedisURL, DatabaseURL          string
+	GitFlameBaseURL, GitFlameAPIKey                      string
+	RecommendationServiceURL                             string
+	AgentQueueName, AgentConsumerGroup, DispatchMode     string
+	AgentTimeout, GitFlameTimeout, RecommendationTimeout time.Duration
+	QueueMaxLength, WorkerMaxRetries                     int
 }
 
 func Load() Config {
@@ -18,19 +20,26 @@ func Load() Config {
 	if err != nil || seconds < 1 {
 		seconds = 120
 	}
+	gitFlameSeconds := positiveInt("GITFLAME_TIMEOUT_SECONDS", 30)
+	recommendationSeconds := positiveInt("RECOMMENDATION_SERVICE_TIMEOUT_SECONDS", 120)
 	queueMaxLength := positiveInt("AGENT_QUEUE_MAX_LENGTH", 1000)
 	workerMaxRetries := positiveInt("WORKER_MAX_RETRIES", 3)
 	return Config{
-		Addr:               ":" + env("BACKEND_PORT", "8000"),
-		AgentEngineURL:     env("AGENT_ENGINE_URL", env("ML_SERVICE_URL", "http://localhost:8001")),
-		RedisURL:           env("REDIS_URL", ""),
-		DatabaseURL:        env("DATABASE_URL", ""),
-		AgentQueueName:     env("AGENT_QUEUE_NAME", "gitflame:agent:tasks"),
-		AgentConsumerGroup: env("AGENT_CONSUMER_GROUP", "gitflame-agent-workers"),
-		DispatchMode:       env("TASK_DISPATCH_MODE", "local"),
-		AgentTimeout:       time.Duration(seconds) * time.Second,
-		QueueMaxLength:     queueMaxLength,
-		WorkerMaxRetries:   workerMaxRetries,
+		Addr:                     ":" + env("BACKEND_PORT", "8000"),
+		AgentEngineURL:           env("AGENT_ENGINE_URL", env("ML_SERVICE_URL", "http://localhost:8001")),
+		RedisURL:                 env("REDIS_URL", ""),
+		DatabaseURL:              env("DATABASE_URL", ""),
+		GitFlameBaseURL:          env("GITFLAME_BASE_URL", ""),
+		GitFlameAPIKey:           env("GITFLAME_API_KEY", ""),
+		RecommendationServiceURL: env("RECOMMENDATION_SERVICE_URL", ""),
+		AgentQueueName:           env("AGENT_QUEUE_NAME", "gitflame:agent:tasks"),
+		AgentConsumerGroup:       env("AGENT_CONSUMER_GROUP", "gitflame-agent-workers"),
+		DispatchMode:             env("TASK_DISPATCH_MODE", "local"),
+		AgentTimeout:             time.Duration(seconds) * time.Second,
+		GitFlameTimeout:          time.Duration(gitFlameSeconds) * time.Second,
+		RecommendationTimeout:    time.Duration(recommendationSeconds) * time.Second,
+		QueueMaxLength:           queueMaxLength,
+		WorkerMaxRetries:         workerMaxRetries,
 	}
 }
 

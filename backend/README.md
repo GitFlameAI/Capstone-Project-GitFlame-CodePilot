@@ -2,7 +2,7 @@
 
 The backend service exposes GitFlame integration endpoints, validates repository configuration, stores workflow state, and communicates with Agent Engine.
 
-Current Sprint 3 Go backend includes:
+Current Sprint 4 Go backend includes:
 
 - `GET /health`
 - `GET /ready` with storage, Redis, and Agent Engine dependency checks
@@ -11,6 +11,7 @@ Current Sprint 3 Go backend includes:
 - asynchronous Agent Engine integration through `POST /v1/plans/generate` and `POST /v1/files/generate`
 - issue workflow endpoints:
   - `POST /integrations/gitflame/issues/analyze`
+  - `POST /integrations/gitflame/webhooks/issues`
   - `GET /ai/tasks/{taskId}`
   - `POST /ai/tasks/{taskId}/retry`
   - `GET /ai/issues/{id}/plan`
@@ -29,6 +30,9 @@ Current Sprint 3 Go backend includes:
 - correction requests that send both the previous plan and user feedback to Agent Engine
 - Agent Engine error mapping for `400`, `404`, `422`, `502`, `503`, and `504`
 - code-generation task queued after approval with generated file operations and a GitFlame branch/commit/PR payload
+- approval can include an edited `plan_markdown`; backend validates and sends that exact final plan to code generation
+- GitFlame webhook ingestion can fetch `.ai.yml`, repository tree, and file contents through `GITFLAME_BASE_URL`
+- repository recommendations are generated through the external recommendation service and persisted without a fallback card
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations
 - Redis Streams broker with consumer groups, retry, queue limit, acknowledgement, and dead-letter handling
 - standalone `cmd/agent-worker` with concurrency `1`
@@ -68,6 +72,9 @@ The backend receives:
 ```text
 AGENT_ENGINE_URL=http://agent-engine:8001
 AGENT_ENGINE_TIMEOUT_SECONDS=600
+GITFLAME_BASE_URL=
+GITFLAME_API_KEY=
+RECOMMENDATION_SERVICE_URL=http://recommendations:8000
 REDIS_URL=redis://redis:6379/0
 AGENT_QUEUE_NAME=gitflame:agent:tasks
 DATABASE_URL=postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
@@ -119,13 +126,14 @@ cmd/server              application entry point
 internal/config         environment configuration
 internal/domain         API and workflow domain models
 internal/agent          SERGE-based Agent Engine HTTP client
+internal/httpapi        routing plus GitFlame and recommendation service integration clients
 internal/repository     storage contracts and development implementation
 internal/queue          Redis Streams broker and job transport
 internal/service        validation and issue workflow orchestration
-internal/httpapi        routing, HTTP handlers, OpenAPI and integration tests
 db                      SQL schema and verification scripts
 ```
 
 See [`docs/architecture/backend.md`](docs/architecture/backend.md) for the boundaries and request flow.
 Sprint 3 backend report material is in [`docs/report/backend_version_3.md`](docs/report/backend_version_3.md).
+Sprint 4 backend report material is in [`docs/report/backend_version_4.md`](docs/report/backend_version_4.md).
 The Redis payload and delivery rules are documented in [`docs/architecture/redis_job_contract.md`](docs/architecture/redis_job_contract.md).

@@ -17,10 +17,12 @@ import (
 )
 
 type Server struct {
-	workflow *service.Workflow
-	store    repository.Store
-	router   *http.ServeMux
-	checks   map[string]func(context.Context) error
+	workflow    *service.Workflow
+	store       repository.Store
+	gitflame    GitFlameSource
+	recommender RecommendationAnalyzer
+	router      *http.ServeMux
+	checks      map[string]func(context.Context) error
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -33,6 +35,8 @@ func New(cfg config.Config) (*Server, error) {
 		store = postgres
 	}
 	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
+	gitflame := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout)
+	recommender := NewRecommendationClient(cfg.RecommendationServiceURL, cfg.RecommendationTimeout)
 	checks := map[string]func(context.Context) error{"storage": store.Ping, "agent_engine": engine.Ready}
 	if cfg.DispatchMode == "redis" {
 		if cfg.DatabaseURL == "" {
@@ -43,16 +47,20 @@ func New(cfg config.Config) (*Server, error) {
 			return nil, err
 		}
 		checks["redis"] = broker.Ping
-		return newServer(service.NewQueuedWorkflow(store, broker), store, checks), nil
+		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, checks), nil
 	}
-	return newServer(service.NewWorkflow(store, engine), store, checks), nil
+	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, checks), nil
 }
 func NewWithDependencies(store repository.Store, generator agent.Generator) *Server {
-	return newServer(service.NewWorkflow(store, generator), store, map[string]func(context.Context) error{"storage": store.Ping})
+	return NewWithDependenciesAndIntegrations(store, generator, nil, nil)
 }
 
-func newServer(workflow *service.Workflow, store repository.Store, checks map[string]func(context.Context) error) *Server {
-	s := &Server{workflow: workflow, store: store, checks: checks}
+func NewWithDependenciesAndIntegrations(store repository.Store, generator agent.Generator, gitflame GitFlameSource, recommender RecommendationAnalyzer) *Server {
+	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, map[string]func(context.Context) error{"storage": store.Ping})
+}
+
+func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, checks map[string]func(context.Context) error) *Server {
+	s := &Server{workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, checks: checks}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /ready", s.ready)
@@ -61,6 +69,7 @@ func newServer(workflow *service.Workflow, store repository.Store, checks map[st
 	mux.HandleFunc("GET /swagger/index.html", s.docs)
 	mux.HandleFunc("GET /openapi.json", s.openAPI)
 	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
+	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
 	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
 	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
 	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
@@ -214,7 +223,16 @@ type actionResponse struct {
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
-	v, task, err := s.workflow.Approve(r.PathValue("id"))
+	var req struct {
+		PlanMarkdown *string `json:"plan_markdown"`
+	}
+	if r.ContentLength != 0 {
+		if err := decode(r, &req); err != nil {
+			problem(w, 400, "invalid_json", err.Error())
+			return
+		}
+	}
+	v, task, err := s.workflow.Approve(r.PathValue("id"), req.PlanMarkdown)
 	if err != nil {
 		workflowError(w, err)
 		return
@@ -271,6 +289,7 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Repository        domain.RepositoryMetadata `json:"repository"`
 		YAMLConfig        string                    `json:"yaml_config"`
+		RepositoryFiles   []domain.RepositoryFile   `json:"repository_files"`
 		RepositoryContext []string                  `json:"repository_context"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -286,9 +305,41 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 422, "validation_error", err.Error())
 		return
 	}
-	confidence := .72
-	cards := []domain.RecommendationCard{{ID: repository.NewID(), Severity: "low", File: "README.md", Problem: "Project setup documentation is minimal.", Suggestion: "Document Sprint 2 Agent Engine configuration.", Confidence: &confidence, State: "open"}}
-	report, err := s.store.SaveRecommendations(req.Repository, cfg, "Local recommendation fallback completed.", cards)
+	files := append([]domain.RepositoryFile(nil), req.RepositoryFiles...)
+	if len(files) == 0 {
+		for _, path := range req.RepositoryContext {
+			files = append(files, domain.RepositoryFile{Path: path})
+		}
+	}
+	if len(files) == 0 {
+		problem(w, 422, "validation_error", "repository_files must contain at least one file")
+		return
+	}
+	if err := service.ValidateRepositoryFilesForIntegration(files); err != nil {
+		problem(w, 422, "validation_error", err.Error())
+		return
+	}
+	if s.recommender == nil {
+		problem(w, http.StatusServiceUnavailable, "recommendation_service_unavailable", "recommendation service client is not configured")
+		return
+	}
+	summary, cards, err := s.recommender.AnalyzeRecommendations(r.Context(), req.YAMLConfig, files)
+	if err != nil {
+		integrationError(w, err, "recommendation_service_error")
+		return
+	}
+	for index := range cards {
+		if cards[index].ID == "" {
+			cards[index].ID = repository.NewID()
+		}
+		if cards[index].State == "" {
+			cards[index].State = "open"
+		}
+		if cards[index].Severity == "" {
+			cards[index].Severity = "medium"
+		}
+	}
+	report, err := s.store.SaveRecommendations(req.Repository, cfg, summary, cards)
 	if err != nil {
 		problem(w, 500, "storage_error", err.Error())
 		return
