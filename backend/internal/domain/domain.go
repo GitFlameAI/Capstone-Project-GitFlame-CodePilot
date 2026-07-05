@@ -191,6 +191,64 @@ type GitFlameApplyResult struct {
 	PullRequestURL string `json:"pull_request_url,omitempty"`
 }
 
+type GitFlameConnection struct {
+	ID                   string             `json:"id"`
+	Repository           RepositoryMetadata `json:"repository"`
+	RepoURL              string             `json:"repo_url"`
+	DefaultBranch        string             `json:"default_branch"`
+	AccessTokenEncrypted string             `json:"-"`
+	TokenLast4           string             `json:"token_last4,omitempty"`
+	TokenStatus          string             `json:"token_status"`
+	CreatedAt            time.Time          `json:"created_at,omitempty"`
+	UpdatedAt            time.Time          `json:"updated_at,omitempty"`
+}
+
+type GitFlameWebhookRegistration struct {
+	ID                string    `json:"id"`
+	ConnectionID      string    `json:"connection_id"`
+	WebhookURL        string    `json:"webhook_url"`
+	WebhookSecretHash string    `json:"-"`
+	Events            []string  `json:"events"`
+	Status            string    `json:"status"`
+	ExternalWebhookID string    `json:"external_webhook_id,omitempty"`
+	CreatedAt         time.Time `json:"created_at,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at,omitempty"`
+}
+
+type GitFlameWebhookEvent struct {
+	ID             string         `json:"id"`
+	WebhookID      string         `json:"webhook_id"`
+	EventType      string         `json:"event_type"`
+	Action         string         `json:"action,omitempty"`
+	DeliveryID     string         `json:"delivery_id,omitempty"`
+	RepositoryID   string         `json:"repository_id,omitempty"`
+	IssueSessionID string         `json:"issue_session_id,omitempty"`
+	Payload        map[string]any `json:"payload,omitempty"`
+	Status         string         `json:"status"`
+	Error          *TaskError     `json:"error,omitempty"`
+	ReceivedAt     time.Time      `json:"received_at,omitempty"`
+	ProcessedAt    *time.Time     `json:"processed_at,omitempty"`
+}
+
+type RepositorySnapshot struct {
+	ID           string     `json:"id"`
+	RepositoryID string     `json:"repository_id"`
+	ConnectionID string     `json:"connection_id,omitempty"`
+	Ref          string     `json:"ref,omitempty"`
+	CommitSHA    string     `json:"commit_sha,omitempty"`
+	AIConfigID   string     `json:"ai_config_id,omitempty"`
+	FileCount    int        `json:"file_count"`
+	Status       string     `json:"status"`
+	Error        *TaskError `json:"error,omitempty"`
+	FetchedAt    time.Time  `json:"fetched_at,omitempty"`
+}
+
+type RepositorySnapshotFile struct {
+	Path        string `json:"path"`
+	ContentHash string `json:"content_hash,omitempty"`
+	CommitSHA   string `json:"commit_sha,omitempty"`
+}
+
 type GeneratedFileOperation struct {
 	Action          string `json:"action"`
 	Path            string `json:"path"`
