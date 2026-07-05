@@ -1,5 +1,66 @@
 # Agent Engine - Karim Deliverables
 
+## Sprint 4 real model endpoint and method improvements
+
+Sprint 4 moves the Agent Engine from a placeholder/provider-dependent model setup to a verified
+university vLLM endpoint:
+
+```text
+AGENT_MODEL=laguna
+OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
+OPENAI_API_KEY=<runtime secret>
+MODEL_CONTEXT_LIMIT=32768
+```
+
+The API key is intentionally not stored in the repository. It must be supplied through `.env`,
+VM secrets, or CI/runtime secret storage.
+
+Verification performed on July 5, 2026:
+
+| Check | Result |
+| --- | --- |
+| `GET /v1/models` | HTTP 200 |
+| Model id | `laguna` |
+| Model root | `poolside/Laguna-XS.2` |
+| Serving stack | `vllm` |
+| Advertised context | `32768` tokens |
+| Agent Engine client readiness | `ready=True` |
+| Agent Engine HTTP `/ready` | `{"status":"ready","model":"laguna","version":"3.0.0"}` |
+| `POST /v1/plans/generate` smoke test | `status=completed`, `model=laguna`, `plan_markdown` returned |
+| `POST /v1/files/generate` smoke test | `status=completed`, generated-files contract returned |
+
+The current `OpenAICompatibleClient` works with this endpoint through the streaming chat-completion
+path and records usage metadata. The Agent Engine can also complete both Sprint 4 runtime endpoints
+against `laguna`: issue-to-plan and approved-plan-to-generated-files. This gives Arthur and Ruslan
+concrete runtime values for backend integration, Compose/VM setup, and healthcheck evidence.
+
+### Recommendation model strategy
+
+Recommendations remain a separate service boundary for Sprint 4. The verified `laguna` endpoint is
+used for Agent Engine planning and generated-files output, while the recommendation service keeps
+its existing structured recommendation prompt, JSON Schema, category allowlist, and file/line
+post-validation. This avoids coupling the weekly demo to a second model-client migration while
+still leaving a clear future path to an OpenAI-compatible recommendation client.
+
+Final Sprint 4 recommendation categories:
+
+- `security`
+- `performance`
+- `maintainability`
+- `architecture`
+- `code_duplication`
+
+Detailed rationale: `../context_AI/ml/sprint4_model_strategy.md`.
+
+### Sprint 4 links
+
+- Runtime env example: `../.env.example`
+- Model selection: `../context_AI/ml/model_selection.md`
+- Sprint 4 strategy: `../context_AI/ml/sprint4_model_strategy.md`
+- Recommendation prompt: `recommendation_prompt.md`
+- Recommendation schema: `recommendation_schema.json`
+- Recommendation model comparison: `model_comparison.md`
+
 ## Sprint 3 Version 3: approved plan to generated files
 
 Version 3 extends the Sprint 2 `issue -> plan.md` Agent Engine with a second, post-approval flow:
@@ -134,8 +195,8 @@ files record this blocker instead of presenting fabricated metrics.
 ## Handoff links
 
 - Agent Engine endpoints: source package `src/agent_engine` and generated `/docs` OpenAPI UI.
-- Model artifact: `Qwen/Qwen3-Coder-30B-A3B-Instruct` (quantized artifact link to be inserted after
-  demo-stand publication).
+- Model artifact: `laguna` on the university vLLM endpoint
+  (`poolside/Laguna-XS.2`, OpenAI-compatible API).
 - Pull request: to be inserted after this branch is pushed and a PR is created.
 - Experiment results: paths listed above; replace the blocked probe with demo-stand results before
   the weekly report is submitted.

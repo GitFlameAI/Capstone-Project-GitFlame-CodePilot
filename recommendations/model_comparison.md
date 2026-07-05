@@ -1,5 +1,27 @@
 # Recommendation Model Comparison
 
+## Sprint 4 Recommendation Strategy
+
+Sprint 4 keeps recommendations on the dedicated recommendation service instead of merging them into
+the Agent Engine `laguna` runtime.
+
+`laguna` is the verified primary model for issue-to-plan and approved-plan-to-generated-files work.
+The recommendation workflow stays separate because it already has a stable prompt, JSON Schema,
+category allowlist, file/line validation, and explicit failure contract. This lets the team connect
+real recommendations in the backend without making the Sprint 4 demo depend on a second migration
+from Ollama structured outputs to OpenAI-compatible structured outputs.
+
+The final supported recommendation categories are:
+
+- `security`
+- `performance`
+- `maintainability`
+- `architecture`
+- `code_duplication`
+
+The service accepts only these categories from `.yml` and rejects any model output outside the
+allowlist.
+
 ## Decision
 
 **Primary Sprint 1 candidate: `Qwen2.5-Coder-1.5B-Instruct`.**

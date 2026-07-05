@@ -8,12 +8,27 @@
 | Qwen2.5-Coder-32B-Instruct | 32B, dense | Apache 2.0 | Available through Hugging Face Inference Providers | Fallback | Mature coding model with broad language support and predictable instruction following. |
 | DeepSeek-Coder-V2-Lite-Instruct | 16B total / 2.4B active, MoE | DeepSeek Model License | Model is on Hugging Face Hub, but not currently available through Inference Providers | Original lightweight fallback | Lower active parameter count and suitable for cheaper local inference. |
 | Cohere North Mini Code | 30B total / 3B active, MoE | Apache 2.0 | Not currently listed by Hugging Face Inference Providers | Alternative primary | Coding-focused MoE candidate with efficient inference and permissive licensing. |
-| Poolside Laguna XS.2 | 33B total / 3B active, MoE | Apache 2.0 | Not currently listed by Hugging Face Inference Providers | Alternative primary | Designed for coding and agentic tasks with a small active parameter count. |
+| Poolside Laguna XS.2 | 33B total / 3B active, MoE | Apache 2.0 | Available on the university vLLM endpoint as `laguna` | **Sprint 4 primary** | Designed for coding and agentic tasks with a small active parameter count; verified through the OpenAI-compatible Agent Engine client. |
 | Devstral Small 2 | 24B, dense | Apache 2.0 | Not currently listed by Hugging Face Inference Providers | Quality fallback | Coding-agent model with moderate size and simpler dense deployment. |
 | Mellum2 12B Thinking | 12B total / 2.5B active, MoE | Apache 2.0 | Not currently listed by Hugging Face Inference Providers | Lightweight candidate | Smallest original candidate; intended for code generation, editing, debugging, and tool use. |
 | Qwen3.6-35B-A3B | 35B total / 3B active, MoE | Apache 2.0 | Exact 35B checkpoint is not currently listed by Hugging Face Inference Providers | Additional main candidate | Newer repository-level and agentic coding candidate with only 3B active parameters. |
 
-## Preliminary Selection
+## Sprint 4 Selection
+
+- **Primary runtime:** `laguna` on the university vLLM endpoint.
+- **Model root:** `poolside/Laguna-XS.2`.
+- **Endpoint contract:** OpenAI-compatible `/v1/models` and `/v1/chat/completions`.
+- **Context setting:** `MODEL_CONTEXT_LIMIT=32768`, matching the advertised vLLM
+  `max_model_len`.
+- **Fallback candidate:** `Qwen/Qwen3-Coder-30B-A3B-Instruct` through a hosted
+  OpenAI-compatible provider if the university endpoint is unavailable.
+
+The primary Sprint 4 choice is no longer only a paper selection: `GET /v1/models`, the
+Agent Engine client readiness check, and the Agent Engine HTTP `/ready` endpoint have all been
+verified against `laguna`. Detailed evidence and report text are in
+`context_AI/ml/sprint4_model_strategy.md`.
+
+## Earlier Preliminary Selection
 
 - **Primary:** `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 - **Fallback:** `Qwen/Qwen2.5-Coder-32B-Instruct`
@@ -27,4 +42,3 @@ Qwen3-Coder-30B-A3B-Instruct remains the main candidate because it is coding-foc
 A single Qwen3-Coder request was completed to verify that the Hugging Face integration can return a valid `plan.md`. This is an integration demonstration, not a comparative benchmark.
 
 Full model testing cannot be completed in the current sprint because the provided GPU container does not expose a working CUDA device, while most original candidates are unavailable through Hugging Face Inference Providers. Comparative evaluation of plan quality, latency, resource usage, and quantized checkpoints is therefore moved to the next sprint after the container is fixed.
-

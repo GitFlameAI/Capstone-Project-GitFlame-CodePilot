@@ -13,10 +13,17 @@ cp .env.example .env
 Set the primary model endpoint:
 
 ```text
-AGENT_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
-OPENAI_BASE_URL=https://router.huggingface.co/v1
+AGENT_MODEL=laguna
+OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
 OPENAI_API_KEY=
+MODEL_CONTEXT_LIMIT=32768
 ```
+
+The Sprint 4 university vLLM endpoint was verified on July 5, 2026: `/v1/models` returned
+`laguna`, Agent Engine `/ready` returned `{"status":"ready","model":"laguna","version":"3.0.0"}`,
+and both Agent Engine runtime smoke tests returned `status=completed` for `/v1/plans/generate` and
+`/v1/files/generate`. Supply `OPENAI_API_KEY` only through runtime secrets or a local `.env`; never
+commit it.
 
 Set fallback model values only when a second model endpoint is available:
 
