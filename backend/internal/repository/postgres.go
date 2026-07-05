@@ -419,7 +419,7 @@ func (s *PostgresStore) SaveRecommendations(repository domain.RepositoryMetadata
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO recommendations
 			(id,recommendation_run_id,file_path,line_number,category,severity,problem,suggestion,confidence,current_status,updated_at)
-			VALUES ($1::uuid,$2::uuid,$3,$4,'general',$5,$6,$7,$8,$9,now())`, cards[index].ID, runID, cards[index].File, cards[index].Line, cards[index].Severity, cards[index].Problem, cards[index].Suggestion, cards[index].Confidence, cards[index].State)
+			VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,now())`, cards[index].ID, runID, cards[index].File, cards[index].Line, recommendationCategory(cards[index].Category), cards[index].Severity, cards[index].Problem, cards[index].Suggestion, cards[index].Confidence, cards[index].State)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +441,7 @@ func (s *PostgresStore) Recommendations(repositoryID string) (*domain.Recommenda
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(context.Background(), `SELECT id::text,severity,file_path,line_number,problem,suggestion,confidence,current_status
+	rows, err := s.pool.Query(context.Background(), `SELECT id::text,severity,category,file_path,line_number,problem,suggestion,confidence,current_status
 		FROM recommendations WHERE recommendation_run_id=$1::uuid AND current_status<>'deleted' ORDER BY created_at`, runID)
 	if err != nil {
 		return nil, err
@@ -480,7 +480,7 @@ func (s *PostgresStore) updateRecommendation(id, status string) (domain.Recommen
 	}
 	defer tx.Rollback(ctx)
 	row := tx.QueryRow(ctx, `UPDATE recommendations SET current_status=$2,updated_at=now() WHERE id::text=$1
-		RETURNING id::text,severity,file_path,line_number,problem,suggestion,confidence,current_status`, id, status)
+		RETURNING id::text,severity,category,file_path,line_number,problem,suggestion,confidence,current_status`, id, status)
 	card, err := scanRecommendation(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return card, ErrNotFound
@@ -501,7 +501,7 @@ func scanRecommendation(row rowScanner) (domain.RecommendationCard, error) {
 	var card domain.RecommendationCard
 	var line pgtype.Int4
 	var confidence pgtype.Float8
-	err := row.Scan(&card.ID, &card.Severity, &card.File, &line, &card.Problem, &card.Suggestion, &confidence, &card.State)
+	err := row.Scan(&card.ID, &card.Severity, &card.Category, &card.File, &line, &card.Problem, &card.Suggestion, &confidence, &card.State)
 	if line.Valid {
 		value := int(line.Int32)
 		card.Line = &value
@@ -511,6 +511,13 @@ func scanRecommendation(row rowScanner) (domain.RecommendationCard, error) {
 		card.Confidence = &value
 	}
 	return card, err
+}
+
+func recommendationCategory(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "general"
+	}
+	return value
 }
 
 func upsertRepository(ctx context.Context, tx pgx.Tx, repository domain.RepositoryMetadata) (string, error) {

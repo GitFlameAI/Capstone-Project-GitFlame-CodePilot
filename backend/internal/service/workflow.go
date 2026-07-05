@@ -297,13 +297,29 @@ func (w *Workflow) failTask(taskID string, cause error) error {
 func (w *Workflow) Task(id string) (*domain.AgentTask, error)       { return w.store.Task(id) }
 func (w *Workflow) Session(id string) (*domain.IssueSession, error) { return w.store.Session(id) }
 
-func (w *Workflow) Approve(issueID string) (*domain.IssueSession, *domain.AgentTask, error) {
+func (w *Workflow) Approve(issueID string, editedPlan *string) (*domain.IssueSession, *domain.AgentTask, error) {
 	session, err := w.store.Session(issueID)
 	if err != nil {
 		return nil, nil, err
 	}
 	if session.Status != domain.SessionPlanGenerated {
 		return nil, nil, fmt.Errorf("plan cannot be approved while session status is %s", session.Status)
+	}
+	if editedPlan != nil {
+		plan := strings.TrimSpace(*editedPlan)
+		if plan == "" {
+			return nil, nil, errors.New("plan_markdown cannot be empty")
+		}
+		if plan != session.PlanMarkdown {
+			if err := ValidatePlan(plan, repositoryFilesForSession(session)); err != nil {
+				return nil, nil, fmt.Errorf("edited plan is invalid: %w", err)
+			}
+			session.PlanMarkdown = plan
+			session.Revision++
+			if err := w.store.UpdateSession(session); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 	contract := branchPRPayload(session)
 	session.GeneratedFiles = &contract
@@ -343,36 +359,34 @@ func (w *Workflow) Reject(issueID string) (*domain.IssueSession, error) {
 }
 
 func agentRequest(taskID string, session *domain.IssueSession, previousPlan, feedback *string) domain.AgentPlanRequest {
-	files := append([]domain.RepositoryFile(nil), session.Request.RepositoryFiles...)
-	if len(files) == 0 {
-		for _, path := range session.Request.RepositoryContext {
-			files = append(files, domain.RepositoryFile{Path: path})
-		}
-	}
 	return domain.AgentPlanRequest{
 		RequestID:         taskID,
 		Issue:             domain.AgentIssue{ID: session.Request.Issue.ID, Title: session.Request.Issue.Title, Body: session.Request.Issue.Body},
 		Repository:        domain.AgentRepository{ID: session.Request.Repository.ID, DefaultBranch: session.Request.Repository.DefaultBranch, CommitSHA: session.Request.Repository.CommitSHA},
 		ConfigurationYAML: session.Config.Raw,
-		RepositoryFiles:   files, PreviousPlan: previousPlan, CorrectionFeedback: feedback,
+		RepositoryFiles:   repositoryFilesForSession(session), PreviousPlan: previousPlan, CorrectionFeedback: feedback,
 	}
 }
 
 func codeGenerationRequest(taskID string, session *domain.IssueSession) domain.AgentCodeGenerationRequest {
-	files := append([]domain.RepositoryFile(nil), session.Request.RepositoryFiles...)
-	if len(files) == 0 {
-		for _, path := range session.Request.RepositoryContext {
-			files = append(files, domain.RepositoryFile{Path: path})
-		}
-	}
 	return domain.AgentCodeGenerationRequest{
 		RequestID:            taskID,
 		Issue:                domain.AgentIssue{ID: session.Request.Issue.ID, Title: session.Request.Issue.Title, Body: session.Request.Issue.Body},
 		Repository:           domain.AgentRepository{ID: session.Request.Repository.ID, DefaultBranch: session.Request.Repository.DefaultBranch, CommitSHA: session.Request.Repository.CommitSHA},
 		ApprovedPlanMarkdown: session.PlanMarkdown,
 		ConfigurationYAML:    session.Config.Raw,
-		RepositoryFiles:      files,
+		RepositoryFiles:      repositoryFilesForSession(session),
 	}
+}
+
+func repositoryFilesForSession(session *domain.IssueSession) []domain.RepositoryFile {
+	files := append([]domain.RepositoryFile(nil), session.Request.RepositoryFiles...)
+	if len(files) == 0 {
+		for _, path := range session.Request.RepositoryContext {
+			files = append(files, domain.RepositoryFile{Path: path})
+		}
+	}
+	return files
 }
 
 func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract {
@@ -455,6 +469,10 @@ func validateRepositoryFiles(files []domain.RepositoryFile) error {
 		seen[normalized] = struct{}{}
 	}
 	return nil
+}
+
+func ValidateRepositoryFilesForIntegration(files []domain.RepositoryFile) error {
+	return validateRepositoryFiles(files)
 }
 
 func ValidateGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) error {

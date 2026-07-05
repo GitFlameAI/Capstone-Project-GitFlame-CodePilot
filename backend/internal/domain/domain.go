@@ -191,6 +191,7 @@ type GeneratedFileOperation struct {
 type RecommendationCard struct {
 	ID         string   `json:"id"`
 	Severity   string   `json:"severity"`
+	Category   string   `json:"category,omitempty"`
 	File       string   `json:"file"`
 	Line       *int     `json:"line,omitempty"`
 	Problem    string   `json:"problem"`
