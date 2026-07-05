@@ -12,6 +12,26 @@ models:
 
 # GitFlame CodePilot Recommendation ML Service
 
+## Sprint 4 Model Handoff
+
+Karim's Sprint 4 runtime handoff is:
+
+```bash
+export AGENT_MODEL=laguna
+export OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
+export OPENAI_API_KEY=<runtime secret>
+export MODEL_CONTEXT_LIMIT=32768
+```
+
+The university vLLM endpoint was verified on July 5, 2026: `/v1/models` listed `laguna`
+(`poolside/Laguna-XS.2`), the Agent Engine client returned `ready=True`, and the HTTP Agent Engine
+`/ready` endpoint returned `{"status":"ready","model":"laguna","version":"3.0.0"}`. The API key is
+not committed to this repository.
+
+Sprint 4 keeps recommendations as a separate service boundary while Agent Engine uses `laguna` for
+issue-to-plan and generated-files generation. The model strategy and final recommendation category
+decision are documented in [`../context_AI/ml/sprint4_model_strategy.md`](../context_AI/ml/sprint4_model_strategy.md).
+
 ## Sprint 3: SERGE-based Agent Engine
 
 The repository now also contains a separate stateless issue-to-plan service in
@@ -35,8 +55,10 @@ GitHub APIs.
 Run it against an OpenAI-compatible endpoint:
 
 ```bash
-export AGENT_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
-export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
+export AGENT_MODEL=laguna
+export OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
+export OPENAI_API_KEY=<runtime secret>
+export MODEL_CONTEXT_LIMIT=32768
 # Optional model fallback, used only when the primary endpoint is unavailable or times out.
 export AGENT_FALLBACK_MODEL=Qwen/Qwen2.5-Coder-7B-Instruct
 export FALLBACK_OPENAI_BASE_URL=http://127.0.0.1:8002/v1
@@ -68,6 +90,7 @@ unavailable, slow, or returns invalid output, the API returns an explicit error.
 | Recommendation Prompt | [`recommendation_prompt.md`](recommendation_prompt.md) |
 | Recommendation Schema | [`recommendation_schema.json`](recommendation_schema.json) |
 | Model Comparison | [`model_comparison.md`](model_comparison.md) |
+| Sprint 4 Model Strategy | [`../context_AI/ml/sprint4_model_strategy.md`](../context_AI/ml/sprint4_model_strategy.md) |
 | Future RAG / Vector Search | [`rag_vector_search_direction.md`](rag_vector_search_direction.md) |
 | Deployment Guide | [`deployment_guide.md`](deployment_guide.md) |
 | Public Hugging Face Space | [`KarimKhab/gitflame-codepilot-recommendations`](https://huggingface.co/spaces/KarimKhab/gitflame-codepilot-recommendations) |
