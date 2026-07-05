@@ -293,6 +293,12 @@ func (s *PostgresStore) loadGeneratedFiles(ctx context.Context, session *domain.
 	if session.GeneratedFiles != nil {
 		contract.RequestID = session.GeneratedFiles.RequestID
 		contract.Summary = session.GeneratedFiles.Summary
+		contract.ApplyStatus = session.GeneratedFiles.ApplyStatus
+		contract.CommitSHA = session.GeneratedFiles.CommitSHA
+		contract.PullRequestID = session.GeneratedFiles.PullRequestID
+		contract.PullRequestURL = session.GeneratedFiles.PullRequestURL
+		contract.ApplyError = session.GeneratedFiles.ApplyError
+		contract.AppliedAt = session.GeneratedFiles.AppliedAt
 		if contract.TaskID == "" {
 			contract.TaskID = session.GeneratedFiles.TaskID
 		}
@@ -573,6 +579,9 @@ func saveGeneratedFiles(ctx context.Context, tx pgx.Tx, sessionID string, contra
 	status := "pending"
 	if len(contract.Files) > 0 {
 		status = "generated"
+	}
+	if contract.ApplyStatus == "applied" || contract.ApplyStatus == "failed" {
+		status = contract.ApplyStatus
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO git_workflow_payloads (

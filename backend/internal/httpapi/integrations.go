@@ -11,6 +11,7 @@ import (
 
 type GitFlameSource interface {
 	BuildAnalyzeRequest(context.Context, GitFlameIssueWebhook) (domain.IssueAnalyzeRequest, error)
+	ApplyGeneratedFiles(context.Context, domain.RepositoryMetadata, domain.GeneratedFilesContract) (domain.GitFlameApplyResult, error)
 }
 
 type RecommendationAnalyzer interface {

@@ -17,6 +17,7 @@ Current Sprint 4 Go backend includes:
   - `GET /ai/issues/{id}/plan`
   - `POST /ai/issues/{id}/approve`
   - `GET /ai/issues/{id}/code-generation`
+  - `POST /ai/issues/{id}/gitflame/apply`
   - `POST /ai/issues/{id}/correct`
   - `POST /ai/issues/{id}/reject`
 - recommendation endpoints:
@@ -32,6 +33,7 @@ Current Sprint 4 Go backend includes:
 - code-generation task queued after approval with generated file operations and a GitFlame branch/commit/PR payload
 - approval can include an edited `plan_markdown`; backend validates and sends that exact final plan to code generation
 - GitFlame webhook ingestion can fetch `.ai.yml`, repository tree, and file contents through `GITFLAME_BASE_URL`
+- generated file operations can be applied back to GitFlame through `GITFLAME_BASE_URL`, creating a branch, commit, pull request, and saved `pull_request_url`
 - repository recommendations are generated through the external recommendation service and persisted without a fallback card
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations
 - Redis Streams broker with consumer groups, retry, queue limit, acknowledgement, and dead-letter handling

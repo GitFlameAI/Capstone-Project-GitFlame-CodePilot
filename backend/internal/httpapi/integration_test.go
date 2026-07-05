@@ -89,14 +89,30 @@ func (f *fakeGenerator) GenerateFiles(_ context.Context, req domain.AgentCodeGen
 }
 
 type fakeGitFlameSource struct {
-	request GitFlameIssueWebhook
-	result  domain.IssueAnalyzeRequest
-	err     error
+	request         GitFlameIssueWebhook
+	result          domain.IssueAnalyzeRequest
+	err             error
+	applyRepository domain.RepositoryMetadata
+	applyContract   domain.GeneratedFilesContract
+	applyResult     domain.GitFlameApplyResult
+	applyErr        error
 }
 
 func (f *fakeGitFlameSource) BuildAnalyzeRequest(_ context.Context, req GitFlameIssueWebhook) (domain.IssueAnalyzeRequest, error) {
 	f.request = req
 	return f.result, f.err
+}
+
+func (f *fakeGitFlameSource) ApplyGeneratedFiles(_ context.Context, repository domain.RepositoryMetadata, contract domain.GeneratedFilesContract) (domain.GitFlameApplyResult, error) {
+	f.applyRepository = repository
+	f.applyContract = contract
+	if f.applyErr != nil {
+		return domain.GitFlameApplyResult{}, f.applyErr
+	}
+	if f.applyResult.BranchName == "" {
+		f.applyResult = domain.GitFlameApplyResult{BranchName: contract.BranchName, CommitSHA: "commit-123", PullRequestID: "7", PullRequestURL: "https://gitflame.test/pulls/7"}
+	}
+	return f.applyResult, nil
 }
 
 type fakeRecommender struct {
@@ -266,6 +282,40 @@ func TestGitFlameWebhookFetchesRepositoryContextAndQueuesAnalyze(t *testing.T) {
 	}
 }
 
+func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
+	generator := &fakeGenerator{}
+	source := &fakeGitFlameSource{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), generator, source, nil)
+	body := `{"repository":{"id":"repo-apply","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"45","title":"Apply files","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(t, server.Router(), http.MethodPost, "/ai/issues/45/approve", "")
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := request(t, server.Router(), http.MethodPost, "/ai/issues/45/gitflame/apply", "")
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply status = %d: %s", applied.Code, applied.Body.String())
+	}
+	if source.applyRepository.ID != "repo-apply" || source.applyContract.BranchName == "" || len(source.applyContract.Files) != 1 {
+		t.Fatalf("GitFlame apply did not receive generated files contract: repo=%+v contract=%+v", source.applyRepository, source.applyContract)
+	}
+	if !strings.Contains(applied.Body.String(), `"pull_request_url":"https://gitflame.test/pulls/7"`) || !strings.Contains(applied.Body.String(), `"apply_status":"applied"`) {
+		t.Fatalf("apply response did not include PR result: %s", applied.Body.String())
+	}
+	status := request(t, server.Router(), http.MethodGet, "/ai/issues/45/code-generation", "")
+	if !strings.Contains(status.Body.String(), `"pull_request_url":"https://gitflame.test/pulls/7"`) {
+		t.Fatalf("stored code generation contract missed PR URL: %s", status.Body.String())
+	}
+}
+
 func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	recommender := &fakeRecommender{}
 	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
@@ -328,7 +378,9 @@ func TestValidationAndOpenAPI(t *testing.T) {
 	decodeResponse(t, spec, &document)
 	if document["openapi"] != "3.0.3" || !strings.Contains(spec.Body.String(), "/ai/tasks/{taskId}") ||
 		!strings.Contains(spec.Body.String(), "/ai/issues/{id}/code-generation") ||
+		!strings.Contains(spec.Body.String(), "/ai/issues/{id}/gitflame/apply") ||
 		!strings.Contains(spec.Body.String(), "/integrations/gitflame/webhooks/issues") ||
+		!strings.Contains(spec.Body.String(), "pull_request_url") ||
 		!strings.Contains(spec.Body.String(), "ApprovePlanRequest") ||
 		!strings.Contains(spec.Body.String(), "RecommendationAnalyzeRequest") ||
 		!strings.Contains(spec.Body.String(), `"code_generation"`) ||

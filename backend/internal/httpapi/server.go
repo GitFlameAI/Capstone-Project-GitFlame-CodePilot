@@ -75,6 +75,7 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
 	mux.HandleFunc("POST /ai/issues/{id}/approve", s.approve)
 	mux.HandleFunc("GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
+	mux.HandleFunc("POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
 	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
 	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
 	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
@@ -261,6 +262,51 @@ func (s *Server) codeGenerationStatus(w http.ResponseWriter, r *http.Request) {
 		Model: task.Model, Usage: task.Usage, Error: task.Error, GeneratedFiles: session.GeneratedFiles,
 	})
 }
+
+func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
+	if s.gitflame == nil {
+		problem(w, http.StatusServiceUnavailable, "gitflame_client_unavailable", "GitFlame API client is not configured")
+		return
+	}
+	session, err := s.workflow.Session(r.PathValue("id"))
+	if err != nil {
+		resourceError(w, err, "session_not_found", "issue session was not found")
+		return
+	}
+	if session.GeneratedFiles == nil || len(session.GeneratedFiles.Files) == 0 {
+		problem(w, http.StatusConflict, "generated_files_not_ready", "code generation has not produced files to apply")
+		return
+	}
+	if session.GeneratedFiles.ApplyStatus == "applied" && session.GeneratedFiles.PullRequestURL != "" {
+		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
+		return
+	}
+	result, err := s.gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, *session.GeneratedFiles)
+	now := time.Now().UTC()
+	if err != nil {
+		session.GeneratedFiles.ApplyStatus = "failed"
+		session.GeneratedFiles.ApplyError = err.Error()
+		session.GeneratedFiles.AppliedAt = &now
+		_ = s.store.UpdateSession(session)
+		integrationError(w, err, "gitflame_apply_error")
+		return
+	}
+	session.GeneratedFiles.ApplyStatus = "applied"
+	session.GeneratedFiles.ApplyError = ""
+	session.GeneratedFiles.CommitSHA = result.CommitSHA
+	session.GeneratedFiles.PullRequestID = result.PullRequestID
+	session.GeneratedFiles.PullRequestURL = result.PullRequestURL
+	session.GeneratedFiles.AppliedAt = &now
+	for index := range session.GeneratedFiles.Files {
+		session.GeneratedFiles.Files[index].Status = "applied"
+	}
+	if err := s.store.UpdateSession(session); err != nil {
+		problem(w, http.StatusInternalServerError, "storage_error", err.Error())
+		return
+	}
+	write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
+}
+
 func (s *Server) correct(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`

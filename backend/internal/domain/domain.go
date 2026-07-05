@@ -167,15 +167,28 @@ type AgentUsage struct {
 }
 
 type GeneratedFilesContract struct {
-	RequestID     string                   `json:"request_id,omitempty"`
-	TaskID        string                   `json:"task_id,omitempty"`
-	Summary       string                   `json:"summary,omitempty"`
-	BranchName    string                   `json:"branch_name"`
-	BaseBranch    string                   `json:"base_branch,omitempty"`
-	Files         []GeneratedFileOperation `json:"files"`
-	CommitMessage string                   `json:"commit_message"`
-	PRTitle       string                   `json:"pr_title"`
-	Reviewer      string                   `json:"reviewer"`
+	RequestID      string                   `json:"request_id,omitempty"`
+	TaskID         string                   `json:"task_id,omitempty"`
+	Summary        string                   `json:"summary,omitempty"`
+	BranchName     string                   `json:"branch_name"`
+	BaseBranch     string                   `json:"base_branch,omitempty"`
+	Files          []GeneratedFileOperation `json:"files"`
+	CommitMessage  string                   `json:"commit_message"`
+	PRTitle        string                   `json:"pr_title"`
+	Reviewer       string                   `json:"reviewer"`
+	ApplyStatus    string                   `json:"apply_status,omitempty"`
+	CommitSHA      string                   `json:"commit_sha,omitempty"`
+	PullRequestID  string                   `json:"pull_request_id,omitempty"`
+	PullRequestURL string                   `json:"pull_request_url,omitempty"`
+	ApplyError     string                   `json:"apply_error,omitempty"`
+	AppliedAt      *time.Time               `json:"applied_at,omitempty"`
+}
+
+type GitFlameApplyResult struct {
+	BranchName     string `json:"branch_name"`
+	CommitSHA      string `json:"commit_sha,omitempty"`
+	PullRequestID  string `json:"pull_request_id,omitempty"`
+	PullRequestURL string `json:"pull_request_url,omitempty"`
 }
 
 type GeneratedFileOperation struct {
