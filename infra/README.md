@@ -237,3 +237,13 @@ The external model or vLLM server requirements are documented in:
 infra/vllm-server-requirements.md
 ```
 
+## Sprint 4 Demo Stand
+
+Sprint 4 demo deployment, health checks, CI evidence, and troubleshooting commands are documented in:
+
+```text
+infra/sprint4-demo-runbook.md
+```
+
+The Sprint 4 demo stand includes frontend, backend, PostgreSQL, Redis, Agent Engine, Agent Worker, ML service, and recommendation service.
+
