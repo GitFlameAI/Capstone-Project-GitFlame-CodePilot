@@ -54,11 +54,14 @@ services:
     ports:
       - "${RECOMMENDATION_SERVICE_PORT:-8003}:7860"
     environment:
-      RECOMMENDATION_MODEL: ${RECOMMENDATION_MODEL:-qwen2.5-coder:1.5b}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      AGENT_MODEL: ${AGENT_MODEL:-laguna}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:9000/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MODEL_REQUEST_TIMEOUT_SECONDS: ${RECOMMENDATION_SERVICE_TIMEOUT_SECONDS:-120}
-      MODEL_SEED: ${MODEL_SEED:-42}
-      MODEL_CONTEXT_TOKENS: ${MODEL_CONTEXT_TOKENS:-16384}
+      MODEL_MAX_RETRIES: ${MODEL_MAX_RETRIES:-2}
+      MODEL_RETRY_BACKOFF_SECONDS: ${MODEL_RETRY_BACKOFF_SECONDS:-0.25}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/ready', timeout=5).read()"]
       interval: 15s
@@ -100,7 +103,7 @@ services:
     ports:
       - "${AGENT_ENGINE_PORT:-8002}:8001"
     environment:
-      AGENT_MODEL: ${AGENT_MODEL:-Qwen/Qwen3-Coder-30B-A3B-Instruct}
+      AGENT_MODEL: ${AGENT_MODEL:-laguna}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:9000/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AGENT_FALLBACK_MODEL: ${AGENT_FALLBACK_MODEL:-}

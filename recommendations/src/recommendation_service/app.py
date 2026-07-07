@@ -2,17 +2,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from recommendation_service.config import ConfigError
+from recommendation_service.model_client import (
+    ModelOutputError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+    RecommendationModelClient,
+)
 from recommendation_service.models import (
     AnalyzeRequest,
     ErrorResponse,
     HealthResponse,
     RecommendationResponse,
-)
-from recommendation_service.ollama_client import (
-    ModelOutputError,
-    ModelTimeoutError,
-    ModelUnavailableError,
-    OllamaClient,
 )
 from recommendation_service.service import RecommendationService
 from recommendation_service.settings import Settings
@@ -21,10 +21,10 @@ from recommendation_service.settings import Settings
 def create_app(
     *,
     settings: Settings | None = None,
-    model_client: OllamaClient | None = None,
+    model_client: RecommendationModelClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
-    resolved_client = model_client or OllamaClient(resolved_settings)
+    resolved_client = model_client or RecommendationModelClient(resolved_settings)
     recommendation_service = RecommendationService(resolved_client)
 
     app = FastAPI(
@@ -50,7 +50,7 @@ def create_app(
         if not await resolved_client.ready():
             raise HTTPException(
                 status_code=503,
-                detail=f"model {resolved_settings.model} is not available in Ollama",
+                detail=f"model {resolved_settings.model} is not available",
             )
         return HealthResponse(status="ready", model=resolved_settings.model)
 

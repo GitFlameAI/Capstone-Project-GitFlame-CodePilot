@@ -1,15 +1,19 @@
 from recommendation_service.config import ConfigError, filter_repo_context, parse_config
+from recommendation_service.model_client import (
+    InferenceMetrics,
+    ModelOutputError,
+    RecommendationModelClient,
+)
 from recommendation_service.models import (
     SEVERITY_RANK,
     AnalyzeRequest,
     RecommendationResponse,
 )
-from recommendation_service.ollama_client import InferenceMetrics, ModelOutputError, OllamaClient
 from recommendation_service.prompt import SYSTEM_PROMPT, build_analysis_prompt
 
 
 class RecommendationService:
-    def __init__(self, model_client: OllamaClient) -> None:
+    def __init__(self, model_client: RecommendationModelClient) -> None:
         self.model_client = model_client
 
     async def analyze(

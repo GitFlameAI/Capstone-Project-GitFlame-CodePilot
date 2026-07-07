@@ -4,29 +4,24 @@ import asyncio
 import json
 import platform
 import statistics
-import subprocess
 import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from recommendation_service.model_client import (  # noqa: E402
+    ModelOutputError,
+    RecommendationModelClient,
+)
 from recommendation_service.models import AnalyzeRequest  # noqa: E402
-from recommendation_service.ollama_client import ModelOutputError, OllamaClient  # noqa: E402
 from recommendation_service.service import RecommendationService  # noqa: E402
 from recommendation_service.settings import Settings  # noqa: E402
 
-DEFAULT_MODELS = [
-    "qwen2.5-coder:1.5b",
-    "qwen2.5-coder:7b",
-    "deepseek-coder:1.3b",
-    "codellama:7b-instruct",
-]
+DEFAULT_MODELS = ["laguna"]
 
 
 def load_cases(fixtures_dir: Path) -> list[dict[str, Any]]:
@@ -70,45 +65,9 @@ def match_findings(
     }
 
 
-def ollama_model_size(model: str) -> int | None:
-    try:
-        completed = subprocess.run(
-            ["ollama", "list"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
-    for line in completed.stdout.splitlines()[1:]:
-        columns = line.split()
-        if columns and columns[0] == model and len(columns) >= 4:
-            value, unit = columns[2], columns[3]
-            multipliers = {"MB": 1_000_000, "GB": 1_000_000_000}
-            if unit in multipliers:
-                return int(float(value) * multipliers[unit])
-    return None
-
-
-async def running_model_memory(model: str, base_url: str) -> dict[str, int | None]:
-    try:
-        async with httpx.AsyncClient(base_url=base_url, timeout=10) as client:
-            response = await client.get("/api/ps")
-            response.raise_for_status()
-            models = response.json().get("models", [])
-    except (httpx.HTTPError, ValueError, TypeError):
-        return {"loaded_size_bytes": None, "size_vram_bytes": None}
-    active = next((item for item in models if item.get("name") == model), {})
-    return {
-        "loaded_size_bytes": active.get("size"),
-        "size_vram_bytes": active.get("size_vram"),
-    }
-
-
 async def run_model(model: str, cases: list[dict[str, Any]], timeout: float) -> dict[str, Any]:
     settings = Settings(model=model, request_timeout_seconds=timeout)
-    service = RecommendationService(OllamaClient(settings))
+    service = RecommendationService(RecommendationModelClient(settings))
     case_results = []
     started = time.perf_counter()
 
@@ -125,7 +84,6 @@ async def run_model(model: str, cases: list[dict[str, Any]], timeout: float) -> 
             )
             findings = [item.model_dump(mode="json") for item in response.recommendations]
             score = match_findings(findings, case["expected"])
-            memory = await running_model_memory(model, settings.ollama_base_url)
             case_results.append(
                 {
                     "name": case["name"],
@@ -136,7 +94,6 @@ async def run_model(model: str, cases: list[dict[str, Any]], timeout: float) -> 
                     "expected": case["expected"],
                     "score": score,
                     "inference_metrics": asdict(metrics),
-                    "runtime_memory": memory,
                 }
             )
         except Exception as exc:  # Benchmark records failures instead of hiding them.
@@ -175,24 +132,15 @@ async def run_model(model: str, cases: list[dict[str, Any]], timeout: float) -> 
         for recommendation in case["recommendations"]
     }
     latencies = [case["wall_time_seconds"] for case in successful]
-    eval_counts = [
-        case["inference_metrics"]["eval_count"]
+    completion_tokens = [
+        case["inference_metrics"]["completion_tokens"]
         for case in successful
-        if case["inference_metrics"]["eval_count"]
+        if case["inference_metrics"]["completion_tokens"]
     ]
-    eval_durations = [
-        case["inference_metrics"]["eval_duration_ns"]
-        for case in successful
-        if case["inference_metrics"]["eval_duration_ns"]
-    ]
-    load_durations = [
-        case["inference_metrics"]["load_duration_ns"]
-        for case in successful
-        if case["inference_metrics"]["load_duration_ns"] is not None
-    ]
+    total_latency = sum(case["wall_time_seconds"] for case in successful)
     tokens_per_second = (
-        sum(eval_counts) / (sum(eval_durations) / 1_000_000_000)
-        if eval_counts and eval_durations
+        sum(completion_tokens) / total_latency
+        if completion_tokens and total_latency
         else None
     )
     return {
@@ -221,28 +169,8 @@ async def run_model(model: str, cases: list[dict[str, Any]], timeout: float) -> 
         "recall": recall,
         "f1": f1,
         "mean_latency_seconds": statistics.mean(latencies) if latencies else None,
-        "mean_load_duration_seconds": (
-            statistics.mean(load_durations) / 1_000_000_000 if load_durations else None
-        ),
         "tokens_per_second": tokens_per_second,
         "total_wall_time_seconds": time.perf_counter() - started,
-        "ollama_model_size_bytes": ollama_model_size(model),
-        "maximum_loaded_size_bytes": max(
-            (
-                case["runtime_memory"]["loaded_size_bytes"] or 0
-                for case in successful
-            ),
-            default=0,
-        )
-        or None,
-        "maximum_size_vram_bytes": max(
-            (
-                case["runtime_memory"]["size_vram_bytes"] or 0
-                for case in successful
-            ),
-            default=0,
-        )
-        or None,
         "cases": case_results,
     }
 
@@ -271,8 +199,8 @@ async def main() -> None:
             "platform": platform.platform(),
             "machine": platform.machine(),
             "python": platform.python_version(),
-            "runtime": "Ollama quantized models",
-            "generation": {"temperature": 0, "seed": 42},
+            "runtime": "OpenAI-compatible endpoint",
+            "generation": {"temperature": 0},
             "line_match_tolerance": 3,
         },
         "models": results,
