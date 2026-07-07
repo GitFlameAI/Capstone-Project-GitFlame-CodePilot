@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,20 +23,37 @@ type Store interface {
 	Recommendations(string) (*domain.RecommendationReport, error)
 	CloseRecommendation(string) (domain.RecommendationCard, error)
 	DeleteRecommendation(string) error
+	SaveGitFlameConnection(domain.GitFlameConnection) (*domain.GitFlameConnection, error)
+	GitFlameConnection(string) (*domain.GitFlameConnection, error)
+	SaveGitFlameWebhook(domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error)
+	SaveGitFlameWebhookEvent(domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error)
+	SaveRepositorySnapshot(domain.RepositorySnapshot, []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error)
+	RepositorySnapshot(string) (*domain.RepositorySnapshot, []domain.RepositorySnapshotFile, error)
 }
 
 var ErrNotFound = errors.New("repository record was not found")
 
 type MemoryStore struct {
-	mu         sync.RWMutex
-	sessions   map[string]*domain.IssueSession
-	issueIndex map[string]string
-	tasks      map[string]*domain.AgentTask
-	reports    map[string]*domain.RecommendationReport
+	mu            sync.RWMutex
+	sessions      map[string]*domain.IssueSession
+	issueIndex    map[string]string
+	tasks         map[string]*domain.AgentTask
+	reports       map[string]*domain.RecommendationReport
+	connections   map[string]*domain.GitFlameConnection
+	webhooks      map[string]*domain.GitFlameWebhookRegistration
+	events        map[string]*domain.GitFlameWebhookEvent
+	snapshots     map[string]*domain.RepositorySnapshot
+	snapshotFiles map[string][]domain.RepositorySnapshotFile
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{sessions: map[string]*domain.IssueSession{}, issueIndex: map[string]string{}, tasks: map[string]*domain.AgentTask{}, reports: map[string]*domain.RecommendationReport{}}
+	return &MemoryStore{
+		sessions: map[string]*domain.IssueSession{}, issueIndex: map[string]string{},
+		tasks: map[string]*domain.AgentTask{}, reports: map[string]*domain.RecommendationReport{},
+		connections: map[string]*domain.GitFlameConnection{}, webhooks: map[string]*domain.GitFlameWebhookRegistration{},
+		events: map[string]*domain.GitFlameWebhookEvent{}, snapshots: map[string]*domain.RepositorySnapshot{},
+		snapshotFiles: map[string][]domain.RepositorySnapshotFile{},
+	}
 }
 
 func (s *MemoryStore) Ping(context.Context) error { return nil }
@@ -159,6 +177,107 @@ func (s *MemoryStore) DeleteRecommendation(id string) error {
 	return ErrNotFound
 }
 
+func (s *MemoryStore) SaveGitFlameConnection(v domain.GitFlameConnection) (*domain.GitFlameConnection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if v.ID == "" {
+		v.ID = NewID()
+		v.CreatedAt = now
+	} else if existing, ok := s.connections[v.ID]; ok {
+		v.CreatedAt = existing.CreatedAt
+	}
+	if v.TokenStatus == "" {
+		v.TokenStatus = "active"
+	}
+	if v.DefaultBranch == "" {
+		v.DefaultBranch = v.Repository.DefaultBranch
+	}
+	if v.Repository.DefaultBranch == "" {
+		v.Repository.DefaultBranch = v.DefaultBranch
+	}
+	v.UpdatedAt = now
+	s.connections[v.ID] = cloneConnection(&v)
+	return cloneConnection(&v), nil
+}
+
+func (s *MemoryStore) GitFlameConnection(id string) (*domain.GitFlameConnection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.connections[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneConnection(v), nil
+}
+
+func (s *MemoryStore) SaveGitFlameWebhook(v domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if v.ID == "" {
+		v.ID = NewID()
+		v.CreatedAt = now
+	} else if existing, ok := s.webhooks[v.ID]; ok {
+		v.CreatedAt = existing.CreatedAt
+	}
+	if v.Status == "" {
+		v.Status = "pending"
+	}
+	v.UpdatedAt = now
+	s.webhooks[v.ID] = cloneWebhook(&v)
+	return cloneWebhook(&v), nil
+}
+
+func (s *MemoryStore) SaveGitFlameWebhookEvent(v domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v.ID == "" {
+		v.ID = NewID()
+	}
+	if v.Status == "" {
+		v.Status = "received"
+	}
+	if v.ReceivedAt.IsZero() {
+		v.ReceivedAt = time.Now().UTC()
+	}
+	s.events[v.ID] = cloneWebhookEvent(&v)
+	return cloneWebhookEvent(&v), nil
+}
+
+func (s *MemoryStore) SaveRepositorySnapshot(v domain.RepositorySnapshot, files []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v.ID == "" {
+		v.ID = NewID()
+	}
+	if v.Status == "" {
+		v.Status = "fetched"
+	}
+	if strings.TrimSpace(v.RepositoryID) == "" {
+		return nil, errors.New("repository snapshot requires repository id")
+	}
+	if v.FetchedAt.IsZero() {
+		v.FetchedAt = time.Now().UTC()
+	}
+	if v.FileCount == 0 {
+		v.FileCount = len(files)
+	}
+	s.snapshots[v.ID] = cloneSnapshot(&v)
+	s.snapshotFiles[v.ID] = append([]domain.RepositorySnapshotFile(nil), files...)
+	return cloneSnapshot(&v), nil
+}
+
+func (s *MemoryStore) RepositorySnapshot(id string) (*domain.RepositorySnapshot, []domain.RepositorySnapshotFile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.snapshots[id]
+	if !ok {
+		return nil, nil, ErrNotFound
+	}
+	return cloneSnapshot(v), append([]domain.RepositorySnapshotFile(nil), s.snapshotFiles[id]...), nil
+}
+
 func cloneSession(v *domain.IssueSession) *domain.IssueSession {
 	c := *v
 	c.Request.RepositoryFiles = append([]domain.RepositoryFile(nil), v.Request.RepositoryFiles...)
@@ -183,6 +302,41 @@ func cloneTask(v *domain.AgentTask) *domain.AgentTask {
 func cloneReport(v *domain.RecommendationReport) *domain.RecommendationReport {
 	c := *v
 	c.Recommendations = append([]domain.RecommendationCard(nil), v.Recommendations...)
+	return &c
+}
+
+func cloneConnection(v *domain.GitFlameConnection) *domain.GitFlameConnection {
+	c := *v
+	return &c
+}
+
+func cloneWebhook(v *domain.GitFlameWebhookRegistration) *domain.GitFlameWebhookRegistration {
+	c := *v
+	c.Events = append([]string(nil), v.Events...)
+	return &c
+}
+
+func cloneWebhookEvent(v *domain.GitFlameWebhookEvent) *domain.GitFlameWebhookEvent {
+	c := *v
+	if v.Payload != nil {
+		c.Payload = map[string]any{}
+		for key, value := range v.Payload {
+			c.Payload[key] = value
+		}
+	}
+	if v.Error != nil {
+		e := *v.Error
+		c.Error = &e
+	}
+	return &c
+}
+
+func cloneSnapshot(v *domain.RepositorySnapshot) *domain.RepositorySnapshot {
+	c := *v
+	if v.Error != nil {
+		e := *v.Error
+		c.Error = &e
+	}
 	return &c
 }
 

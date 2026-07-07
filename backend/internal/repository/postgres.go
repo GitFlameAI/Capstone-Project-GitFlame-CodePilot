@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -258,12 +259,15 @@ func (s *PostgresStore) UpdateSession(session *domain.IssueSession) error {
 
 func (s *PostgresStore) loadGeneratedFiles(ctx context.Context, session *domain.IssueSession) error {
 	var contract domain.GeneratedFilesContract
-	var taskID pgtype.Text
+	var taskID, commitSHA, pullRequestID, pullRequestURL, applyError pgtype.Text
+	var appliedAt pgtype.Timestamptz
 	var payloadStatus string
 	err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE(agent_task_id::text,''),branch_name,base_branch,commit_message,pr_title,reviewer,status
+		SELECT COALESCE(agent_task_id::text,''),branch_name,base_branch,commit_message,pr_title,reviewer,status,
+		       commit_sha,pull_request_id,pull_request_url,apply_error,applied_at
 		FROM git_workflow_payloads WHERE issue_session_id=$1::uuid`, session.ID).
-		Scan(&taskID, &contract.BranchName, &contract.BaseBranch, &contract.CommitMessage, &contract.PRTitle, &contract.Reviewer, &payloadStatus)
+		Scan(&taskID, &contract.BranchName, &contract.BaseBranch, &contract.CommitMessage, &contract.PRTitle, &contract.Reviewer,
+			&payloadStatus, &commitSHA, &pullRequestID, &pullRequestURL, &applyError, &appliedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -272,6 +276,25 @@ func (s *PostgresStore) loadGeneratedFiles(ctx context.Context, session *domain.
 	}
 	if taskID.Valid {
 		contract.TaskID = taskID.String
+	}
+	if payloadStatus == "applied" || payloadStatus == "failed" {
+		contract.ApplyStatus = payloadStatus
+	}
+	if commitSHA.Valid {
+		contract.CommitSHA = commitSHA.String
+	}
+	if pullRequestID.Valid {
+		contract.PullRequestID = pullRequestID.String
+	}
+	if pullRequestURL.Valid {
+		contract.PullRequestURL = pullRequestURL.String
+	}
+	if applyError.Valid {
+		contract.ApplyError = applyError.String
+	}
+	if appliedAt.Valid {
+		value := appliedAt.Time
+		contract.AppliedAt = &value
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT file_path,action,content,diff,explanation,status,validation_error
@@ -293,12 +316,6 @@ func (s *PostgresStore) loadGeneratedFiles(ctx context.Context, session *domain.
 	if session.GeneratedFiles != nil {
 		contract.RequestID = session.GeneratedFiles.RequestID
 		contract.Summary = session.GeneratedFiles.Summary
-		contract.ApplyStatus = session.GeneratedFiles.ApplyStatus
-		contract.CommitSHA = session.GeneratedFiles.CommitSHA
-		contract.PullRequestID = session.GeneratedFiles.PullRequestID
-		contract.PullRequestURL = session.GeneratedFiles.PullRequestURL
-		contract.ApplyError = session.GeneratedFiles.ApplyError
-		contract.AppliedAt = session.GeneratedFiles.AppliedAt
 		if contract.TaskID == "" {
 			contract.TaskID = session.GeneratedFiles.TaskID
 		}
@@ -478,6 +495,236 @@ func (s *PostgresStore) DeleteRecommendation(id string) error {
 	return err
 }
 
+func (s *PostgresStore) SaveGitFlameConnection(connection domain.GitFlameConnection) (*domain.GitFlameConnection, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if connection.Repository.DefaultBranch == "" {
+		connection.Repository.DefaultBranch = connection.DefaultBranch
+	}
+	if connection.Repository.DefaultBranch == "" {
+		connection.Repository.DefaultBranch = "main"
+	}
+	repositoryID, err := upsertRepository(ctx, tx, connection.Repository)
+	if err != nil {
+		return nil, err
+	}
+	if connection.ID == "" {
+		connection.ID = NewID()
+	}
+	if connection.DefaultBranch == "" {
+		connection.DefaultBranch = connection.Repository.DefaultBranch
+	}
+	if connection.TokenStatus == "" {
+		connection.TokenStatus = "active"
+	}
+	row := tx.QueryRow(ctx, `
+		INSERT INTO gitflame_connections (
+			id,repository_id,repo_url,default_branch,access_token_encrypted,token_last4,token_status,updated_at
+		) VALUES (
+			$1::uuid,$2::uuid,$3,$4,$5,$6,$7,now()
+		) ON CONFLICT (repository_id) DO UPDATE SET
+			repo_url=EXCLUDED.repo_url,
+			default_branch=EXCLUDED.default_branch,
+			access_token_encrypted=EXCLUDED.access_token_encrypted,
+			token_last4=EXCLUDED.token_last4,
+			token_status=EXCLUDED.token_status,
+			updated_at=now()
+		RETURNING id::text,created_at,updated_at`,
+		connection.ID, repositoryID, connection.RepoURL, connection.DefaultBranch,
+		connection.AccessTokenEncrypted, connection.TokenLast4, connection.TokenStatus)
+	if err := row.Scan(&connection.ID, &connection.CreatedAt, &connection.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.GitFlameConnection(connection.ID)
+}
+
+func (s *PostgresStore) GitFlameConnection(id string) (*domain.GitFlameConnection, error) {
+	var connection domain.GitFlameConnection
+	var repository domain.RepositoryMetadata
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT c.id::text,c.repo_url,c.default_branch,c.access_token_encrypted,c.token_last4,c.token_status,
+		       c.created_at,c.updated_at,r.external_id,r.name,r.default_branch,r.web_url
+		FROM gitflame_connections c
+		JOIN repositories r ON r.id=c.repository_id
+		WHERE c.id::text=$1 OR r.external_id=$1`, id).
+		Scan(&connection.ID, &connection.RepoURL, &connection.DefaultBranch, &connection.AccessTokenEncrypted,
+			&connection.TokenLast4, &connection.TokenStatus, &connection.CreatedAt, &connection.UpdatedAt,
+			&repository.ID, &repository.Name, &repository.DefaultBranch, &repository.WebURL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	repository.CommitSHA = ""
+	connection.Repository = repository
+	return &connection, nil
+}
+
+func (s *PostgresStore) SaveGitFlameWebhook(webhook domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error) {
+	if webhook.ID == "" {
+		webhook.ID = NewID()
+	}
+	if webhook.Status == "" {
+		webhook.Status = "pending"
+	}
+	eventsJSON, _ := json.Marshal(webhook.Events)
+	row := s.pool.QueryRow(context.Background(), `
+		INSERT INTO gitflame_webhooks (
+			id,connection_id,webhook_url,webhook_secret_hash,events,status,external_webhook_id,updated_at
+		) VALUES (
+			$1::uuid,$2::uuid,$3,$4,$5::jsonb,$6,$7,now()
+		) ON CONFLICT (connection_id,webhook_url) DO UPDATE SET
+			webhook_secret_hash=EXCLUDED.webhook_secret_hash,
+			events=EXCLUDED.events,
+			status=EXCLUDED.status,
+			external_webhook_id=EXCLUDED.external_webhook_id,
+			updated_at=now()
+		RETURNING id::text,created_at,updated_at`,
+		webhook.ID, webhook.ConnectionID, webhook.WebhookURL, webhook.WebhookSecretHash,
+		string(eventsJSON), webhook.Status, webhook.ExternalWebhookID)
+	if err := row.Scan(&webhook.ID, &webhook.CreatedAt, &webhook.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &webhook, nil
+}
+
+func (s *PostgresStore) SaveGitFlameWebhookEvent(event domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error) {
+	if event.ID == "" {
+		event.ID = NewID()
+	}
+	if event.Status == "" {
+		event.Status = "received"
+	}
+	if event.ReceivedAt.IsZero() {
+		event.ReceivedAt = time.Now().UTC()
+	}
+	payloadJSON, _ := json.Marshal(event.Payload)
+	errorJSON, _ := json.Marshal(event.Error)
+	err := s.pool.QueryRow(context.Background(), `
+		INSERT INTO gitflame_webhook_events (
+			id,webhook_id,event_type,action,delivery_id,repository_external_id,issue_session_id,
+			payload_json,status,error_json,received_at,processed_at
+		) VALUES (
+			$1::uuid,$2::uuid,$3,$4,$5,$6,NULLIF($7::text,'')::uuid,$8::jsonb,$9,$10::jsonb,
+			$11,$12
+		) RETURNING received_at`,
+		event.ID, event.WebhookID, event.EventType, event.Action, event.DeliveryID, event.RepositoryID,
+		event.IssueSessionID, string(payloadJSON), event.Status, string(errorJSON), event.ReceivedAt, event.ProcessedAt).
+		Scan(&event.ReceivedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &event, nil
+}
+
+func (s *PostgresStore) SaveRepositorySnapshot(snapshot domain.RepositorySnapshot, files []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if snapshot.ID == "" {
+		snapshot.ID = NewID()
+	}
+	if snapshot.Status == "" {
+		snapshot.Status = "fetched"
+	}
+	if strings.TrimSpace(snapshot.RepositoryID) == "" {
+		return nil, errors.New("repository snapshot requires repository id")
+	}
+	if snapshot.FileCount == 0 {
+		snapshot.FileCount = len(files)
+	}
+	repositoryID, err := ensureRepositoryForSnapshot(ctx, tx, snapshot.RepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	errorJSON, _ := json.Marshal(snapshot.Error)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO repository_snapshots (
+			id,repository_id,connection_id,ref,commit_sha,ai_config_id,file_count,status,error_json,fetched_at
+		) VALUES (
+			$1::uuid,$2::uuid,NULLIF($3::text,'')::uuid,$4,$5,NULLIF($6::text,'')::uuid,$7,$8,$9::jsonb,now()
+		) ON CONFLICT (id) DO UPDATE SET
+			connection_id=EXCLUDED.connection_id,
+			ref=EXCLUDED.ref,
+			commit_sha=EXCLUDED.commit_sha,
+			ai_config_id=EXCLUDED.ai_config_id,
+			file_count=EXCLUDED.file_count,
+			status=EXCLUDED.status,
+			error_json=EXCLUDED.error_json,
+			fetched_at=EXCLUDED.fetched_at
+		RETURNING fetched_at`, snapshot.ID, repositoryID, snapshot.ConnectionID, snapshot.Ref, snapshot.CommitSHA,
+		snapshot.AIConfigID, snapshot.FileCount, snapshot.Status, string(errorJSON)).Scan(&snapshot.FetchedAt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM repository_snapshot_files WHERE repository_snapshot_id=$1::uuid`, snapshot.ID); err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO repository_snapshot_files (
+				repository_snapshot_id,file_path,content_hash,commit_sha
+			) VALUES ($1::uuid,$2,$3,$4)`,
+			snapshot.ID, file.Path, file.ContentHash, file.CommitSHA)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (s *PostgresStore) RepositorySnapshot(id string) (*domain.RepositorySnapshot, []domain.RepositorySnapshotFile, error) {
+	var snapshot domain.RepositorySnapshot
+	var errorJSON pgtype.Text
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT rs.id::text,r.external_id,COALESCE(rs.connection_id::text,''),rs.ref,rs.commit_sha,
+		       COALESCE(rs.ai_config_id::text,''),rs.file_count,rs.status,rs.error_json::text,rs.fetched_at
+		FROM repository_snapshots rs
+		JOIN repositories r ON r.id=rs.repository_id
+		WHERE rs.id::text=$1`, id).
+		Scan(&snapshot.ID, &snapshot.RepositoryID, &snapshot.ConnectionID, &snapshot.Ref, &snapshot.CommitSHA,
+			&snapshot.AIConfigID, &snapshot.FileCount, &snapshot.Status, &errorJSON, &snapshot.FetchedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if errorJSON.Valid && errorJSON.String != "null" {
+		_ = json.Unmarshal([]byte(errorJSON.String), &snapshot.Error)
+	}
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT file_path,content_hash,commit_sha
+		FROM repository_snapshot_files WHERE repository_snapshot_id=$1::uuid ORDER BY file_path`, snapshot.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var files []domain.RepositorySnapshotFile
+	for rows.Next() {
+		var file domain.RepositorySnapshotFile
+		if err := rows.Scan(&file.Path, &file.ContentHash, &file.CommitSHA); err != nil {
+			return nil, nil, err
+		}
+		files = append(files, file)
+	}
+	return &snapshot, files, rows.Err()
+}
+
 func (s *PostgresStore) updateRecommendation(id, status string) (domain.RecommendationCard, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
@@ -539,6 +786,20 @@ func upsertRepository(ctx context.Context, tx pgx.Tx, repository domain.Reposito
 	return id, err
 }
 
+func ensureRepositoryForSnapshot(ctx context.Context, tx pgx.Tx, externalID string) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM repositories WHERE external_id=$1`, externalID).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO repositories (external_id,name,owner,default_branch,web_url,updated_at)
+		VALUES ($1,$1,'gitflame','main','',now()) RETURNING id::text`, externalID).Scan(&id)
+	return id, err
+}
+
 func upsertRepositoryFiles(ctx context.Context, tx pgx.Tx, repositoryID string, req domain.IssueAnalyzeRequest) error {
 	files := append([]domain.RepositoryFile(nil), req.RepositoryFiles...)
 	if len(files) == 0 {
@@ -585,9 +846,10 @@ func saveGeneratedFiles(ctx context.Context, tx pgx.Tx, sessionID string, contra
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO git_workflow_payloads (
-			issue_session_id,agent_task_id,branch_name,base_branch,commit_message,pr_title,reviewer,status,updated_at
+			issue_session_id,agent_task_id,branch_name,base_branch,commit_message,pr_title,reviewer,status,
+			commit_sha,pull_request_id,pull_request_url,apply_error,applied_at,updated_at
 		) VALUES (
-			$1::uuid,NULLIF($2::text,'')::uuid,$3,$4,$5,$6,$7,$8,now()
+			$1::uuid,NULLIF($2::text,'')::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now()
 		) ON CONFLICT (issue_session_id) DO UPDATE SET
 			agent_task_id=EXCLUDED.agent_task_id,
 			branch_name=EXCLUDED.branch_name,
@@ -596,8 +858,14 @@ func saveGeneratedFiles(ctx context.Context, tx pgx.Tx, sessionID string, contra
 			pr_title=EXCLUDED.pr_title,
 			reviewer=EXCLUDED.reviewer,
 			status=EXCLUDED.status,
+			commit_sha=EXCLUDED.commit_sha,
+			pull_request_id=EXCLUDED.pull_request_id,
+			pull_request_url=EXCLUDED.pull_request_url,
+			apply_error=EXCLUDED.apply_error,
+			applied_at=EXCLUDED.applied_at,
 			updated_at=now()`,
-		sessionID, taskID, contract.BranchName, baseBranch, contract.CommitMessage, contract.PRTitle, contract.Reviewer, status)
+		sessionID, taskID, contract.BranchName, baseBranch, contract.CommitMessage, contract.PRTitle, contract.Reviewer,
+		status, contract.CommitSHA, contract.PullRequestID, contract.PullRequestURL, contract.ApplyError, contract.AppliedAt)
 	if err != nil {
 		return err
 	}
