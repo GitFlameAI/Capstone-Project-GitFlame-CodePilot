@@ -1,11 +1,11 @@
 import pytest
 
-from recommendation_service.models import RecommendationResponse
-from recommendation_service.ollama_client import (
+from recommendation_service.model_client import (
     ModelOutputError,
     ModelTimeoutError,
     ModelUnavailableError,
 )
+from recommendation_service.models import RecommendationResponse
 
 
 @pytest.mark.asyncio

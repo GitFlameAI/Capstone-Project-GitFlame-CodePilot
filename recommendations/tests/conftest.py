@@ -5,8 +5,8 @@ import pytest
 import pytest_asyncio
 
 from recommendation_service.app import create_app
+from recommendation_service.model_client import InferenceMetrics
 from recommendation_service.models import RecommendationResponse
-from recommendation_service.ollama_client import InferenceMetrics
 from recommendation_service.settings import Settings
 
 VALID_RESPONSE = RecommendationResponse.model_validate(
@@ -98,5 +98,8 @@ async def api_client(fake_model_client):
         yield client
 
 
-def ollama_response(content: dict, **metrics) -> dict:
-    return {"message": {"content": json.dumps(content)}, **metrics}
+def openai_response(content: dict, **usage) -> dict:
+    return {
+        "choices": [{"message": {"content": json.dumps(content)}}],
+        "usage": usage,
+    }
