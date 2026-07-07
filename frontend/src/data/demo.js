@@ -120,6 +120,23 @@ export const demoIssues = [
   },
 ]
 
+// A file node that a simulated GitFlame push adds to the tree (see
+// store/session.js::applyMockPush). The commit hash keeps each push distinct.
+export function pushedFileNode(commit) {
+  return { type: 'file', name: 'ratelimit.go', badge: 'new', pushedCommit: commit }
+}
+
+// An issue a simulated GitFlame push opens in the repository.
+export function pushedIssue() {
+  return {
+    id: 'ISSUE-204',
+    title: 'Add request rate limiting to the public API',
+    body: 'Unauthenticated endpoints have no rate limiting. Add a small token-bucket limiter and return 429 with a Retry-After header when the limit is exceeded.',
+    author: 'ruslan',
+    labels: ['security', 'backend'],
+  }
+}
+
 // Glob patterns offered in the Config "exclude paths" picker (also accepts custom).
 export const excludePathOptions = [
   'node_modules/**',

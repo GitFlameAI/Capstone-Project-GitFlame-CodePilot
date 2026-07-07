@@ -14,7 +14,6 @@
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError, pollTask, USING_MOCK } from '../../api/index.js'
 import { session } from '../../store/session.js'
-import { demoIssues } from '../../data/demo.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfSpinner from '../ui/GfSpinner.vue'
@@ -26,9 +25,10 @@ const issueSource = ref('new') // existing | new
 
 // issue dropdown (existing issues)
 const issueMenuOpen = ref(false)
-// Demo issues are only shown in mock mode. Against a real backend there is no
-// endpoint to list repository issues yet, so the picker starts empty.
-const issues = USING_MOCK ? demoIssues : []
+// Existing issues come from the session (GitFlame supplies them in real mode; the
+// mock seeds them and a simulated webhook push can add new ones live). Against a
+// real backend there is no list-issues endpoint yet, so the picker stays empty.
+const issues = computed(() => (USING_MOCK ? session.issues : []))
 
 const analyzing = ref(false)
 const approveLoading = ref(false)
@@ -260,6 +260,11 @@ function backToIssues() {
 }
 
 function goToPr() {
+  const url = contract.value?.pull_request_url
+  if (url) {
+    window.open(url, '_blank', 'noopener')
+    return
+  }
   if (!session.repo.url) return
   window.open(`${session.repo.url}/pulls`, '_blank', 'noopener')
 }
@@ -458,6 +463,7 @@ onBeforeUnmount(stopPolling)
         </div>
         <dl v-if="contract" class="contract">
           <div><dt>Branch</dt><dd class="mono">{{ contract.branch_name }}</dd></div>
+          <div><dt>Base branch</dt><dd class="mono">{{ contract.base_branch || session.repo.defaultBranch }}</dd></div>
           <div><dt>Commit</dt><dd>{{ contract.commit_message }}</dd></div>
           <div><dt>PR title</dt><dd>{{ contract.pr_title }}</dd></div>
           <div><dt>Reviewer</dt><dd>{{ contract.reviewer }}</dd></div>
@@ -472,7 +478,7 @@ onBeforeUnmount(stopPolling)
               <GfIcon name="chevronRight" :size="14" class="file__caret" :class="{ file__caret_open: expanded[f.path] }" />
             </button>
             <div v-if="expanded[f.path]" class="file__body">
-              <p class="file__desc">{{ f.description }}</p>
+              <p class="file__desc">{{ f.description || f.explanation || 'No description provided.' }}</p>
             </div>
           </li>
         </ul>
@@ -503,7 +509,9 @@ onBeforeUnmount(stopPolling)
 
 <style scoped>
 .ag {
-  max-width: 760px;
+  width: 100%;
+  max-width: var(--ws-content);
+  margin: 0 auto;
 }
 .card {
   padding: 22px 24px;
@@ -526,15 +534,24 @@ onBeforeUnmount(stopPolling)
 
 /* choose issue */
 .choose {
-  display: flex;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: end;
   gap: 18px;
 }
 .choose__block {
-  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 9px;
+}
+/* push the control (dropdown / button) to the bottom so both align on one line */
+.choose__block > :last-child {
+  margin-top: auto;
+}
+/* match the "Create a new issue" button height to the 40px dropdown */
+.choose__block :deep(.gf-btn) {
+  height: 40px;
+  width: 100%;
 }
 .choose__label {
   font-size: 12.5px;
@@ -542,7 +559,8 @@ onBeforeUnmount(stopPolling)
   color: var(--gf-text-2);
 }
 .choose__or {
-  align-self: center;
+  align-self: end;
+  padding-bottom: 12px; /* centres "or" on the control line */
   font-size: 12px;
   color: var(--gf-text-3);
   font-weight: 600;
@@ -919,7 +937,15 @@ onBeforeUnmount(stopPolling)
 }
 @media (max-width: 560px) {
   .choose {
-    flex-direction: column;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .choose__or {
+    align-self: center;
+    padding-bottom: 0;
+  }
+  .choose__block > :last-child {
+    margin-top: 0;
   }
 }
 </style>

@@ -24,11 +24,12 @@ import MultiSelect from '../MultiSelect.vue'
 
 const emit = defineEmits(['go'])
 
-const state = ref('loading') // loading | empty | ready | analyzing | error | no_categories
+const state = ref('loading') // loading | ready | analyzing | error | no_categories | clean | dismissed
 const errorMessage = ref('')
 const summary = ref('')
 const cards = ref([])
 const busy = ref(false)
+const stale = ref(false)
 
 // --- filters (one row: confidence sort · categories · severity) ---
 const sortDir = ref('desc') // 'desc' = highest confidence first, 'asc' = lowest first
@@ -49,13 +50,14 @@ const SEVERITY_COLORS = { high: '#d03232', medium: '#b07400', low: '#8a87a6' }
 const categoryLabel = (id) => RECOMMENDATION_CATEGORIES.find((c) => c.id === id)?.label || id
 const confidencePct = (c) => Math.round((c || 0) * 100)
 
-// Configured categories decide what the system looks for at all (empty => nothing).
+// Configured categories decide whether the system analyses at all (empty => nothing),
+// but once cards are stored we show ALL of them regardless of the current config —
+// so unselecting a category in Config does not hide already-found cards. Only when
+// the stored cards run out does the "no categories" state apply.
 const configuredCategories = computed(() => session.configForm.categories || [])
 
-// Cards limited to the configured categories (simulates "system focuses on these").
-const inScopeCards = computed(() =>
-  cards.value.filter((c) => configuredCategories.value.includes(c.category)),
-)
+// Every stored card is in scope; filters below narrow the visible set.
+const inScopeCards = computed(() => cards.value)
 
 const presentCategories = computed(() => {
   const set = new Set(inScopeCards.value.map((c) => c.category))
@@ -95,26 +97,41 @@ function toggleSort() {
   sortDir.value = sortDir.value === 'desc' ? 'asc' : 'desc'
 }
 
-async function load() {
+async function load({ auto = false } = {}) {
   state.value = 'loading'
   errorMessage.value = ''
-  if (!configuredCategories.value.length) { state.value = 'no_categories'; return }
   try {
     const [summaryRes, listRes] = await Promise.all([
       api.getRecommendationSummary(session.repo.id),
       api.listRecommendations(session.repo.id),
-    ])
-    summary.value = summaryRes.summary
-    cards.value = listRes.recommendations
-    ensureFilter()
-    state.value = cards.value.length ? 'ready' : 'empty'
+    ]).catch((e) => {
+      // A 404 (no report yet) is an "empty" signal, not an error.
+      if (e instanceof ApiError && e.status === 404) return [null, { recommendations: [] }]
+      throw e
+    })
+    cards.value = (listRes && listRes.recommendations) || []
+    summary.value = (summaryRes && summaryRes.summary) || ''
+    if (cards.value.length) {
+      ensureFilter()
+      stale.value = session.recommendationsStale
+      state.value = 'ready'
+      return
+    }
+    // No stored cards. Auto-run once if categories are configured (the user asked
+    // not to have to press "Run analysis"); otherwise explain what to do.
+    if (configuredCategories.value.length) {
+      if (auto) state.value = 'clean' // already analysed, nothing found — avoid a loop
+      else await runAnalysis({ auto: true })
+    } else {
+      state.value = 'no_categories'
+    }
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) state.value = 'empty'
-    else { errorMessage.value = e.message || 'Failed to load analysis.'; state.value = 'error' }
+    errorMessage.value = e.message || 'Failed to load analysis.'
+    state.value = 'error'
   }
 }
 
-async function runAnalysis() {
+async function runAnalysis({ auto = false } = {}) {
   if (!configuredCategories.value.length) { state.value = 'no_categories'; return }
   state.value = 'analyzing'
   errorMessage.value = ''
@@ -122,8 +139,10 @@ async function runAnalysis() {
     await api.analyzeRepository(session.repo.id, {
       repository: { id: session.repo.id, default_branch: session.repo.defaultBranch },
       yaml_config: session.configYaml,
+      categories: configuredCategories.value,
     })
-    await load()
+    session.recommendationsStale = false
+    await load({ auto })
   } catch (e) {
     errorMessage.value = e.message || 'Analysis failed.'
     state.value = 'error'
@@ -153,6 +172,15 @@ async function deleteSelected() {
   try {
     await api.deleteRecommendation(card.id)
     cards.value = cards.value.filter((c) => c.id !== card.id)
+    if (!cards.value.length) {
+      // The user dismissed the last card. Don't immediately re-run — the code and
+      // config haven't changed, so a fresh run would surface the same findings.
+      // The analysis re-runs automatically the next time this tab is opened.
+      closeCard()
+      summary.value = ''
+      state.value = 'dismissed'
+      return
+    }
     if (!visibleCards.value.length) closeCard()
     else selectedIndex.value = Math.min(selectedIndex.value, visibleCards.value.length - 1)
   } catch (e) {
@@ -202,11 +230,18 @@ onMounted(load)
       <GfButton variant="primary" size="s" @click="emit('go', 'config')">Enable categories in Config</GfButton>
     </div>
 
-    <!-- Empty -->
-    <div v-else-if="state === 'empty'" class="center gf-card">
-      <GfIcon name="shield" :size="28" />
-      <p>No recommendations are stored for this repository yet.</p>
-      <GfButton variant="primary" @click="runAnalysis"><GfIcon name="sparkles" :size="16" /> Run analysis</GfButton>
+    <!-- Analysed, nothing found -->
+    <div v-else-if="state === 'clean'" class="center gf-card">
+      <GfIcon name="check" :size="28" />
+      <p>Analysis complete — no issues were found for your selected categories. 🎉</p>
+      <GfButton variant="secondary" @click="runAnalysis({ auto: true })"><GfIcon name="refresh" :size="15" /> Re-run</GfButton>
+    </div>
+
+    <!-- All cards dismissed — re-run on demand (or automatically next visit) -->
+    <div v-else-if="state === 'dismissed'" class="center gf-card">
+      <GfIcon name="check" :size="28" />
+      <p>All recommendations dismissed. The analysis will run again next time you open this tab, or re-run it now.</p>
+      <GfButton variant="secondary" @click="runAnalysis({ auto: true })"><GfIcon name="refresh" :size="15" /> Re-run analysis</GfButton>
     </div>
 
     <!-- Error -->
@@ -218,9 +253,14 @@ onMounted(load)
 
     <!-- Ready -->
     <template v-else>
+      <div v-if="stale" class="stalebar">
+        <GfIcon name="alert" :size="15" />
+        <span>The repository changed since this analysis. Re-run to refresh the recommendations.</span>
+        <GfButton variant="secondary" size="s" @click="runAnalysis({ auto: true })"><GfIcon name="refresh" :size="14" /> Re-run now</GfButton>
+      </div>
       <section class="summary gf-card">
         <p class="summary__text"><span class="summary__kw">Summary: </span>{{ summary }}</p>
-        <GfButton variant="secondary" size="s" @click="runAnalysis"><GfIcon name="refresh" :size="14" /> Re-run</GfButton>
+        <GfButton variant="secondary" size="s" @click="runAnalysis({ auto: true })"><GfIcon name="refresh" :size="14" /> Re-run</GfButton>
       </section>
 
       <div class="bar">
@@ -289,7 +329,21 @@ onMounted(load)
 </template>
 
 <style scoped>
-.rec { max-width: 920px; }
+.rec { width: 100%; max-width: var(--ws-content); margin: 0 auto; }
+.stalebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--gf-amber-bg);
+  color: var(--gf-amber);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.stalebar :deep(.gf-icon) { flex: none; }
+.stalebar span { flex: 1; }
 .center {
   display: flex; flex-direction: column; align-items: center; gap: 12px;
   padding: 40px 20px; text-align: center; color: var(--gf-text-2);
@@ -298,10 +352,10 @@ onMounted(load)
 .center_error :deep(.gf-icon) { color: var(--gf-red); }
 
 .summary {
-  display: flex; align-items: flex-start; gap: 14px;
+  display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap;
   padding: 18px 20px; margin-bottom: 14px;
 }
-.summary__text { flex: 1; margin: 0; font-size: 13.5px; line-height: 1.6; }
+.summary__text { flex: 1; min-width: 200px; margin: 0; font-size: 13.5px; line-height: 1.6; }
 .summary__kw { color: var(--gf-accent); font-weight: 700; }
 
 .bar {
@@ -346,7 +400,7 @@ onMounted(load)
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(248px, 100%), 1fr));
   gap: 12px;
 }
 .mini {

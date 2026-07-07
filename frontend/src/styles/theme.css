@@ -44,6 +44,12 @@
   --gf-blue: #414ee0;
   --gf-blue-bg: #eef0ff;
 
+  /* Workspace layout — one comfortable width for every tab, centered.
+     Content blocks share --ws-content; the AI disclaimer + tab strip use the
+     slightly narrower --ws-narrow so they read as a centered header. */
+  --ws-content: 860px;
+  --ws-narrow: 720px;
+
   /* Radii */
   --gf-radius-sm: 10px;
   --gf-radius: 14px;

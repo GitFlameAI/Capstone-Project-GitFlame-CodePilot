@@ -15,6 +15,7 @@
 // "fail" or "timeout".
 
 import { ApiError } from './client.js'
+import { parseYamlToForm } from '../data/demo.js'
 
 const LATENCY = 600
 const delay = (ms = LATENCY) => new Promise((r) => setTimeout(r, ms))
@@ -161,8 +162,8 @@ function taskView(task) {
   return base
 }
 
-function seedReport(repositoryId) {
-  const recommendations = [
+function seedReport(repositoryId, categories) {
+  const allCards = [
     {
       id: uid('rec'), severity: 'high', category: 'security',
       file: 'backend/internal/httpapi/server.go', line: 142,
@@ -199,9 +200,30 @@ function seedReport(repositoryId) {
       confidence: 0.63, state: 'open',
     },
   ]
-  const summary =
-    'Repository analysis found 5 items: 2 high, 2 medium and 1 low. The highest-impact issues are a potential log-injection point and an O(n) recommendation delete path. No blocking defects were detected.'
+  // Only keep cards for the categories enabled in the configuration (empty/absent
+  // => keep all), simulating "the system focuses on the configured categories".
+  const wanted = Array.isArray(categories) && categories.length ? new Set(categories) : null
+  const recommendations = wanted ? allCards.filter((c) => wanted.has(c.category)) : allCards
+  const counts = { high: 0, medium: 0, low: 0 }
+  recommendations.forEach((r) => (counts[r.severity] = (counts[r.severity] || 0) + 1))
+  const summary = recommendations.length
+    ? `Repository analysis found ${recommendations.length} item${recommendations.length === 1 ? '' : 's'}: ` +
+      `${counts.high} high, ${counts.medium} medium and ${counts.low} low. ` +
+      'No blocking defects were detected.'
+    : 'Repository analysis completed. No issues were found for the selected categories.'
   reports.set(repositoryId, { repositoryId, summary, recommendations, status: 'ready' })
+}
+
+function categoriesFromPayload(payload) {
+  if (payload && Array.isArray(payload.categories)) return payload.categories
+  if (payload && payload.yaml_config) {
+    try {
+      return parseYamlToForm(payload.yaml_config).categories || []
+    } catch {
+      return []
+    }
+  }
+  return []
 }
 
 export const mockApi = {
@@ -211,9 +233,9 @@ export const mockApi = {
   },
 
   // --- Recommendation flow ---
-  async analyzeRepository(repositoryId) {
+  async analyzeRepository(repositoryId, payload) {
     await delay(1100)
-    seedReport(repositoryId)
+    seedReport(repositoryId, categoriesFromPayload(payload))
     const report = reports.get(repositoryId)
     return { repository_id: repositoryId, status: report.status, summary: report.summary, recommendations: report.recommendations }
   },
@@ -403,7 +425,3 @@ export const mockApi = {
     return { session_id: session.sessionId, issue_id: session.issueId, status: session.status, message: 'Plan rejected.' }
   },
 }
-
-// Pre-seed the demo repository so the recommendations widget shows data on first
-// load for the repository pre-filled on the landing screen.
-seedReport('tiroro-20-10-test')
