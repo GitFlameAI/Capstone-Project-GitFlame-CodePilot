@@ -15,16 +15,19 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { session, connect, parseRepoUrl, webhookFor } from '../store/session.js'
+import { copyText } from '../utils/clipboard.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
 import GfTooltip from '../components/ui/GfTooltip.vue'
 import GfModal from '../components/ui/GfModal.vue'
+import Roadmap from '../components/landing/Roadmap.vue'
+import TryDemo from '../components/landing/TryDemo.vue'
 
 const router = useRouter()
 const formEl = ref(null)
 
-// Intent decides which capability the workspace opens on first. Defaults to the
-// value already in the session so going back and forth is sticky.
+// Which capability the workspace opens on first. Kept as a compact choice in the
+// connect card so a recommendations-first user lands where they expect.
 const intent = ref(session.intent || 'autogen')
 
 // The connect form starts empty in every mode, as a real user would experience it.
@@ -40,23 +43,24 @@ const showPolicy = ref(false)
 const copied = ref(false)
 
 // The webhook URL is something OUR service exposes for GitFlame to register; it
-// is shown read-only and derived from the repository so the user can copy it.
+// is shown read-only so the user can copy it.
 function webhookUrl() {
   return webhookFor(parseRepoUrl(form.repoUrl).id)
 }
 
-const consent = reactive({ ai: false, policy: false })
+// A single consent: agreeing to the usage policy (which itself covers the
+// "AI output may be wrong — trust, but verify" point and how the repo/token are used).
+const consent = reactive({ policy: false })
 
 // Per-field error flags drive the red underline.
-const errors = reactive({ repoUrl: false, token: false, ai: false, policy: false })
+const errors = reactive({ repoUrl: false, token: false, policy: false })
 
 function validate() {
   const r = parseRepoUrl(form.repoUrl)
   errors.repoUrl = !form.repoUrl.trim() || !r.owner || !r.name
   errors.token = !form.token.trim()
-  errors.ai = !consent.ai
   errors.policy = !consent.policy
-  return !errors.repoUrl && !errors.token && !errors.ai && !errors.policy
+  return !errors.repoUrl && !errors.token && !errors.policy
 }
 
 function scrollToForm() {
@@ -64,12 +68,10 @@ function scrollToForm() {
 }
 
 async function copyWebhook() {
-  try {
-    await navigator.clipboard.writeText(webhookUrl())
+  const ok = await copyText(webhookUrl())
+  if (ok) {
     copied.value = true
     setTimeout(() => (copied.value = false), 1500)
-  } catch {
-    /* clipboard may be unavailable in some browsers; non-critical */
   }
 }
 
@@ -109,7 +111,7 @@ function submit() {
 
     <!-- 1. Hero -->
     <section class="hero">
-      <a class="hero__eyebrow" href="https://gitflame.ru" target="_blank" rel="noopener">AI integration for GitFlame</a>
+      <a class="hero__eyebrow" href="https://gitflame.ru" target="_blank" rel="noopener">AI integration for GitFlame <GfIcon name="external" :size="12" /></a>
       <h1 class="hero__title">GitFlame CodePilot</h1>
       <p class="hero__desc">
         Turn issues into reviewable implementation plans and generated code, and get
@@ -121,60 +123,51 @@ function submit() {
       </GfButton>
     </section>
 
-    <!-- 2. Capability explainer toggle -->
-    <section class="explain">
-      <div class="toggle" role="tablist" aria-label="Capabilities">
-        <button
-          class="toggle__opt"
-          :class="{ toggle__opt_active: intent === 'autogen' }"
-          role="tab"
-          :aria-selected="intent === 'autogen'"
-          @click="intent = 'autogen'"
-        >
-          <GfIcon name="sparkles" :size="16" /> Autogeneration
-        </button>
-        <button
-          class="toggle__opt"
-          :class="{ toggle__opt_active: intent === 'recommendations' }"
-          role="tab"
-          :aria-selected="intent === 'recommendations'"
-          @click="intent = 'recommendations'"
-        >
-          <GfIcon name="shield" :size="16" /> Recommendations
-        </button>
+    <!-- 2. How it works: roadmap + interactive preview -->
+    <section class="how">
+      <div class="how__intro">
+        <h2 class="how__title">How it works</h2>
+        <p class="how__sub gf-muted">From a repository issue to reviewed, generated code — and continuous recommendations. All under your approval.</p>
       </div>
+      <Roadmap />
 
-      <div v-if="intent === 'autogen'" class="explain__body gf-card">
-        <h3>Code autogeneration from an issue</h3>
-        <ol>
-          <li>You describe an issue (title, description, author).</li>
-          <li>CodePilot reads the relevant files and drafts a Markdown implementation plan.</li>
-          <li>You edit, approve, correct, or reject the plan — nothing happens without approval.</li>
-          <li>On approval it produces a set of file changes plus a branch / commit / PR contract
-            that GitFlame can apply on its side.</li>
-        </ol>
-      </div>
-      <div v-else class="explain__body gf-card">
-        <h3>Repository optimization recommendations</h3>
-        <ol>
-          <li>CodePilot analyses the repository for the problem categories you enable in
-            the configuration (security, performance, maintainability, and more).</li>
-          <li>It returns recommendation cards — each with a category, a confidence score,
-            the affected file, and a concrete suggested fix.</li>
-          <li>You browse them as a grid, filter by category, open any card for the full
-            detail, and either dismiss it or turn it into an issue for the
-            Autogeneration flow.</li>
-        </ol>
+      <div class="how__try">
+        <h3 class="how__try-title">Try it yourself</h3>
+        <p class="how__sub gf-muted">A quick, hands-on preview — click through the flow. Nothing is saved.</p>
+        <TryDemo />
       </div>
     </section>
 
     <!-- 3 + 4 + 5. Connect form -->
     <section ref="formEl" class="connect">
+      <header class="connect__head">
+        <h2 class="connect__title">Connect a repository</h2>
+        <p class="connect__sub gf-muted">Fill these in so CodePilot can reach your repository.</p>
+      </header>
       <div class="connect__card gf-card">
-        <header class="connect__head">
-          <h2>Connect a repository</h2>
-          <p class="gf-muted">Fill these in so CodePilot can reach your repository.</p>
-        </header>
+        <div class="startwith">
+          <span class="startwith__label">Start with
+            <GfTooltip text="Which tab opens first once your .ai.yml is saved. It's not a restriction — you can switch between Autogeneration and Recommendations anytime inside the workspace." /></span>
+          <div class="startwith__opts">
+            <button
+              type="button"
+              class="startwith__opt"
+              :class="{ startwith__opt_on: intent === 'autogen' }"
+              @click="intent = 'autogen'"
+            >
+              <GfIcon name="sparkles" :size="14" /> Autogeneration
+            </button>
+            <button
+              type="button"
+              class="startwith__opt"
+              :class="{ startwith__opt_on: intent === 'recommendations' }"
+              @click="intent = 'recommendations'"
+            >
+              <GfIcon name="shield" :size="14" /> Recommendations
+            </button>
+          </div>
+          <span class="startwith__hint gf-muted">You can switch anytime</span>
+        </div>
 
         <label class="field" :class="{ field_error: errors.repoUrl }">
           <span class="field__label">
@@ -239,21 +232,17 @@ function submit() {
           </div>
         </div>
 
-        <!-- AI disclaimer + consent -->
+        <!-- Usage policy consent (a single checkbox; the policy itself covers the
+             "AI output may be wrong — trust, but verify" point) -->
         <div class="consent">
-          <label class="check" :class="{ check_error: errors.ai }">
-            <input type="checkbox" v-model="consent.ai" @change="errors.ai = false" />
-            <span>
-              I understand the code and recommendations are generated by AI, may contain
-              mistakes, and need review before use — <strong>trust, but verify</strong>.
-            </span>
-          </label>
           <label class="check" :class="{ check_error: errors.policy }">
             <input type="checkbox" v-model="consent.policy" @change="errors.policy = false" />
             <span>
               I agree to the
-              <button type="button" class="link-btn" @click.stop.prevent="showPolicy = true">service usage policy</button>
-              and to CodePilot accessing the connected repository for analysis and code generation.
+              <button type="button" class="link-btn" @click.stop.prevent="showPolicy = true">service usage policy</button>,
+              understand CodePilot’s output is AI-generated and needs review
+              (<strong>trust, but verify</strong>), and allow it to access the connected
+              repository for analysis and code generation.
             </span>
           </label>
         </div>
@@ -292,8 +281,11 @@ function submit() {
           branches and pull requests for your review. It never force-pushes, deletes
           branches, or writes to your default branch directly.
         </p>
-        <h4>3. Data handling</h4>
+        <h4>3. Credentials and data handling</h4>
         <p>
+          The access token you provide is a credential: it is kept only for your active
+          session, is never shown back in full, and is used solely to read code and open
+          branches / pull requests. CodePilot does not collect personal data about you.
           Repository snippets are sent to the configured model provider only for the
           duration of a request. Recommendation reports are stored for the retention period
           you set in the configuration and are removed afterwards.
@@ -360,14 +352,16 @@ function submit() {
 }
 
 .hero {
-  max-width: 760px;
+  max-width: 780px;
   margin: 0 auto;
-  padding: 64px 24px 36px;
+  padding: 72px 24px 40px;
   text-align: center;
 }
 .hero__eyebrow {
-  display: inline-block;
-  margin-bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 16px;
   padding: 5px 12px;
   border-radius: 999px;
   background: var(--gf-purple-soft);
@@ -383,93 +377,125 @@ a.hero__eyebrow:hover {
   text-decoration: none;
 }
 .hero__title {
-  margin: 0 0 16px;
-  font-size: 48px;
-  line-height: 1.05;
+  margin: 0 0 18px;
+  font-size: 56px;
+  line-height: 1.03;
   font-weight: 800;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.025em;
   background: var(--gf-hero);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 .hero__desc {
-  margin: 0 auto 26px;
+  margin: 0 auto 28px;
   max-width: 600px;
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.6;
   color: var(--gf-text-2);
 }
 
-.explain {
-  max-width: 760px;
+.how {
+  max-width: 780px;
   margin: 0 auto;
-  padding: 8px 24px 8px;
+  padding: 12px 24px 8px;
 }
-.toggle {
+.how__intro {
+  text-align: center;
+  margin-bottom: 18px;
+}
+.how__title {
+  margin: 0 0 4px;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+.how__sub {
+  margin: 0;
+  font-size: 14px;
+}
+.how__try {
+  margin-top: 34px;
+  text-align: center;
+}
+.how__try-title {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+.how__try :deep(.try) {
+  margin-top: 16px;
+  text-align: left;
+}
+
+.startwith {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin-bottom: 18px;
+}
+.startwith__label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--gf-text-2);
+}
+.startwith__opts {
+  display: flex;
+  gap: 6px;
   padding: 4px;
-  margin: 0 auto 16px;
-  max-width: 420px;
   border: 1px solid var(--gf-line-2);
   border-radius: 999px;
-  background: var(--gf-surface);
+  background: var(--gf-surface-2);
 }
-.toggle__opt {
-  flex: 1;
+.startwith__opt {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 7px;
-  height: 38px;
+  gap: 6px;
+  height: 30px;
+  padding: 0 13px;
   border: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--gf-text-2);
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
-.toggle__opt_active {
-  background: var(--gf-purple-soft);
+.startwith__opt_on {
+  background: var(--gf-surface);
   color: var(--gf-accent);
+  box-shadow: var(--gf-shadow-sm);
 }
-.explain__body {
-  padding: 20px 22px;
+.startwith__opt :deep(.gf-icon) {
+  color: currentColor;
 }
-.explain__body h3 {
-  margin: 0 0 10px;
-  font-size: 15px;
-}
-.explain__body ol {
-  margin: 0;
-  padding-left: 20px;
-  color: var(--gf-text-2);
-  font-size: 13.5px;
-  line-height: 1.7;
+
+.startwith__hint {
+  flex-basis: 100%;
+  font-size: 11.5px;
 }
 
 .connect {
-  max-width: 620px;
+  max-width: 780px;
   margin: 0 auto;
-  padding: 28px 24px 80px;
+  padding: 50px 24px 80px;
   scroll-margin-top: 18px;
 }
-.connect__card {
-  padding: 26px 26px 22px;
-}
 .connect__head {
+  text-align: center;
   margin-bottom: 18px;
 }
-.connect__head h2 {
+.connect__title {
   margin: 0 0 4px;
-  font-size: 19px;
+  font-size: 24px;
+  letter-spacing: -0.01em;
 }
-.connect__head p {
+.connect__sub {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
+}
+.connect__card {
+  padding: 24px 26px 22px;
 }
 .field {
   display: block;
@@ -654,7 +680,7 @@ a.hero__eyebrow:hover {
 }
 @media (max-width: 560px) {
   .hero__title {
-    font-size: 36px;
+    font-size: 40px;
   }
 }
 </style>

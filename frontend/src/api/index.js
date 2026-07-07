@@ -10,9 +10,31 @@
 
 import { httpApi, ApiError } from './client.js'
 import { mockApi } from './mock.js'
+import { markTokenInvalid } from '../store/session.js'
 
 export const USING_MOCK = !import.meta.env.VITE_API_BASE
-export const api = USING_MOCK ? mockApi : httpApi
+
+// In live mode, wrap every backend call so an auth failure (the GitFlame access
+// token being missing / expired / revoked, surfaced by the backend as 401 or 403)
+// is turned into an explicit, visible token problem instead of a generic error.
+function withAuthGuard(realApi) {
+  const wrapped = {}
+  for (const [name, fn] of Object.entries(realApi)) {
+    wrapped[name] = async (...args) => {
+      try {
+        return await fn(...args)
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          markTokenInvalid(e.message || 'The access token is invalid or has expired.')
+        }
+        throw e
+      }
+    }
+  }
+  return wrapped
+}
+
+export const api = USING_MOCK ? mockApi : withAuthGuard(httpApi)
 export { ApiError }
 
 // pollTask repeatedly calls GET /ai/tasks/{taskId} until the agent task reaches a

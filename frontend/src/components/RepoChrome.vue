@@ -89,7 +89,9 @@ const tabs = computed(() => [
   display: flex;
   align-items: center;
   gap: 16px;
-  height: 56px;
+  flex-wrap: wrap;
+  min-height: 56px;
+  padding: 8px 0;
 }
 .brand {
   display: inline-flex;

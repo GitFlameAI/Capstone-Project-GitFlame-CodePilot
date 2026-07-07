@@ -1,9 +1,62 @@
 # Internal Review
 
-Per-sprint integration reviews. The **Sprint 3** review is current; the **Sprint 2**
-review is kept below for history.
+Per-sprint integration reviews. The **Sprint 4** review is current; the **Sprint 3**
+and **Sprint 2** reviews are kept below for history.
 
 ---
+
+# Internal Review — Sprint 4 (Version 4)
+
+Reviewer: Roman (frontend) · Date: Sprint 4 / Week 5
+Scope: the Sprint 4 usability changes and the alignment with the new backend GitFlame
+integration endpoints, reviewed across the Sprint 4 branches (`arthur-backend`,
+`amir-db-storage`, `main+karim`).
+
+## 1. Verified scenarios (frontend, mock mode)
+
+| # | Scenario | Result |
+| --- | --- | --- |
+| S1 | Landing roadmap: two tracks with a toggle; steps auto-advance; a progress bar fills toward the next step; auto-switches to the other track at the end | PASS |
+| S2 | Landing preview: Generate -> Edit/Preview the plan -> Request correction (revises) / Reject (red) / Approve -> generated files; clearly badged as a demo | PASS |
+| S3 | Landing: single consent checkbox; empty -> red underline blocks Continue; `external` icon by "GitFlame"; Connect header outside the card and width matches other blocks | PASS |
+| S4 | Repository: Exclude a file -> strikethrough; excluded row shows **Include** with an open-eye icon | PASS |
+| S5 | Repository: exclude every file in a folder -> collapses to `folder/**`; `.ai.yml` cannot be excluded; folders start collapsed | PASS |
+| S6 | Config draft: edit categories/excludes, switch tabs and back -> edits are still there; `.ai.yml` preview reflects the draft | PASS |
+| S7 | Config: `.ai.yml` and tab unlock change only on **Save**; Save is disabled when there is nothing to save; Repository shows "Unsaved · review in Config" when the draft is dirty | PASS |
+| S8 | Config: All / None for categories; Clear all for excludes; retention clamped to 1–365 whole number; spacing fits one screen | PASS |
+| S9 | Recommendations: first open with categories -> analysis auto-runs; dismissing the last card does NOT re-run immediately; re-opening the tab re-runs it | PASS |
+| S10 | Refresh on the workspace: stays in the workspace (not the landing), re-derives data, and shows a mandatory, non-dismissable **token gate** (purple token field) | PASS |
+| S11 | Token gate: cannot continue with an empty token; "Back to connect screen" escape works | PASS |
+| S12 | Workspace: sticky top bar keeps repo name + config status visible; switching tabs scrolls to the header (not the AI disclaimer); disclaimer fits one line | PASS |
+| S13 | Repository: webhook URL copies; an "i" tooltip explains the webhook; "Simulate a push" updates the tree + issues in place | PASS |
+| S14 | Autogeneration: contract shows base branch; "or" is vertically centered between the pickers | PASS |
+| S15 | Responsive: at high browser zoom / narrow widths no element overflows to the right (grids, rows, overlays wrap or scroll) | PASS |
+
+## 2. Findings and follow-ups
+
+### F1 — Browser push for live updates is a backend follow-up (medium)
+The webhook is GitFlame -> backend. Pushing updates to the open browser needs backend SSE or
+polling (e.g. `GET .../events`), which is not in scope this sprint. The frontend demonstrates
+the UX with a mock push (`applyMockPush`) that mutates the reactive session; wiring it to real
+events is tracked for a later sprint.
+
+### F2 — Expired-token detection is live-mode only (low, honest limitation)
+The token gate's *invalid/expired* state is triggered by a backend 401/403, caught in the API
+facade. Mock mode has no real auth, so in the demo the gate is exercised via the *missing*-token
+path (after a refresh). Against the real backend the *invalid* path applies once the backend maps
+GitFlame auth failures to 401/403.
+
+### F3 — Config is applied on Save, not on tree toggle (by design)
+Following the "changes apply on Save" rule, excluding files in the Repository tree edits the
+**draft** only; the `.ai.yml` changes when the user Saves in the Config tab. The Repository tab
+surfaces a "Unsaved · review in Config" hint so this is discoverable.
+
+### F4 — Generated file operation field name (`explanation` vs `description`) (low)
+The Sprint 4 backend serialises `explanation`; the Sprint 3 mock used `description`. The
+Autogeneration contract UI reads `description || explanation`, so both render correctly.
+
+---
+
 
 # Internal Review — Sprint 3 (Version 3)
 

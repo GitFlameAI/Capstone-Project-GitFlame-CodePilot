@@ -1,14 +1,19 @@
 <script setup>
-// Repository tab. Three blocks stacked vertically, top to bottom:
-//   Connection      — details from the landing screen, editable (switch repo/branch/token).
-//   Files           — a clickable file tree (names + paths only, no content).
+// Repository tab. Three equal-width blocks stacked top to bottom:
+//   Connection      — details from the landing screen, editable (switch repo/branch/token),
+//                     the copyable webhook URL, and a live "GitFlame events" indicator.
+//   Files           — a clickable file tree; each file/folder can be excluded from
+//                     analysis, which keeps the .ai.yml analysis.exclude list in sync.
 //   Recommendations — a short analysis summary, or a prompt to configure / analyse.
-import { reactive, ref, onMounted } from 'vue'
-import { session, updateConnection } from '../../store/session.js'
-import { api, ApiError } from '../../api/index.js'
+import { reactive, ref, computed, onMounted } from 'vue'
+import { session, updateConnection, updateDraftExcludePaths, applyMockPush, configDirty } from '../../store/session.js'
+import { api } from '../../api/index.js'
+import { copyText } from '../../utils/clipboard.js'
+import { flattenFiles, computeExcludedSet, toggleFileExclude, toggleFolderExclude } from '../../utils/excludePaths.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfModal from '../ui/GfModal.vue'
+import GfTooltip from '../ui/GfTooltip.vue'
 import FileTree from '../FileTree.vue'
 
 const emit = defineEmits(['go'])
@@ -34,6 +39,43 @@ function saveEdit() {
   loadRecSummary()
 }
 
+// --- webhook copy ---
+const copiedWebhook = ref(false)
+async function copyWebhook() {
+  const ok = await copyText(session.repo.webhookUrl)
+  if (ok) {
+    copiedWebhook.value = true
+    setTimeout(() => (copiedWebhook.value = false), 1500)
+  }
+}
+
+// --- live GitFlame events (mock webhook simulation) ---
+const pushToast = ref('')
+function simulatePush() {
+  const ev = applyMockPush()
+  pushToast.value = `Repository updated from GitFlame webhook · commit ${ev.commit}`
+  setTimeout(() => (pushToast.value = ''), 3600)
+  // A push changes code, so refresh the recommendations summary state.
+  loadRecSummary()
+}
+
+// --- file tree exclude wiring (edits the config DRAFT; applied on Save in Config) ---
+const allFiles = computed(() => flattenFiles(session.fileTree))
+const excludedSet = computed(() =>
+  computeExcludedSet(allFiles.value, session.configDraft.excludePaths || []),
+)
+const excludedCount = computed(() => excludedSet.value.size)
+const dirty = computed(() => configDirty())
+
+function onTreeToggle({ type, path }) {
+  const current = session.configDraft.excludePaths || []
+  const next =
+    type === 'dir'
+      ? toggleFolderExclude(session.fileTree, current, path)
+      : toggleFileExclude(session.fileTree, current, path)
+  updateDraftExcludePaths(next)
+}
+
 // --- recommendations summary block ---
 const recSummary = ref('')
 const recState = ref('idle') // idle | loading | ready | empty | no_categories
@@ -46,8 +88,8 @@ async function loadRecSummary() {
     const res = await api.getRecommendationSummary(session.repo.id)
     recSummary.value = res.summary
     recState.value = 'ready'
-  } catch (e) {
-    recState.value = e instanceof ApiError && e.status === 404 ? 'empty' : 'empty'
+  } catch {
+    recState.value = 'empty'
   }
 }
 onMounted(loadRecSummary)
@@ -68,25 +110,63 @@ onMounted(loadRecSummary)
         <div><dt>URL</dt><dd class="mono"><a :href="session.repo.url" target="_blank" rel="noopener">{{ session.repo.url }}</a></dd></div>
         <div><dt>Default branch</dt><dd class="mono">{{ session.repo.defaultBranch }}</dd></div>
         <div><dt>Access token</dt><dd class="mono">{{ session.repo.tokenMasked || '—' }}</dd></div>
-        <div v-if="session.repo.webhookUrl"><dt>Webhook</dt><dd class="mono webhook">{{ session.repo.webhookUrl }}</dd></div>
+        <div v-if="session.repo.webhookUrl">
+          <dt>Webhook <GfTooltip text="A URL you register in GitFlame. GitFlame calls it when an issue or branch changes, so CodePilot is notified and pulls the updated repository data. It is inbound (GitFlame → CodePilot), separate from your access token." /></dt>
+          <dd class="webhookrow">
+            <span class="mono webhook">{{ session.repo.webhookUrl }}</span>
+            <button class="copybtn" :title="copiedWebhook ? 'Copied' : 'Copy webhook URL'" @click="copyWebhook">
+              <GfIcon :name="copiedWebhook ? 'check' : 'copy'" :size="14" />
+            </button>
+          </dd>
+        </div>
       </dl>
+
+      <!-- live webhook indicator + demo trigger -->
+      <div class="events">
+        <span class="events__live"><span class="events__dot" /> Listening for GitFlame events</span>
+        <span v-if="session.lastEvent" class="gf-chip events__last">
+          <GfIcon name="branch" :size="12" /> last push {{ session.lastEvent.when }}
+        </span>
+        <button class="events__sim" title="Demo: simulate a GitFlame push so the tree, issues and recommendations refresh in place" @click="simulatePush">
+          <GfIcon name="refresh" :size="13" /> Simulate a push (demo)
+        </button>
+      </div>
     </section>
 
     <!-- Files -->
     <section class="card gf-card">
-      <h3 class="card__title"><GfIcon name="folder" :size="16" /> Files</h3>
+      <div class="card__head">
+        <h3 class="card__title"><GfIcon name="folder" :size="16" /> Files</h3>
+        <div class="files__head-actions">
+          <span v-if="excludedCount" class="gf-chip files__count">
+            <GfIcon name="eyeOff" :size="12" /> {{ excludedCount }} excluded
+          </span>
+          <button v-if="dirty" class="files__unsaved" title="Exclude changes are staged in your draft — review and Save them in the Config tab" @click="emit('go', 'config')">
+            <GfIcon name="alert" :size="12" /> Unsaved · review in Config
+          </button>
+        </div>
+      </div>
       <p class="card__sub gf-muted">
-        Names and paths only — hover a file to see its full path. CodePilot reads file
+        Click <strong>Exclude</strong> on any file or folder to keep CodePilot from analysing it —
+        it updates your <span class="mono">.ai.yml</span> instantly. CodePilot reads file
         contents only when it generates a plan.
       </p>
-      <FileTree :nodes="session.fileTree" />
+      <FileTree
+        :nodes="session.fileTree"
+        interactive
+        :excluded-set="excludedSet"
+        :all-files="allFiles"
+        @toggle="onTreeToggle"
+      />
     </section>
 
     <!-- Recommendations summary -->
     <section class="card gf-card">
       <div class="card__head">
         <h3 class="card__title"><GfIcon name="shield" :size="16" /> Recommendations</h3>
-        <GfButton v-if="session.configExists" variant="secondary" size="s" @click="emit('go', 'recommendations')">
+        <!-- Only show the header "Open" when the summary is shown (no body CTA);
+             the empty / no-categories states already have their own button. -->
+        <GfButton v-if="session.configExists && recState === 'ready'" variant="secondary" size="s" @click="emit('go', 'recommendations')">
           Open
         </GfButton>
       </div>
@@ -101,7 +181,7 @@ onMounted(loadRecSummary)
           <GfButton variant="primary" size="s" @click="emit('go', 'config')">Enable categories in Config</GfButton>
         </div>
         <div v-else class="locked locked_soft">
-          <p class="gf-muted">No analysis stored yet for this repository.</p>
+          <p class="gf-muted">No analysis stored yet — CodePilot will run it when you open the tab.</p>
           <GfButton variant="primary" size="s" @click="emit('go', 'recommendations')">Open Recommendations</GfButton>
         </div>
       </template>
@@ -141,6 +221,13 @@ onMounted(loadRecSummary)
         <GfButton variant="primary" :disabled="!form.url.trim()" @click="saveEdit">Save connection</GfButton>
       </template>
     </GfModal>
+
+    <!-- webhook update toast -->
+    <transition name="toastfade">
+      <div v-if="pushToast" class="toast">
+        <GfIcon name="check" :size="15" /> {{ pushToast }}
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -149,9 +236,12 @@ onMounted(loadRecSummary)
   display: flex;
   flex-direction: column;
   gap: 18px;
-  max-width: 820px;
+  width: 100%;
+  max-width: var(--ws-content);
+  margin: 0 auto;
 }
 .card {
+  width: 100%;
   padding: 20px 22px;
 }
 .card__head {
@@ -159,6 +249,7 @@ onMounted(loadRecSummary)
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 14px;
 }
 .card__title {
@@ -177,6 +268,10 @@ onMounted(loadRecSummary)
 .card__sub {
   margin: -6px 0 14px;
   font-size: 12.5px;
+  line-height: 1.5;
+}
+.card__sub strong {
+  color: var(--gf-accent);
 }
 .info {
   display: grid;
@@ -198,10 +293,115 @@ onMounted(loadRecSummary)
   margin: 0;
   font-size: 13.5px;
   word-break: break-all;
+  min-width: 0;
+}
+.webhookrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .webhook {
   font-size: 12px;
   color: var(--gf-text-2);
+  word-break: break-all;
+}
+.copybtn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--gf-line-2);
+  border-radius: 7px;
+  background: var(--gf-surface);
+  color: var(--gf-text-3);
+  cursor: pointer;
+  flex: none;
+}
+.copybtn:hover {
+  border-color: var(--gf-purple);
+  color: var(--gf-accent);
+}
+.events {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--gf-line);
+}
+.events__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gf-text-2);
+}
+.events__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gf-green);
+  box-shadow: 0 0 0 0 rgba(0, 177, 78, 0.5);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(0, 177, 78, 0.45); }
+  70% { box-shadow: 0 0 0 6px rgba(0, 177, 78, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 177, 78, 0); }
+}
+.events__last {
+  height: 22px;
+  font-size: 11px;
+  color: var(--gf-text-2);
+}
+.events__sim {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--gf-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.events__sim:hover {
+  text-decoration: underline;
+}
+.files__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.files__unsaved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--gf-amber-bg);
+  color: var(--gf-amber);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.files__unsaved:hover {
+  text-decoration: underline;
+}
+.files__count {
+  height: 22px;
+  font-size: 11px;
+  color: var(--gf-accent);
+  background: var(--gf-purple-soft);
+  border-color: transparent;
 }
 .recsum {
   margin: 0;
@@ -319,5 +519,47 @@ onMounted(loadRecSummary)
 .minput__toggle:hover {
   background: var(--gf-surface-3);
   color: var(--gf-text);
+}
+
+/* toast */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  background: var(--gf-text);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--gf-shadow-pop);
+  z-index: 1200;
+  max-width: calc(100vw - 32px);
+}
+
+@media (max-width: 480px) {
+  .info > div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+  .card {
+    padding: 18px 16px;
+  }
+}
+.toast :deep(.gf-icon) {
+  color: #7ee6a6;
+}
+.toastfade-enter-active,
+.toastfade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.toastfade-enter-from,
+.toastfade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
 }
 </style>

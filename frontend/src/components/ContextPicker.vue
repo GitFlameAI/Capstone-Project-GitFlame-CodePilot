@@ -120,7 +120,7 @@ function onBlur() {
   align-items: center;
   gap: 5px;
   height: 24px;
-  padding: 0 4px 0 8px;
+  padding: 0 3px 0 8px;
   border-radius: 999px;
   background: var(--gf-purple-soft);
   color: var(--gf-accent);
@@ -130,15 +130,22 @@ function onBlur() {
   font-size: 11px;
 }
 .picker__chip-x {
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
   background: transparent;
   color: var(--gf-accent);
   cursor: pointer;
+  line-height: 0;
+  flex: none;
+}
+.picker__chip-x :deep(.gf-icon) {
+  vertical-align: middle;
 }
 .picker__chip-x:hover {
   background: rgba(120, 34, 249, 0.12);

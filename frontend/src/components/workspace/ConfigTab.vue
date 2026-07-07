@@ -12,54 +12,99 @@
 // the code-generation toggles, reviewer) was dropped from the contract, so it is
 // not shown here. A live .ai.yml preview updates as the form changes; saving
 // unlocks the Autogeneration and Recommendations tabs.
-import { reactive, ref, computed, watch } from 'vue'
-import { session, saveConfig } from '../../store/session.js'
+import { computed, ref, watch } from 'vue'
+import { session, saveConfig, updateDraftExcludePaths, configDirty, persistDraft } from '../../store/session.js'
 import { buildYaml, RECOMMENDATION_CATEGORIES, excludePathOptions } from '../../data/demo.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfTooltip from '../ui/GfTooltip.vue'
 import ContextPicker from '../ContextPicker.vue'
+import { copyText } from '../../utils/clipboard.js'
 
 const emit = defineEmits(['saved'])
 
-// Local editable copy of the form, seeded from the session (arrays copied so
-// editing before Save does not mutate the stored configuration).
-const form = reactive({
-  defaultBranch: session.repo.defaultBranch || session.configForm.defaultBranch,
-  excludePaths: [...(session.configForm.excludePaths || [])],
-  categories: [...(session.configForm.categories || [])],
-  retentionDays: session.configForm.retentionDays,
-})
+// The Config form edits the shared DRAFT held in the session, so edits persist
+// across tab switches and stay in sync with the Repository file-tree Exclude
+// toggles. The draft only becomes the saved .ai.yml when the user presses Save.
+const form = computed(() => session.configDraft)
+
 const saving = ref(false)
 const justSaved = ref(false)
 const copied = ref(false)
 
-const yamlPreview = computed(() => buildYaml(form))
-const noCategories = computed(() => !form.categories || form.categories.length === 0)
+const yamlPreview = computed(() => buildYaml(session.configDraft))
+const noCategories = computed(() => (session.configDraft.categories || []).length === 0)
+const allCategoriesOn = computed(() => session.configDraft.categories.length === RECOMMENDATION_CATEGORIES.length)
+const dirty = computed(() => configDirty())
 
 function toggleCategory(id) {
-  const i = form.categories.indexOf(id)
-  if (i === -1) form.categories.push(id)
-  else form.categories.splice(i, 1)
+  const cats = session.configDraft.categories
+  const i = cats.indexOf(id)
+  if (i === -1) cats.push(id)
+  else cats.splice(i, 1)
+  persistDraft()
+}
+function allCategories() {
+  session.configDraft.categories = RECOMMENDATION_CATEGORIES.map((c) => c.id)
+  persistDraft()
+}
+function clearCategories() {
+  session.configDraft.categories = []
+  persistDraft()
+}
+function clearExcludes() {
+  updateDraftExcludePaths([])
 }
 
-watch(form, () => { justSaved.value = false }, { deep: true })
+// Guard the retention input: keep it a whole number in [1, 365]. The number input
+// still lets users type "-5" or "1.5"; clamp on every change.
+function clampRetention() {
+  let n = Math.floor(Number(session.configDraft.retentionDays))
+  if (!Number.isFinite(n)) n = 30
+  session.configDraft.retentionDays = Math.min(365, Math.max(1, n))
+  persistDraft()
+}
+
+// Never allow the .ai.yml config file (or blank entries) into exclude paths; persist
+// the draft on any exclude-list change (chip picker or tree toggle).
+watch(
+  () => session.configDraft.excludePaths.slice(),
+  (paths) => {
+    const clean = paths.filter((p) => p && p.trim() && p.trim() !== '.ai.yml')
+    if (clean.length !== paths.length) {
+      session.configDraft.excludePaths = clean
+      return
+    }
+    persistDraft()
+  },
+  { deep: true },
+)
+
+// Persist typed field edits (branch, retention) so they survive tab switches.
+watch(
+  () => [session.configDraft.defaultBranch, session.configDraft.retentionDays],
+  () => {
+    justSaved.value = false
+    persistDraft()
+  },
+)
+watch(() => session.configDraft.categories.length, () => { justSaved.value = false })
+watch(() => session.configDraft.excludePaths.length, () => { justSaved.value = false })
 
 async function save() {
+  clampRetention()
   saving.value = true
   await new Promise((r) => setTimeout(r, 450))
-  saveConfig({ ...form })
+  saveConfig(session.configDraft)
   saving.value = false
   justSaved.value = true
 }
 
 async function copyYaml() {
-  try {
-    await navigator.clipboard.writeText(yamlPreview.value)
+  const ok = await copyText(yamlPreview.value)
+  if (ok) {
     copied.value = true
     setTimeout(() => (copied.value = false), 1500)
-  } catch {
-    /* non-critical */
   }
 }
 </script>
@@ -79,10 +124,13 @@ async function copyYaml() {
 
       <!-- Analysis -->
       <section class="sect gf-card">
-        <h3 class="sect__title">Analysis</h3>
+        <div class="sect__head">
+          <h3 class="sect__title">Analysis</h3>
+          <button v-if="form.excludePaths.length" class="linkbtn" @click="clearExcludes">Clear all</button>
+        </div>
         <div class="field">
           <span class="field__label">Exclude paths
-            <GfTooltip text="Glob patterns CodePilot must ignore during analysis (build output, vendored code, etc.). Type to pick a common pattern or add your own." /></span>
+            <GfTooltip text="Glob patterns CodePilot must ignore during analysis (build output, vendored code, etc.). Type to pick a common pattern or add your own. You can also toggle files and folders directly in the Repository tab." /></span>
           <ContextPicker
             v-model="form.excludePaths"
             :options="excludePathOptions"
@@ -96,7 +144,13 @@ async function copyYaml() {
         <h3 class="sect__title">Recommendations</h3>
         <div class="field">
           <span class="field__label">Categories
-            <GfTooltip text="Problem categories the system looks for. If none are selected, no recommendations are produced." /></span>
+            <GfTooltip text="Problem categories the system looks for. If none are selected, no recommendations are produced." />
+            <span class="field__quick">
+              <button class="linkbtn" :disabled="allCategoriesOn" @click="allCategories">All</button>
+              <span class="field__sep">·</span>
+              <button class="linkbtn" :disabled="noCategories" @click="clearCategories">None</button>
+            </span>
+          </span>
           <div class="cats">
             <button
               v-for="c in RECOMMENDATION_CATEGORIES"
@@ -115,8 +169,19 @@ async function copyYaml() {
         </div>
         <label class="field">
           <span class="field__label">Keep reports for (days)
-            <GfTooltip text="How long generated recommendation reports are retained before they expire." /></span>
-          <input v-model.number="form.retentionDays" type="number" min="1" max="365" class="input input_sm" placeholder="30" />
+            <GfTooltip text="How long generated recommendation reports are retained before they expire. A whole number between 1 and 365." /></span>
+          <input
+            v-model.number="form.retentionDays"
+            type="number"
+            min="1"
+            max="365"
+            step="1"
+            inputmode="numeric"
+            class="input input_sm"
+            placeholder="30"
+            @input="clampRetention"
+            @blur="clampRetention"
+          />
         </label>
       </section>
     </div>
@@ -133,12 +198,17 @@ async function copyYaml() {
         <pre class="preview__code mono">{{ yamlPreview }}</pre>
       </div>
 
-      <GfButton variant="primary" size="l" :loading="saving" class="savebtn" @click="save">
-        <GfIcon name="check" :size="16" /> Save .ai.yml
+      <GfButton variant="primary" size="l" :loading="saving" :disabled="!dirty && session.configExists" class="savebtn" @click="save">
+        <GfIcon name="check" :size="16" /> {{ session.configExists && !dirty ? 'Saved' : 'Save .ai.yml' }}
       </GfButton>
       <p class="savehint gf-muted">
-        Saves to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch and unlocks
-        Autogeneration &amp; Recommendations.
+        <template v-if="dirty || !session.configExists">
+          Saves to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch and unlocks
+          Autogeneration &amp; Recommendations.
+        </template>
+        <template v-else>
+          All changes are saved to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
+        </template>
       </p>
 
       <transition name="okfade">
@@ -157,23 +227,62 @@ async function copyYaml() {
   grid-template-columns: 1fr 360px;
   gap: 20px;
   align-items: start;
+  width: 100%;
+  max-width: var(--ws-content);
+  margin: 0 auto;
 }
 .cfg__form {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
 .sect {
-  padding: 18px 20px;
+  padding: 14px 18px;
+}
+.sect__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.sect__head .sect__title {
+  margin: 0;
 }
 .sect__title {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
   font-size: 14px;
   color: var(--gf-accent);
 }
+.linkbtn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--gf-accent);
+  cursor: pointer;
+}
+.linkbtn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.linkbtn:disabled {
+  color: var(--gf-text-3);
+  cursor: default;
+}
+.field__quick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.field__sep {
+  color: var(--gf-text-3);
+}
 .field {
   display: block;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .field:last-child {
   margin-bottom: 0;
@@ -184,7 +293,7 @@ async function copyYaml() {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--gf-text-2);
-  margin-bottom: 7px;
+  margin-bottom: 6px;
 }
 .field__warn {
   display: flex;
