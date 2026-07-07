@@ -22,7 +22,8 @@ COPY src ./src
 COPY recommendation_schema.json ./
 COPY space_start.sh ./
 
+RUN sed -i 's/\r$//' space_start.sh && chmod +x space_start.sh
 RUN pip install --no-cache-dir .
 
 EXPOSE 7860
-CMD ["sh", "./space_start.sh"]
+CMD ["./space_start.sh"]
