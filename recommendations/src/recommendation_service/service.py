@@ -1,13 +1,13 @@
 from recommendation_service.config import ConfigError, filter_repo_context, parse_config
-from recommendation_service.models import (
-    SEVERITY_RANK,
-    AnalyzeRequest,
-    RecommendationResponse,
-)
 from recommendation_service.model_client import (
     InferenceMetrics,
     ModelOutputError,
     RecommendationModelClient,
+)
+from recommendation_service.models import (
+    SEVERITY_RANK,
+    AnalyzeRequest,
+    RecommendationResponse,
 )
 from recommendation_service.prompt import SYSTEM_PROMPT, build_analysis_prompt
 

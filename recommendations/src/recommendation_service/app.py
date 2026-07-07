@@ -2,17 +2,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from recommendation_service.config import ConfigError
-from recommendation_service.models import (
-    AnalyzeRequest,
-    ErrorResponse,
-    HealthResponse,
-    RecommendationResponse,
-)
 from recommendation_service.model_client import (
     ModelOutputError,
     ModelTimeoutError,
     ModelUnavailableError,
     RecommendationModelClient,
+)
+from recommendation_service.models import (
+    AnalyzeRequest,
+    ErrorResponse,
+    HealthResponse,
+    RecommendationResponse,
 )
 from recommendation_service.service import RecommendationService
 from recommendation_service.settings import Settings

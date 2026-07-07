@@ -3,11 +3,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent_engine.errors import (
-    EmptyModelOutputError,
-    InferenceTimeoutError,
-    ModelUnavailableError as AgentModelUnavailableError,
-)
+from agent_engine import errors as agent_errors
 from agent_engine.llm_client import OpenAICompatibleClient
 from agent_engine.settings import AgentSettings
 from recommendation_service.models import RecommendationResponse
@@ -70,9 +66,12 @@ class RecommendationModelClient:
                 tools=[],
                 response_schema=response_schema,
             )
-        except InferenceTimeoutError as exc:
+        except agent_errors.InferenceTimeoutError as exc:
             raise ModelTimeoutError("model inference timed out") from exc
-        except (AgentModelUnavailableError, EmptyModelOutputError) as exc:
+        except (
+            agent_errors.ModelUnavailableError,
+            agent_errors.EmptyModelOutputError,
+        ) as exc:
             raise ModelUnavailableError(str(exc)) from exc
 
         try:
