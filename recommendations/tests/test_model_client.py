@@ -18,7 +18,7 @@ async def test_model_client_uses_schema_and_parses_usage():
     captured = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/models":
+        if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "laguna"}]})
         captured.update(__import__("json").loads(request.content))
         return httpx.Response(
