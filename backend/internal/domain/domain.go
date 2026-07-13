@@ -191,16 +191,46 @@ type GitFlameApplyResult struct {
 	PullRequestURL string `json:"pull_request_url,omitempty"`
 }
 
+type AppUser struct {
+	ID             string    `json:"id"`
+	GitFlameUserID string    `json:"gitflame_user_id"`
+	Username       string    `json:"username"`
+	CreatedAt      time.Time `json:"created_at,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
+}
+
+type AppSession struct {
+	ID         string     `json:"id"`
+	User       AppUser    `json:"user"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at,omitempty"`
+}
+
+type GitFlameTokenMaterial struct {
+	Ciphertext []byte `json:"-"`
+	Nonce      []byte `json:"-"`
+	KeyVersion int    `json:"-"`
+}
+
 type GitFlameConnection struct {
-	ID                   string             `json:"id"`
-	Repository           RepositoryMetadata `json:"repository"`
-	RepoURL              string             `json:"repo_url"`
-	DefaultBranch        string             `json:"default_branch"`
-	AccessTokenEncrypted string             `json:"-"`
-	TokenLast4           string             `json:"token_last4,omitempty"`
-	TokenStatus          string             `json:"token_status"`
-	CreatedAt            time.Time          `json:"created_at,omitempty"`
-	UpdatedAt            time.Time          `json:"updated_at,omitempty"`
+	ID                   string                `json:"id"`
+	UserID               string                `json:"user_id"`
+	Repository           RepositoryMetadata    `json:"repository"`
+	RepoURL              string                `json:"repo_url"`
+	DefaultBranch        string                `json:"default_branch"`
+	AccessTokenEncrypted string                `json:"-"`
+	TokenMaterial        GitFlameTokenMaterial `json:"-"`
+	TokenLast4           string                `json:"token_last4,omitempty"`
+	TokenStatus          string                `json:"token_status"`
+	Scopes               []string              `json:"scopes,omitempty"`
+	TokenExpiresAt       *time.Time            `json:"token_expires_at,omitempty"`
+	LastValidatedAt      *time.Time            `json:"last_validated_at,omitempty"`
+	LastUsedAt           *time.Time            `json:"last_used_at,omitempty"`
+	RevokedAt            *time.Time            `json:"revoked_at,omitempty"`
+	CreatedAt            time.Time             `json:"created_at,omitempty"`
+	UpdatedAt            time.Time             `json:"updated_at,omitempty"`
 }
 
 type GitFlameWebhookRegistration struct {

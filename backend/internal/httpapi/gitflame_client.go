@@ -35,6 +35,14 @@ type gitFlameCommitAction struct {
 	Content  string `json:"content,omitempty"`
 }
 
+type GitFlameUserProfile struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Login    string `json:"login"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+}
+
 func NewGitFlameClient(baseURL, apiKey string, timeout time.Duration) *GitFlameClient {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil
@@ -124,6 +132,42 @@ func (c *GitFlameClient) ApplyGeneratedFiles(ctx context.Context, repository dom
 		return domain.GitFlameApplyResult{}, err
 	}
 	return domain.GitFlameApplyResult{BranchName: contract.BranchName, CommitSHA: commitSHA, PullRequestID: prID, PullRequestURL: prURL}, nil
+}
+
+func (c *GitFlameClient) CurrentUser(ctx context.Context) (GitFlameUserProfile, error) {
+	var lastErr error
+	for _, endpoint := range []string{"/api/v1/user", "/api/v1/users/me", "/api/v1/profile"} {
+		var response map[string]any
+		err := c.getJSON(ctx, endpoint, "", &response)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		profile := GitFlameUserProfile{
+			ID:       firstString(response, "id", "user.id", "data.id"),
+			Username: firstString(response, "username", "login", "user.username", "user.login", "data.username", "data.login"),
+			Login:    firstString(response, "login", "username", "user.login", "user.username", "data.login", "data.username"),
+			Name:     firstString(response, "name", "user.name", "data.name"),
+			Email:    firstString(response, "email", "user.email", "data.email"),
+		}
+		if profile.ID == "" && profile.Username != "" {
+			profile.ID = profile.Username
+		}
+		if profile.Username == "" {
+			profile.Username = profile.Login
+		}
+		if profile.Username == "" {
+			profile.Username = profile.Name
+		}
+		if profile.ID != "" && profile.Username != "" {
+			return profile, nil
+		}
+		lastErr = &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_user_response", Detail: "GitFlame API did not return user id and username"}
+	}
+	if lastErr == nil {
+		lastErr = &IntegrationError{Status: http.StatusUnauthorized, Code: "invalid_gitflame_token", Detail: "GitFlame token could not be validated"}
+	}
+	return GitFlameUserProfile{}, lastErr
 }
 
 func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) error {

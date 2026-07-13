@@ -10,6 +10,11 @@ Current Sprint 4 Go backend includes:
 - Swagger UI at `GET /swagger/` and `GET /docs`
 - asynchronous Agent Engine integration through `POST /v1/plans/generate` and `POST /v1/files/generate`
 - issue workflow endpoints:
+  - `POST /auth/gitflame/session`
+  - `DELETE /auth/session`
+  - `POST /integrations/gitflame/connections`
+  - `PUT /integrations/gitflame/connections/{id}`
+  - `DELETE /integrations/gitflame/connections/{id}`
   - `POST /integrations/gitflame/issues/analyze`
   - `POST /integrations/gitflame/webhooks/issues`
   - `GET /ai/tasks/{taskId}`
@@ -32,8 +37,10 @@ Current Sprint 4 Go backend includes:
 - Agent Engine error mapping for `400`, `404`, `422`, `502`, `503`, and `504`
 - code-generation task queued after approval with generated file operations and a GitFlame branch/commit/PR payload
 - approval can include an edited `plan_markdown`; backend validates and sends that exact final plan to code generation
+- GitFlame access tokens are never stored on the frontend; the browser receives only an HttpOnly application session cookie
+- GitFlame repository connections are owned by `app_users` and store AES-GCM token ciphertext, nonce, key version, scopes, expiration, validation, and revocation metadata
 - GitFlame webhook ingestion can fetch `.ai.yml`, repository tree, and file contents through `GITFLAME_BASE_URL`
-- generated file operations can be applied back to GitFlame through `GITFLAME_BASE_URL`, creating a branch, commit, pull request, and saved `pull_request_url`
+- generated file operations can be applied back to GitFlame through the saved per-user connection, creating a branch, commit, pull request, and saved `pull_request_url`
 - repository recommendations are generated through the external recommendation service and persisted without a fallback card
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations
 - Redis Streams broker with consumer groups, retry, queue limit, acknowledgement, and dead-letter handling
@@ -76,6 +83,11 @@ AGENT_ENGINE_URL=http://agent-engine:8001
 AGENT_ENGINE_TIMEOUT_SECONDS=600
 GITFLAME_BASE_URL=
 GITFLAME_API_KEY=
+GITFLAME_CREDENTIAL_KEY=
+GITFLAME_CREDENTIAL_KEY_VERSION=1
+SESSION_COOKIE_NAME=codepilot_session
+SESSION_COOKIE_SECURE=false
+SESSION_TTL_HOURS=168
 RECOMMENDATION_SERVICE_URL=http://recommendations:8000
 REDIS_URL=redis://redis:6379/0
 AGENT_QUEUE_NAME=gitflame:agent:tasks
@@ -89,6 +101,8 @@ Compose exposes Agent Engine itself on host port `8002`, while containers use
 server and `OPENAI_API_KEY` must be set when that provider requires authentication.
 
 `REDIS_URL` matches the Compose Redis service (`redis://redis:6379/0`); host-side tools use `redis://localhost:6379/0`. Redis transports tasks, while PostgreSQL remains the source of truth. Set `TASK_DISPATCH_MODE=redis` only when the `agent-worker` service is running. The default `local` mode is convenient for isolated backend development.
+
+`GITFLAME_CREDENTIAL_KEY` must decode to a 16, 24, or 32 byte AES key. It may be raw text, hex, or base64. Keep it in env/secret manager, not in PostgreSQL. For production set `SESSION_COOKIE_SECURE=true` so the session cookie is sent only over HTTPS.
 
 PostgreSQL schema can be applied manually:
 

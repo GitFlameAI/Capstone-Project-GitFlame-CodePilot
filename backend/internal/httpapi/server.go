@@ -13,16 +13,23 @@ import (
 	"gitflame-codepilot/backend/internal/domain"
 	"gitflame-codepilot/backend/internal/queue"
 	"gitflame-codepilot/backend/internal/repository"
+	"gitflame-codepilot/backend/internal/security"
 	"gitflame-codepilot/backend/internal/service"
 )
 
 type Server struct {
-	workflow    *service.Workflow
-	store       repository.Store
-	gitflame    GitFlameSource
-	recommender RecommendationAnalyzer
-	router      *http.ServeMux
-	checks      map[string]func(context.Context) error
+	workflow         *service.Workflow
+	store            repository.Store
+	gitflame         GitFlameSource
+	recommender      RecommendationAnalyzer
+	router           *http.ServeMux
+	checks           map[string]func(context.Context) error
+	credentialCipher *security.CredentialCipher
+	gitflameBaseURL  string
+	gitflameTimeout  time.Duration
+	sessionCookie    string
+	sessionTTL       time.Duration
+	sessionSecure    bool
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -36,6 +43,14 @@ func New(cfg config.Config) (*Server, error) {
 	}
 	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
 	gitflame := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout)
+	var credentialCipher *security.CredentialCipher
+	if strings.TrimSpace(cfg.GitFlameCredentialKey) != "" {
+		var err error
+		credentialCipher, err = security.NewCredentialCipher(cfg.GitFlameCredentialKey, cfg.GitFlameCredentialKeyVersion)
+		if err != nil {
+			return nil, err
+		}
+	}
 	recommender := NewRecommendationClient(cfg.RecommendationServiceURL, cfg.RecommendationTimeout)
 	checks := map[string]func(context.Context) error{"storage": store.Ping, "agent_engine": engine.Ready}
 	if cfg.DispatchMode == "redis" {
@@ -47,20 +62,30 @@ func New(cfg config.Config) (*Server, error) {
 			return nil, err
 		}
 		checks["redis"] = broker.Ping
-		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, checks), nil
+		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, checks, cfg, credentialCipher), nil
 	}
-	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, checks), nil
+	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, checks, cfg, credentialCipher), nil
 }
 func NewWithDependencies(store repository.Store, generator agent.Generator) *Server {
 	return NewWithDependenciesAndIntegrations(store, generator, nil, nil)
 }
 
 func NewWithDependenciesAndIntegrations(store repository.Store, generator agent.Generator, gitflame GitFlameSource, recommender RecommendationAnalyzer) *Server {
-	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, map[string]func(context.Context) error{"storage": store.Ping})
+	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, map[string]func(context.Context) error{"storage": store.Ping}, config.Config{SessionCookieName: "codepilot_session", SessionTTL: 168 * time.Hour}, nil)
 }
 
-func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, checks map[string]func(context.Context) error) *Server {
-	s := &Server{workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, checks: checks}
+func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, checks map[string]func(context.Context) error, cfg config.Config, credentialCipher *security.CredentialCipher) *Server {
+	if cfg.SessionCookieName == "" {
+		cfg.SessionCookieName = "codepilot_session"
+	}
+	if cfg.SessionTTL <= 0 {
+		cfg.SessionTTL = 168 * time.Hour
+	}
+	s := &Server{
+		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, checks: checks,
+		credentialCipher: credentialCipher, gitflameBaseURL: cfg.GitFlameBaseURL, gitflameTimeout: cfg.GitFlameTimeout,
+		sessionCookie: cfg.SessionCookieName, sessionTTL: cfg.SessionTTL, sessionSecure: cfg.SessionCookieSecure,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /ready", s.ready)
@@ -68,6 +93,11 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("GET /swagger/", s.docs)
 	mux.HandleFunc("GET /swagger/index.html", s.docs)
 	mux.HandleFunc("GET /openapi.json", s.openAPI)
+	mux.HandleFunc("POST /auth/gitflame/session", s.createGitFlameSession)
+	mux.HandleFunc("DELETE /auth/session", s.revokeSession)
+	mux.HandleFunc("POST /integrations/gitflame/connections", s.saveGitFlameConnection)
+	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
+	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
 	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
 	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
 	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
@@ -264,10 +294,6 @@ func (s *Server) codeGenerationStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
-	if s.gitflame == nil {
-		problem(w, http.StatusServiceUnavailable, "gitflame_client_unavailable", "GitFlame API client is not configured")
-		return
-	}
 	session, err := s.workflow.Session(r.PathValue("id"))
 	if err != nil {
 		resourceError(w, err, "session_not_found", "issue session was not found")
@@ -277,11 +303,20 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusConflict, "generated_files_not_ready", "code generation has not produced files to apply")
 		return
 	}
+	gitflame, connection, err := s.gitFlameSourceForRepository(r, session.Request.Repository.ID)
+	if err != nil {
+		integrationError(w, err, "gitflame_client_unavailable")
+		return
+	}
 	if session.GeneratedFiles.ApplyStatus == "applied" && session.GeneratedFiles.PullRequestURL != "" {
 		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
 		return
 	}
-	result, err := s.gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, *session.GeneratedFiles)
+	if gitflame == nil {
+		problem(w, http.StatusServiceUnavailable, "gitflame_client_unavailable", "GitFlame API client is not configured")
+		return
+	}
+	result, err := gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, *session.GeneratedFiles)
 	now := time.Now().UTC()
 	if err != nil {
 		session.GeneratedFiles.ApplyStatus = "failed"
@@ -303,6 +338,9 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.UpdateSession(session); err != nil {
 		problem(w, http.StatusInternalServerError, "storage_error", err.Error())
 		return
+	}
+	if connection != nil {
+		_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
 	}
 	write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
 }
