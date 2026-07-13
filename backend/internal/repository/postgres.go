@@ -48,6 +48,96 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 	return nil
 }
 
+func (s *PostgresStore) UpsertAppUser(user domain.AppUser) (*domain.AppUser, error) {
+	if strings.TrimSpace(user.GitFlameUserID) == "" {
+		return nil, errors.New("gitflame user id is required")
+	}
+	if strings.TrimSpace(user.Username) == "" {
+		user.Username = user.GitFlameUserID
+	}
+	err := s.pool.QueryRow(context.Background(), `
+		INSERT INTO app_users (gitflame_user_id,username,updated_at)
+		VALUES ($1,$2,now())
+		ON CONFLICT (gitflame_user_id) DO UPDATE SET
+			username=EXCLUDED.username,
+			updated_at=now()
+		RETURNING id::text,gitflame_user_id,username,created_at,updated_at`,
+		user.GitFlameUserID, user.Username).
+		Scan(&user.ID, &user.GitFlameUserID, &user.Username, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (s *PostgresStore) CreateAppSession(userID string, tokenHash []byte, expiresAt time.Time) (*domain.AppSession, error) {
+	var session domain.AppSession
+	err := s.pool.QueryRow(context.Background(), `
+		INSERT INTO app_sessions (user_id,token_hash,expires_at)
+		VALUES ($1::uuid,$2,$3)
+		RETURNING id::text,expires_at,created_at`,
+		userID, tokenHash, expiresAt).
+		Scan(&session.ID, &session.ExpiresAt, &session.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	loaded, err := s.AppSessionByTokenHash(tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	loaded.ID = session.ID
+	loaded.ExpiresAt = session.ExpiresAt
+	loaded.CreatedAt = session.CreatedAt
+	return loaded, nil
+}
+
+func (s *PostgresStore) AppSessionByTokenHash(tokenHash []byte) (*domain.AppSession, error) {
+	var session domain.AppSession
+	var user domain.AppUser
+	var lastSeenAt, revokedAt pgtype.Timestamptz
+	err := s.pool.QueryRow(context.Background(), `
+		UPDATE app_sessions s SET last_seen_at=now()
+		FROM app_users u
+		WHERE s.user_id=u.id
+		  AND s.token_hash=$1
+		  AND s.revoked_at IS NULL
+		  AND s.expires_at > now()
+		RETURNING s.id::text,s.expires_at,s.last_seen_at,s.revoked_at,s.created_at,
+		          u.id::text,u.gitflame_user_id,u.username,u.created_at,u.updated_at`,
+		tokenHash).
+		Scan(&session.ID, &session.ExpiresAt, &lastSeenAt, &revokedAt, &session.CreatedAt,
+			&user.ID, &user.GitFlameUserID, &user.Username, &user.CreatedAt, &user.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lastSeenAt.Valid {
+		value := lastSeenAt.Time
+		session.LastSeenAt = &value
+	}
+	if revokedAt.Valid {
+		value := revokedAt.Time
+		session.RevokedAt = &value
+	}
+	session.User = user
+	return &session, nil
+}
+
+func (s *PostgresStore) RevokeAppSession(sessionID string) error {
+	command, err := s.pool.Exec(context.Background(), `
+		UPDATE app_sessions SET revoked_at=now()
+		WHERE id=$1::uuid AND revoked_at IS NULL`, sessionID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) CreateSession(req domain.IssueAnalyzeRequest, cfg domain.AIConfig) (*domain.IssueSession, bool, error) {
 	if existing, err := s.sessionByRepositoryIssue(req.Repository.ID, req.Issue.ID); err == nil {
 		return existing, false, nil
@@ -496,6 +586,9 @@ func (s *PostgresStore) DeleteRecommendation(id string) error {
 }
 
 func (s *PostgresStore) SaveGitFlameConnection(connection domain.GitFlameConnection) (*domain.GitFlameConnection, error) {
+	if strings.TrimSpace(connection.UserID) == "" {
+		return nil, errors.New("gitflame connection requires user id")
+	}
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -521,21 +614,37 @@ func (s *PostgresStore) SaveGitFlameConnection(connection domain.GitFlameConnect
 	if connection.TokenStatus == "" {
 		connection.TokenStatus = "active"
 	}
+	scopesJSON, err := json.Marshal(connection.Scopes)
+	if err != nil {
+		return nil, err
+	}
 	row := tx.QueryRow(ctx, `
 		INSERT INTO gitflame_connections (
-			id,repository_id,repo_url,default_branch,access_token_encrypted,token_last4,token_status,updated_at
+			id,user_id,repository_id,repo_url,default_branch,access_token_encrypted,
+			access_token_ciphertext,access_token_nonce,encryption_key_version,
+			token_last4,token_status,scopes,token_expires_at,last_validated_at,revoked_at,updated_at
 		) VALUES (
-			$1::uuid,$2::uuid,$3,$4,$5,$6,$7,now()
-		) ON CONFLICT (repository_id) DO UPDATE SET
+			$1::uuid,$2::uuid,$3::uuid,$4,$5,NULLIF($6,''),
+			$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,now()
+		) ON CONFLICT (user_id, repository_id) DO UPDATE SET
 			repo_url=EXCLUDED.repo_url,
 			default_branch=EXCLUDED.default_branch,
 			access_token_encrypted=EXCLUDED.access_token_encrypted,
+			access_token_ciphertext=EXCLUDED.access_token_ciphertext,
+			access_token_nonce=EXCLUDED.access_token_nonce,
+			encryption_key_version=EXCLUDED.encryption_key_version,
 			token_last4=EXCLUDED.token_last4,
 			token_status=EXCLUDED.token_status,
+			scopes=EXCLUDED.scopes,
+			token_expires_at=EXCLUDED.token_expires_at,
+			last_validated_at=EXCLUDED.last_validated_at,
+			revoked_at=EXCLUDED.revoked_at,
 			updated_at=now()
 		RETURNING id::text,created_at,updated_at`,
-		connection.ID, repositoryID, connection.RepoURL, connection.DefaultBranch,
-		connection.AccessTokenEncrypted, connection.TokenLast4, connection.TokenStatus)
+		connection.ID, connection.UserID, repositoryID, connection.RepoURL, connection.DefaultBranch,
+		connection.AccessTokenEncrypted, connection.TokenMaterial.Ciphertext, connection.TokenMaterial.Nonce,
+		connection.TokenMaterial.KeyVersion, connection.TokenLast4, connection.TokenStatus, string(scopesJSON),
+		connection.TokenExpiresAt, connection.LastValidatedAt, connection.RevokedAt)
 	if err := row.Scan(&connection.ID, &connection.CreatedAt, &connection.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -546,16 +655,40 @@ func (s *PostgresStore) SaveGitFlameConnection(connection domain.GitFlameConnect
 }
 
 func (s *PostgresStore) GitFlameConnection(id string) (*domain.GitFlameConnection, error) {
+	return s.gitFlameConnectionByPredicate(`c.id::text=$1 OR r.external_id=$1`, "", id)
+}
+
+func (s *PostgresStore) UserGitFlameConnection(userID, id string) (*domain.GitFlameConnection, error) {
+	return s.gitFlameConnectionByPredicate(`c.user_id::text=$1 AND c.id::text=$2`, userID, id)
+}
+
+func (s *PostgresStore) UserGitFlameConnectionByRepository(userID, repositoryID string) (*domain.GitFlameConnection, error) {
+	return s.gitFlameConnectionByPredicate(`c.user_id::text=$1 AND r.external_id=$2 AND c.revoked_at IS NULL`, userID, repositoryID)
+}
+
+func (s *PostgresStore) gitFlameConnectionByPredicate(predicate, first, second string) (*domain.GitFlameConnection, error) {
 	var connection domain.GitFlameConnection
 	var repository domain.RepositoryMetadata
-	err := s.pool.QueryRow(context.Background(), `
-		SELECT c.id::text,c.repo_url,c.default_branch,c.access_token_encrypted,c.token_last4,c.token_status,
+	var legacyToken, scopesJSON pgtype.Text
+	var tokenExpiresAt, lastValidatedAt, lastUsedAt, revokedAt pgtype.Timestamptz
+	var keyVersion pgtype.Int4
+	query := `
+		SELECT c.id::text,COALESCE(c.user_id::text,''),c.repo_url,c.default_branch,c.access_token_encrypted,
+		       c.access_token_ciphertext,c.access_token_nonce,c.encryption_key_version,c.token_last4,c.token_status,
+		       c.scopes::text,c.token_expires_at,c.last_validated_at,c.last_used_at,c.revoked_at,
 		       c.created_at,c.updated_at,r.external_id,r.name,r.default_branch,r.web_url
 		FROM gitflame_connections c
 		JOIN repositories r ON r.id=c.repository_id
-		WHERE c.id::text=$1 OR r.external_id=$1`, id).
-		Scan(&connection.ID, &connection.RepoURL, &connection.DefaultBranch, &connection.AccessTokenEncrypted,
-			&connection.TokenLast4, &connection.TokenStatus, &connection.CreatedAt, &connection.UpdatedAt,
+		WHERE ` + predicate + ` LIMIT 1`
+	args := []any{second}
+	if first != "" {
+		args = []any{first, second}
+	}
+	err := s.pool.QueryRow(context.Background(), query, args...).
+		Scan(&connection.ID, &connection.UserID, &connection.RepoURL, &connection.DefaultBranch, &legacyToken,
+			&connection.TokenMaterial.Ciphertext, &connection.TokenMaterial.Nonce, &keyVersion,
+			&connection.TokenLast4, &connection.TokenStatus, &scopesJSON, &tokenExpiresAt, &lastValidatedAt,
+			&lastUsedAt, &revokedAt, &connection.CreatedAt, &connection.UpdatedAt,
 			&repository.ID, &repository.Name, &repository.DefaultBranch, &repository.WebURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -563,9 +696,64 @@ func (s *PostgresStore) GitFlameConnection(id string) (*domain.GitFlameConnectio
 	if err != nil {
 		return nil, err
 	}
+	if legacyToken.Valid {
+		connection.AccessTokenEncrypted = legacyToken.String
+	}
+	if keyVersion.Valid {
+		connection.TokenMaterial.KeyVersion = int(keyVersion.Int32)
+	}
+	if scopesJSON.Valid {
+		_ = json.Unmarshal([]byte(scopesJSON.String), &connection.Scopes)
+	}
+	if tokenExpiresAt.Valid {
+		value := tokenExpiresAt.Time
+		connection.TokenExpiresAt = &value
+	}
+	if lastValidatedAt.Valid {
+		value := lastValidatedAt.Time
+		connection.LastValidatedAt = &value
+	}
+	if lastUsedAt.Valid {
+		value := lastUsedAt.Time
+		connection.LastUsedAt = &value
+	}
+	if revokedAt.Valid {
+		value := revokedAt.Time
+		connection.RevokedAt = &value
+	}
 	repository.CommitSHA = ""
 	connection.Repository = repository
 	return &connection, nil
+}
+
+func (s *PostgresStore) RevokeGitFlameConnection(userID, id string) (*domain.GitFlameConnection, error) {
+	var connectionID string
+	err := s.pool.QueryRow(context.Background(), `
+		UPDATE gitflame_connections
+		SET token_status='revoked',revoked_at=now(),updated_at=now()
+		WHERE user_id=$1::uuid AND id=$2::uuid
+		RETURNING id::text`, userID, id).Scan(&connectionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.UserGitFlameConnection(userID, connectionID)
+}
+
+func (s *PostgresStore) TouchGitFlameConnection(userID, id string) error {
+	command, err := s.pool.Exec(context.Background(), `
+		UPDATE gitflame_connections
+		SET last_used_at=now(),updated_at=now()
+		WHERE user_id=$1::uuid AND id=$2::uuid`, userID, id)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) SaveGitFlameWebhook(webhook domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error) {

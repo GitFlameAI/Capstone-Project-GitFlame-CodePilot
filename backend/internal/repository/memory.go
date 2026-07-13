@@ -12,6 +12,10 @@ import (
 
 type Store interface {
 	Ping(context.Context) error
+	UpsertAppUser(domain.AppUser) (*domain.AppUser, error)
+	CreateAppSession(string, []byte, time.Time) (*domain.AppSession, error)
+	AppSessionByTokenHash([]byte) (*domain.AppSession, error)
+	RevokeAppSession(string) error
 	CreateSession(domain.IssueAnalyzeRequest, domain.AIConfig) (*domain.IssueSession, bool, error)
 	Session(string) (*domain.IssueSession, error)
 	UpdateSession(*domain.IssueSession) error
@@ -25,6 +29,10 @@ type Store interface {
 	DeleteRecommendation(string) error
 	SaveGitFlameConnection(domain.GitFlameConnection) (*domain.GitFlameConnection, error)
 	GitFlameConnection(string) (*domain.GitFlameConnection, error)
+	UserGitFlameConnection(string, string) (*domain.GitFlameConnection, error)
+	UserGitFlameConnectionByRepository(string, string) (*domain.GitFlameConnection, error)
+	RevokeGitFlameConnection(string, string) (*domain.GitFlameConnection, error)
+	TouchGitFlameConnection(string, string) error
 	SaveGitFlameWebhook(domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error)
 	SaveGitFlameWebhookEvent(domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error)
 	SaveRepositorySnapshot(domain.RepositorySnapshot, []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error)
@@ -39,6 +47,10 @@ type MemoryStore struct {
 	issueIndex    map[string]string
 	tasks         map[string]*domain.AgentTask
 	reports       map[string]*domain.RecommendationReport
+	users         map[string]*domain.AppUser
+	userIndex     map[string]string
+	appSessions   map[string]*domain.AppSession
+	sessionHashes map[string]string
 	connections   map[string]*domain.GitFlameConnection
 	webhooks      map[string]*domain.GitFlameWebhookRegistration
 	events        map[string]*domain.GitFlameWebhookEvent
@@ -50,6 +62,8 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		sessions: map[string]*domain.IssueSession{}, issueIndex: map[string]string{},
 		tasks: map[string]*domain.AgentTask{}, reports: map[string]*domain.RecommendationReport{},
+		users: map[string]*domain.AppUser{}, userIndex: map[string]string{},
+		appSessions: map[string]*domain.AppSession{}, sessionHashes: map[string]string{},
 		connections: map[string]*domain.GitFlameConnection{}, webhooks: map[string]*domain.GitFlameWebhookRegistration{},
 		events: map[string]*domain.GitFlameWebhookEvent{}, snapshots: map[string]*domain.RepositorySnapshot{},
 		snapshotFiles: map[string][]domain.RepositorySnapshotFile{},
@@ -57,6 +71,74 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) Ping(context.Context) error { return nil }
+
+func (s *MemoryStore) UpsertAppUser(v domain.AppUser) (*domain.AppUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if v.GitFlameUserID == "" {
+		return nil, errors.New("gitflame user id is required")
+	}
+	if strings.TrimSpace(v.Username) == "" {
+		v.Username = v.GitFlameUserID
+	}
+	if id, ok := s.userIndex[v.GitFlameUserID]; ok {
+		existing := s.users[id]
+		existing.Username = v.Username
+		existing.UpdatedAt = now
+		return cloneUser(existing), nil
+	}
+	if v.ID == "" {
+		v.ID = NewID()
+	}
+	v.CreatedAt = now
+	v.UpdatedAt = now
+	s.users[v.ID] = cloneUser(&v)
+	s.userIndex[v.GitFlameUserID] = v.ID
+	return cloneUser(&v), nil
+}
+
+func (s *MemoryStore) CreateAppSession(userID string, tokenHash []byte, expiresAt time.Time) (*domain.AppSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[userID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	session := &domain.AppSession{ID: NewID(), User: *cloneUser(user), ExpiresAt: expiresAt, CreatedAt: now}
+	s.appSessions[session.ID] = cloneAppSession(session)
+	s.sessionHashes[string(tokenHash)] = session.ID
+	return cloneAppSession(session), nil
+}
+
+func (s *MemoryStore) AppSessionByTokenHash(tokenHash []byte) (*domain.AppSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.sessionHashes[string(tokenHash)]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	session := s.appSessions[id]
+	if session == nil || session.RevokedAt != nil || !session.ExpiresAt.After(time.Now().UTC()) {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	session.LastSeenAt = &now
+	return cloneAppSession(session), nil
+}
+
+func (s *MemoryStore) RevokeAppSession(sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.appSessions[sessionID]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	session.RevokedAt = &now
+	return nil
+}
 
 func (s *MemoryStore) CreateSession(req domain.IssueAnalyzeRequest, cfg domain.AIConfig) (*domain.IssueSession, bool, error) {
 	s.mu.Lock()
@@ -181,6 +263,13 @@ func (s *MemoryStore) SaveGitFlameConnection(v domain.GitFlameConnection) (*doma
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
+	for _, existing := range s.connections {
+		if existing.UserID == v.UserID && existing.Repository.ID == v.Repository.ID && v.Repository.ID != "" {
+			v.ID = existing.ID
+			v.CreatedAt = existing.CreatedAt
+			break
+		}
+	}
 	if v.ID == "" {
 		v.ID = NewID()
 		v.CreatedAt = now
@@ -209,6 +298,55 @@ func (s *MemoryStore) GitFlameConnection(id string) (*domain.GitFlameConnection,
 		return nil, ErrNotFound
 	}
 	return cloneConnection(v), nil
+}
+
+func (s *MemoryStore) UserGitFlameConnection(userID, id string) (*domain.GitFlameConnection, error) {
+	connection, err := s.GitFlameConnection(id)
+	if err != nil {
+		return nil, err
+	}
+	if connection.UserID != userID {
+		return nil, ErrNotFound
+	}
+	return connection, nil
+}
+
+func (s *MemoryStore) UserGitFlameConnectionByRepository(userID, repositoryID string) (*domain.GitFlameConnection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, connection := range s.connections {
+		if connection.UserID == userID && connection.Repository.ID == repositoryID && connection.RevokedAt == nil {
+			return cloneConnection(connection), nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) RevokeGitFlameConnection(userID, id string) (*domain.GitFlameConnection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	connection, ok := s.connections[id]
+	if !ok || connection.UserID != userID {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	connection.TokenStatus = "revoked"
+	connection.RevokedAt = &now
+	connection.UpdatedAt = now
+	return cloneConnection(connection), nil
+}
+
+func (s *MemoryStore) TouchGitFlameConnection(userID, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	connection, ok := s.connections[id]
+	if !ok || connection.UserID != userID {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	connection.LastUsedAt = &now
+	connection.UpdatedAt = now
+	return nil
 }
 
 func (s *MemoryStore) SaveGitFlameWebhook(v domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error) {
@@ -305,8 +443,46 @@ func cloneReport(v *domain.RecommendationReport) *domain.RecommendationReport {
 	return &c
 }
 
+func cloneUser(v *domain.AppUser) *domain.AppUser {
+	c := *v
+	return &c
+}
+
+func cloneAppSession(v *domain.AppSession) *domain.AppSession {
+	c := *v
+	c.User = *cloneUser(&v.User)
+	if v.LastSeenAt != nil {
+		lastSeenAt := *v.LastSeenAt
+		c.LastSeenAt = &lastSeenAt
+	}
+	if v.RevokedAt != nil {
+		revokedAt := *v.RevokedAt
+		c.RevokedAt = &revokedAt
+	}
+	return &c
+}
+
 func cloneConnection(v *domain.GitFlameConnection) *domain.GitFlameConnection {
 	c := *v
+	c.Scopes = append([]string(nil), v.Scopes...)
+	c.TokenMaterial.Ciphertext = append([]byte(nil), v.TokenMaterial.Ciphertext...)
+	c.TokenMaterial.Nonce = append([]byte(nil), v.TokenMaterial.Nonce...)
+	if v.TokenExpiresAt != nil {
+		tokenExpiresAt := *v.TokenExpiresAt
+		c.TokenExpiresAt = &tokenExpiresAt
+	}
+	if v.LastValidatedAt != nil {
+		lastValidatedAt := *v.LastValidatedAt
+		c.LastValidatedAt = &lastValidatedAt
+	}
+	if v.LastUsedAt != nil {
+		lastUsedAt := *v.LastUsedAt
+		c.LastUsedAt = &lastUsedAt
+	}
+	if v.RevokedAt != nil {
+		revokedAt := *v.RevokedAt
+		c.RevokedAt = &revokedAt
+	}
 	return &c
 }
 

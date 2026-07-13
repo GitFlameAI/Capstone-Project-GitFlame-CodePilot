@@ -7,12 +7,15 @@ The backend uses PostgreSQL as the main storage layer for Sprint 4. Runtime stat
 - `migrations/initial_schema.sql` creates the PostgreSQL schema.
 - `migrations/003_sprint3_code_generation.sql` upgrades an existing Sprint 2 database with Sprint 3 code-generation storage.
 - `migrations/004_sprint4_gitflame_integration_storage.sql` upgrades an existing Sprint 3 database with GitFlame connection, webhook, repository snapshot, and apply-result storage.
+- `migrations/005_backend_session_credentials.sql` adds CodePilot users and server sessions, encrypted GitFlame credential metadata, per-user repository connections, and webhook delivery deduplication.
 - `verification.sql` inserts sample data and checks that issue workflow state, plan revisions, code-generation payloads, generated files, agent task status, and recommendation retention are stored correctly.
 
 ## Schema Scope
 
 The migration creates:
 
+- `app_users`
+- `app_sessions`
 - `repositories`
 - `gitflame_connections`
 - `gitflame_webhooks`
@@ -33,7 +36,7 @@ The migration creates:
 - `recommendations`
 - `recommendation_statuses`
 
-`gitflame_connections` stores the repository connection created when a user enters a GitFlame repository URL and access token in CodePilot. The token is expected to be encrypted before storage; the database also keeps `token_last4` and `token_status` so the UI can show which token is connected without exposing the secret.
+`app_sessions` stores only a SHA-256 hash of the random session token sent to the browser as an HttpOnly cookie. `gitflame_connections` links a user to a repository and stores application-encrypted token ciphertext, nonce, key version, scopes, expiration, validation, and revocation metadata. The encryption key stays outside PostgreSQL. The legacy `access_token_encrypted` column remains nullable only for a staged backend migration.
 
 `gitflame_webhooks` stores the webhook URL that CodePilot asks GitFlame to call, the hashed webhook secret used for signature validation, subscribed event names, registration status, and optional GitFlame-side webhook id.
 
@@ -76,6 +79,12 @@ For an existing Sprint 3 database volume, apply the Sprint 4 GitFlame integratio
 
 ```bash
 psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/migrations/004_sprint4_gitflame_integration_storage.sql
+```
+
+Then apply the server-session and credential storage upgrade:
+
+```bash
+psql postgresql://gitflame:gitflame@localhost:5432/gitflame_codepilot -f backend/db/migrations/005_backend_session_credentials.sql
 ```
 
 ## Manual Verification

@@ -15,6 +15,7 @@ import (
 	"gitflame-codepilot/backend/internal/agent"
 	"gitflame-codepilot/backend/internal/domain"
 	"gitflame-codepilot/backend/internal/repository"
+	"gitflame-codepilot/backend/internal/security"
 )
 
 type fakeGenerator struct {
@@ -113,6 +114,10 @@ func (f *fakeGitFlameSource) ApplyGeneratedFiles(_ context.Context, repository d
 		f.applyResult = domain.GitFlameApplyResult{BranchName: contract.BranchName, CommitSHA: "commit-123", PullRequestID: "7", PullRequestURL: "https://gitflame.test/pulls/7"}
 	}
 	return f.applyResult, nil
+}
+
+func (f *fakeGitFlameSource) CurrentUser(context.Context) (GitFlameUserProfile, error) {
+	return GitFlameUserProfile{ID: "gitflame-user-1", Username: "artur"}, nil
 }
 
 type fakeRecommender struct {
@@ -336,6 +341,129 @@ func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	}
 }
 
+func TestGitFlameConnectionStoresEncryptedTokenAndSessionCookie(t *testing.T) {
+	store := repository.NewMemoryStore()
+	source := &fakeGitFlameSource{}
+	server := NewWithDependenciesAndIntegrations(store, &fakeGenerator{}, source, nil)
+	cipher, err := security.NewCredentialCipher("12345678901234567890123456789012", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.credentialCipher = cipher
+
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/connections", `{"access_token":"secret-access-token","repository":{"id":"repo-secure","name":"secure","default_branch":"main","web_url":"https://gitflame.test/secure"},"repo_url":"https://gitflame.test/secure","scopes":["repo:read","repo:write"]}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("connection status = %d: %s", response.Code, response.Body.String())
+	}
+	setCookie := response.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "codepilot_session=") || !strings.Contains(setCookie, "HttpOnly") || strings.Contains(setCookie, "secret-access-token") {
+		t.Fatalf("session cookie leaked token or missed flags: %s", setCookie)
+	}
+	var saved domain.GitFlameConnection
+	decodeResponse(t, response, &saved)
+	if saved.UserID == "" || saved.TokenLast4 != "oken" || saved.TokenStatus != "active" {
+		t.Fatalf("unexpected connection response: %+v", saved)
+	}
+	loaded, err := store.UserGitFlameConnection(saved.UserID, saved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AccessTokenEncrypted != "" || len(loaded.TokenMaterial.Ciphertext) == 0 || len(loaded.TokenMaterial.Nonce) == 0 || loaded.TokenMaterial.KeyVersion != 1 {
+		t.Fatalf("connection was not stored with AES-GCM material: %+v", loaded)
+	}
+	plaintext, err := cipher.Decrypt(loaded.TokenMaterial.Ciphertext, loaded.TokenMaterial.Nonce, loaded.TokenMaterial.KeyVersion, loaded.UserID+":"+loaded.Repository.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plaintext != "secret-access-token" {
+		t.Fatalf("decrypted token mismatch: %q", plaintext)
+	}
+
+	revoke := requestWithCookie(t, server.Router(), http.MethodDelete, "/integrations/gitflame/connections/"+saved.ID, "", setCookie)
+	if revoke.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d: %s", revoke.Code, revoke.Body.String())
+	}
+	revoked, err := store.UserGitFlameConnection(saved.UserID, saved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.TokenStatus != "revoked" || revoked.RevokedAt == nil {
+		t.Fatalf("connection was not revoked: %+v", revoked)
+	}
+}
+
+func TestApplyGeneratedFilesUsesStoredGitFlameConnectionToken(t *testing.T) {
+	var applyCalls int
+	gitflameAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user" {
+			if r.Header.Get("Authorization") != "Bearer secret-access-token" {
+				t.Fatalf("current user auth header = %q", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "gitflame-user-1", "username": "artur"})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret-access-token" {
+			t.Fatalf("apply auth header = %q for %s", r.Header.Get("Authorization"), r.URL.Path)
+		}
+		applyCalls++
+		switch r.URL.Path {
+		case "/api/v1/repositories/repo-apply-secure/branches":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "created"})
+		case "/api/v1/repositories/repo-apply-secure/commits":
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": "secure-commit"})
+		case "/api/v1/repositories/repo-apply-secure/pull-requests":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "9", "url": "https://gitflame.test/pulls/9"})
+		default:
+			t.Fatalf("unexpected GitFlame path: %s", r.URL.Path)
+		}
+	}))
+	defer gitflameAPI.Close()
+
+	store := repository.NewMemoryStore()
+	server := NewWithDependencies(store, &fakeGenerator{})
+	cipher, err := security.NewCredentialCipher("12345678901234567890123456789012", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.credentialCipher = cipher
+	server.gitflameBaseURL = gitflameAPI.URL
+	server.gitflameTimeout = time.Second
+
+	connection := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/connections", `{"access_token":"secret-access-token","repository":{"id":"repo-apply-secure","name":"secure","default_branch":"main"}}`)
+	if connection.Code != http.StatusCreated {
+		t.Fatalf("connection status = %d: %s", connection.Code, connection.Body.String())
+	}
+	cookie := connection.Header().Get("Set-Cookie")
+	body := `{"repository":{"id":"repo-apply-secure","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"46","title":"Apply with stored token","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(t, server.Router(), http.MethodPost, "/ai/issues/46/approve", "")
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := requestWithCookie(t, server.Router(), http.MethodPost, "/ai/issues/46/gitflame/apply", "", cookie)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply status = %d: %s", applied.Code, applied.Body.String())
+	}
+	if applyCalls != 3 || !strings.Contains(applied.Body.String(), `"commit_sha":"secure-commit"`) {
+		t.Fatalf("apply did not use stored token/client: calls=%d body=%s", applyCalls, applied.Body.String())
+	}
+	loaded, err := store.UserGitFlameConnectionByRepository(mustConnectionUserID(t, connection), "repo-apply-secure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LastUsedAt == nil {
+		t.Fatalf("connection last_used_at was not updated: %+v", loaded)
+	}
+}
+
 func TestAgentEngineErrorIsStoredOnTask(t *testing.T) {
 	generator := &fakeGenerator{err: &agent.Error{Status: http.StatusServiceUnavailable, Code: "model_unavailable", Detail: "model is loading"}}
 	server := NewWithDependencies(repository.NewMemoryStore(), generator)
@@ -406,11 +534,41 @@ func request(t *testing.T, handler http.Handler, method, path, body string) *htt
 	return response
 }
 
+func requestWithCookie(t *testing.T, handler http.Handler, method, path, body, setCookie string) *httptest.ResponseRecorder {
+	t.Helper()
+	var source *bytes.Reader
+	if body == "" {
+		source = bytes.NewReader(nil)
+	} else {
+		source = bytes.NewReader([]byte(body))
+	}
+	req := httptest.NewRequest(method, path, source)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie := strings.Split(setCookie, ";")[0]; cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	return response
+}
+
 func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, target any) {
 	t.Helper()
 	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
 		t.Fatalf("decode response: %v; body=%s", err, response.Body.String())
 	}
+}
+
+func mustConnectionUserID(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	var connection domain.GitFlameConnection
+	decodeResponse(t, response, &connection)
+	if connection.UserID == "" {
+		t.Fatal("connection response did not include user_id")
+	}
+	return connection.UserID
 }
 
 func waitTask(t *testing.T, handler http.Handler, id string) taskResponse {
