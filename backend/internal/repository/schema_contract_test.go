@@ -13,6 +13,8 @@ func TestDatabaseSchemaContainsBackendWorkerContract(t *testing.T) {
 	}
 	schema := string(content)
 	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS app_users",
+		"CREATE TABLE IF NOT EXISTS app_sessions",
 		"CREATE TABLE IF NOT EXISTS generated_plans",
 		"CREATE TABLE IF NOT EXISTS agent_tasks",
 		"CREATE TABLE IF NOT EXISTS plan_revisions",
@@ -42,6 +44,18 @@ func TestDatabaseSchemaContainsBackendWorkerContract(t *testing.T) {
 		"pr_title TEXT",
 		"reviewer TEXT",
 		"access_token_encrypted TEXT",
+		"access_token_ciphertext BYTEA",
+		"access_token_nonce BYTEA",
+		"encryption_key_version INTEGER",
+		"token_hash BYTEA",
+		"user_id UUID REFERENCES app_users",
+		"scopes JSONB",
+		"token_expires_at TIMESTAMPTZ",
+		"last_validated_at TIMESTAMPTZ",
+		"last_used_at TIMESTAMPTZ",
+		"revoked_at TIMESTAMPTZ",
+		"gitflame_connections_user_repository_unique",
+		"idx_gitflame_webhook_events_delivery_unique",
 		"token_last4 TEXT",
 		"webhook_secret_hash TEXT",
 		"delivery_id TEXT",

@@ -1,5 +1,29 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE TABLE IF NOT EXISTS app_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gitflame_user_id TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS app_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+    token_hash BYTEA NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT app_sessions_token_hash_length_check CHECK (
+        octet_length(token_hash) = 32
+    ),
+    CONSTRAINT app_sessions_expiration_check CHECK (
+        expires_at > created_at
+    )
+);
+
 CREATE TABLE IF NOT EXISTS repositories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     external_id TEXT NOT NULL UNIQUE,
@@ -13,17 +37,40 @@ CREATE TABLE IF NOT EXISTS repositories (
 
 CREATE TABLE IF NOT EXISTS gitflame_connections (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES app_users(id) ON DELETE CASCADE,
     repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     repo_url TEXT NOT NULL,
     default_branch TEXT NOT NULL DEFAULT 'main',
-    access_token_encrypted TEXT NOT NULL,
+    access_token_encrypted TEXT,
+    access_token_ciphertext BYTEA,
+    access_token_nonce BYTEA,
+    encryption_key_version INTEGER,
     token_last4 TEXT NOT NULL DEFAULT '',
     token_status TEXT NOT NULL DEFAULT 'active',
+    scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    token_expires_at TIMESTAMPTZ,
+    last_validated_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT gitflame_connections_repository_unique UNIQUE (repository_id),
+    CONSTRAINT gitflame_connections_user_repository_unique UNIQUE (
+        user_id,
+        repository_id
+    ),
     CONSTRAINT gitflame_connections_token_status_check CHECK (
-        token_status IN ('active', 'invalid', 'revoked')
+        token_status IN ('active', 'invalid', 'expired', 'revoked', 'reauth_required')
+    ),
+    CONSTRAINT gitflame_connections_token_material_check CHECK (
+        access_token_encrypted IS NOT NULL
+        OR (
+            access_token_ciphertext IS NOT NULL
+            AND access_token_nonce IS NOT NULL
+            AND encryption_key_version IS NOT NULL
+        )
+    ),
+    CONSTRAINT gitflame_connections_key_version_check CHECK (
+        encryption_key_version IS NULL OR encryption_key_version > 0
     )
 );
 
@@ -341,8 +388,23 @@ CREATE TABLE IF NOT EXISTS recommendation_statuses (
 CREATE INDEX IF NOT EXISTS idx_repositories_external_id
     ON repositories(external_id);
 
+CREATE INDEX IF NOT EXISTS idx_app_sessions_user_id
+    ON app_sessions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_app_sessions_expires_at
+    ON app_sessions(expires_at);
+
 CREATE INDEX IF NOT EXISTS idx_gitflame_connections_repository_id
     ON gitflame_connections(repository_id);
+
+CREATE INDEX IF NOT EXISTS idx_gitflame_connections_user_id
+    ON gitflame_connections(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_gitflame_connections_token_status
+    ON gitflame_connections(token_status);
+
+CREATE INDEX IF NOT EXISTS idx_gitflame_connections_token_expires_at
+    ON gitflame_connections(token_expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_gitflame_webhooks_connection_id
     ON gitflame_webhooks(connection_id);
@@ -352,6 +414,10 @@ CREATE INDEX IF NOT EXISTS idx_gitflame_webhook_events_webhook_id
 
 CREATE INDEX IF NOT EXISTS idx_gitflame_webhook_events_delivery_id
     ON gitflame_webhook_events(delivery_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gitflame_webhook_events_delivery_unique
+    ON gitflame_webhook_events(webhook_id, delivery_id)
+    WHERE delivery_id <> '';
 
 CREATE INDEX IF NOT EXISTS idx_gitflame_webhook_events_issue_session_id
     ON gitflame_webhook_events(issue_session_id);

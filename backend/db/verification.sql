@@ -19,6 +19,68 @@ INSERT INTO repositories (
     web_url = EXCLUDED.web_url,
     updated_at = now();
 
+INSERT INTO app_users (
+    id,
+    gitflame_user_id,
+    username
+) VALUES (
+    '12121212-1212-1212-1212-121212121212',
+    'gitflame-verification-user',
+    'verification-user'
+) ON CONFLICT (gitflame_user_id) DO UPDATE SET
+    username = EXCLUDED.username,
+    updated_at = now();
+
+INSERT INTO app_sessions (
+    id,
+    user_id,
+    token_hash,
+    expires_at
+) VALUES (
+    '13131313-1313-1313-1313-131313131313',
+    '12121212-1212-1212-1212-121212121212',
+    decode(repeat('ab', 32), 'hex'),
+    now() + interval '8 hours'
+) ON CONFLICT (token_hash) DO UPDATE SET
+    expires_at = EXCLUDED.expires_at,
+    revoked_at = NULL;
+
+INSERT INTO gitflame_connections (
+    id,
+    user_id,
+    repository_id,
+    repo_url,
+    default_branch,
+    access_token_ciphertext,
+    access_token_nonce,
+    encryption_key_version,
+    token_last4,
+    token_status,
+    scopes,
+    last_validated_at
+) VALUES (
+    '14141414-1414-1414-1414-141414141414',
+    '12121212-1212-1212-1212-121212121212',
+    '11111111-1111-1111-1111-111111111111',
+    'https://gitflame.local/gitflame/codepilot-demo',
+    'main',
+    decode('63697068657274657874', 'hex'),
+    decode(repeat('01', 12), 'hex'),
+    1,
+    '1234',
+    'active',
+    '["repository:read", "pull_request:write"]'::jsonb,
+    now()
+) ON CONFLICT (user_id, repository_id) DO UPDATE SET
+    access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+    access_token_nonce = EXCLUDED.access_token_nonce,
+    encryption_key_version = EXCLUDED.encryption_key_version,
+    token_last4 = EXCLUDED.token_last4,
+    token_status = EXCLUDED.token_status,
+    scopes = EXCLUDED.scopes,
+    last_validated_at = EXCLUDED.last_validated_at,
+    updated_at = now();
+
 INSERT INTO ai_configs (
     id,
     repository_id,
@@ -274,6 +336,19 @@ INSERT INTO recommendation_runs (
     retention_days = EXCLUDED.retention_days,
     expires_at = EXCLUDED.expires_at,
     updated_at = now();
+
+SELECT
+    'application session and encrypted credential persisted' AS verification_case,
+    u.username,
+    octet_length(s.token_hash) = 32 AS session_hash_is_sha256_length,
+    c.access_token_encrypted IS NULL AS legacy_token_is_empty,
+    c.access_token_ciphertext IS NOT NULL AS encrypted_token_is_present,
+    c.encryption_key_version,
+    c.token_status
+FROM app_users u
+JOIN app_sessions s ON s.user_id = u.id
+JOIN gitflame_connections c ON c.user_id = u.id
+WHERE u.gitflame_user_id = 'gitflame-verification-user';
 
 SELECT
     'issue workflow persisted' AS verification_case,
