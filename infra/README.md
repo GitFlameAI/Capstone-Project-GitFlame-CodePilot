@@ -247,3 +247,20 @@ infra/sprint4-demo-runbook.md
 
 The Sprint 4 demo stand includes frontend, backend, PostgreSQL, Redis, Agent Engine, Agent Worker, ML service, and recommendation service.
 
+## Sprint 5 Reproducibility
+
+Sprint 5 clean-start deployment, final environment notes, CI summary, and report evidence commands are documented in:
+
+```text
+infra/sprint5-reproducibility-runbook.md
+```
+
+Use it to verify that the stack can be recreated after:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  down -v
+```
+
