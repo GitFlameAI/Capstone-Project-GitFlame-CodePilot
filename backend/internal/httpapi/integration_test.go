@@ -351,7 +351,7 @@ func TestGitFlameConnectionStoresEncryptedTokenAndSessionCookie(t *testing.T) {
 	}
 	server.credentialCipher = cipher
 
-	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/connections", `{"access_token":"secret-access-token","repository":{"id":"repo-secure","name":"secure","default_branch":"main","web_url":"https://gitflame.test/secure"},"repo_url":"https://gitflame.test/secure","scopes":["repo:read","repo:write"]}`)
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/connections", `{"access_token":"secret-access-token","repo_url":"https://gitflame.test/tiroro-20-10/test42/code","scopes":["repo:read","repo:write"]}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("connection status = %d: %s", response.Code, response.Body.String())
 	}
@@ -361,7 +361,7 @@ func TestGitFlameConnectionStoresEncryptedTokenAndSessionCookie(t *testing.T) {
 	}
 	var saved domain.GitFlameConnection
 	decodeResponse(t, response, &saved)
-	if saved.UserID == "" || saved.TokenLast4 != "oken" || saved.TokenStatus != "active" {
+	if saved.UserID == "" || saved.TokenLast4 != "oken" || saved.TokenStatus != "active" || saved.Repository.ID != "tiroro-20-10/test42" {
 		t.Fatalf("unexpected connection response: %+v", saved)
 	}
 	loaded, err := store.UserGitFlameConnection(saved.UserID, saved.ID)
