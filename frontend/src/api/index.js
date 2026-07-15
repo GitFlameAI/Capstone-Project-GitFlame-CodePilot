@@ -6,17 +6,20 @@
 // Every function returns the same shape in both modes, so components never need
 // to know which backend they are talking to. The frontend NEVER talks to the
 // SERGE-based Agent Engine directly; it only ever calls the Go backend, which
-// owns orchestration, the Redis queue and task state.
+// owns orchestration, the Redis queue and task state. In live mode the backend
+// also owns the GitFlame access token — the frontend only holds a session cookie.
 
 import { httpApi, ApiError } from './client.js'
 import { mockApi } from './mock.js'
+import { isTokenProblem } from './errors.js'
 import { markTokenInvalid } from '../store/session.js'
 
 export const USING_MOCK = !import.meta.env.VITE_API_BASE
 
-// In live mode, wrap every backend call so an auth failure (the GitFlame access
-// token being missing / expired / revoked, surfaced by the backend as 401 or 403)
-// is turned into an explicit, visible token problem instead of a generic error.
+// In live mode, wrap every backend call so an auth failure (the session cookie
+// or the stored GitFlame token being missing / expired / revoked, surfaced by the
+// backend as 401/403 or a gitflame_* connection code) is turned into an explicit,
+// visible reconnect prompt instead of a generic error.
 function withAuthGuard(realApi) {
   const wrapped = {}
   for (const [name, fn] of Object.entries(realApi)) {
@@ -24,8 +27,12 @@ function withAuthGuard(realApi) {
       try {
         return await fn(...args)
       } catch (e) {
-        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
-          markTokenInvalid(e.message || 'The access token is invalid or has expired.')
+        // Creating / replacing a connection legitimately sends a token and may
+        // report an auth error inline; don't trip the global reconnect gate for
+        // those — the calling screen shows the message itself.
+        const isConnectionCall = name === 'createConnection' || name === 'reconnectConnection'
+        if (!isConnectionCall && isTokenProblem(e)) {
+          markTokenInvalid(e.message || 'The session or access token is invalid or has expired.')
         }
         throw e
       }
@@ -40,7 +47,7 @@ export { ApiError }
 // pollTask repeatedly calls GET /ai/tasks/{taskId} until the agent task reaches a
 // terminal state (`completed` or `failed`), or until the client-side timeout is
 // hit. It is used for both the initial plan generation and plan corrections,
-// which are asynchronous in Sprint 2.
+// which are asynchronous.
 //
 //   const task = await pollTask(taskId, { onTick: (t) => (status.value = t.status) })
 //

@@ -12,9 +12,11 @@
 //   5. Continue: validates; empty required fields / unchecked boxes get a red
 //      underline and navigation is blocked. On success it connects and opens the
 //      workspace.
-import { reactive, ref } from 'vue'
+import { reactive, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { session, connect, parseRepoUrl, webhookFor } from '../store/session.js'
+import { api } from '../api/index.js'
+import { describeError } from '../api/errors.js'
 import { copyText } from '../utils/clipboard.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
@@ -26,21 +28,23 @@ import TryDemo from '../components/landing/TryDemo.vue'
 const router = useRouter()
 const formEl = ref(null)
 
-// Which capability the workspace opens on first. Kept as a compact choice in the
-// connect card so a recommendations-first user lands where they expect.
-const intent = ref(session.intent || 'autogen')
-
 // The connect form starts empty in every mode, as a real user would experience it.
-// The token is always empty to exercise validation.
+// The token and default branch are always empty to exercise validation / avoid
+// pre-filling assumptions.
 const form = reactive({
   repoUrl: session.repo.url || '',
-  defaultBranch: session.repo.defaultBranch || '',
+  defaultBranch: '',
   token: '',
 })
 const showAdvanced = ref(false)
 const showToken = ref(false)
 const showPolicy = ref(false)
 const copied = ref(false)
+
+// Connection request state. The token is submitted once to the backend and then
+// cleared from the form — the frontend never keeps the raw GitFlame token.
+const connecting = ref(false)
+const connectError = ref(null) // { title, message } from describeError
 
 // The webhook URL is something OUR service exposes for GitFlame to register; it
 // is shown read-only so the user can copy it.
@@ -54,6 +58,14 @@ const consent = reactive({ policy: false })
 
 // Per-field error flags drive the red underline.
 const errors = reactive({ repoUrl: false, token: false, policy: false })
+
+// Whether every required field is filled. Drives the dimmed look of the Continue
+// button — it stays clickable (a click reveals the red validation), it just looks
+// inactive until the form is complete.
+const formComplete = computed(() => {
+  const r = parseRepoUrl(form.repoUrl)
+  return !!form.repoUrl.trim() && !!r.owner && !!r.name && !!form.token.trim() && consent.policy
+})
 
 function validate() {
   const r = parseRepoUrl(form.repoUrl)
@@ -75,24 +87,45 @@ async function copyWebhook() {
   }
 }
 
-function submit() {
+async function submit() {
+  connectError.value = null
   if (!validate()) {
     // Jump to the first offending field group so the red underline is visible.
     formEl.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     return
   }
   const r = parseRepoUrl(form.repoUrl)
-  connect({
-    url: form.repoUrl.trim(),
-    owner: r.owner,
-    name: r.name,
-    id: r.id,
-    defaultBranch: form.defaultBranch.trim() || 'main',
-    token: form.token,
-    webhookUrl: webhookUrl(),
-    intent: intent.value,
-  })
-  router.push('/workspace')
+  connecting.value = true
+  try {
+    // One-time secure handshake: the backend validates the token via GitFlame,
+    // creates the app user + server session (HttpOnly codepilot_session cookie),
+    // stores the token encrypted, and returns connection metadata only.
+    const conn = await api.createConnection({
+      token: form.token,
+      repoUrl: form.repoUrl.trim(),
+      repository: {
+        id: r.id,
+        name: r.name,
+        default_branch: form.defaultBranch.trim() || 'main',
+        web_url: form.repoUrl.trim(),
+      },
+      defaultBranch: form.defaultBranch.trim() || 'main',
+    })
+    // Store ONLY the returned metadata; never the token.
+    connect(conn)
+    // Wipe the token from the form so it does not linger in component state.
+    form.token = ''
+    router.push('/workspace')
+  } catch (e) {
+    const info = describeError(e)
+    connectError.value = info
+    // Highlight the token field for an auth problem, the URL field otherwise.
+    if (info.tokenProblem) errors.token = true
+    else if (info.kind === 'validation') errors.repoUrl = true
+    formEl.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } finally {
+    connecting.value = false
+  }
 }
 </script>
 
@@ -145,30 +178,6 @@ function submit() {
         <p class="connect__sub gf-muted">Fill these in so CodePilot can reach your repository.</p>
       </header>
       <div class="connect__card gf-card">
-        <div class="startwith">
-          <span class="startwith__label">Start with
-            <GfTooltip text="Which tab opens first once your .ai.yml is saved. It's not a restriction — you can switch between Autogeneration and Recommendations anytime inside the workspace." /></span>
-          <div class="startwith__opts">
-            <button
-              type="button"
-              class="startwith__opt"
-              :class="{ startwith__opt_on: intent === 'autogen' }"
-              @click="intent = 'autogen'"
-            >
-              <GfIcon name="sparkles" :size="14" /> Autogeneration
-            </button>
-            <button
-              type="button"
-              class="startwith__opt"
-              :class="{ startwith__opt_on: intent === 'recommendations' }"
-              @click="intent = 'recommendations'"
-            >
-              <GfIcon name="shield" :size="14" /> Recommendations
-            </button>
-          </div>
-          <span class="startwith__hint gf-muted">You can switch anytime</span>
-        </div>
-
         <label class="field" :class="{ field_error: errors.repoUrl }">
           <span class="field__label">
             Repository URL
@@ -195,7 +204,7 @@ function submit() {
         <label class="field" :class="{ field_error: errors.token }">
           <span class="field__label">
             Access token
-            <GfTooltip text="A GitFlame access token so CodePilot can read files and open a branch / pull request on your behalf. Stored only for this session." />
+            <GfTooltip text="A GitFlame access token so CodePilot can read files and open a branch / pull request on your behalf. It is sent once to CodePilot, stored encrypted on the server, and never kept in your browser." />
           </span>
           <div class="input input_group">
             <GfIcon name="key" :size="15" class="input__lead" />
@@ -247,10 +256,19 @@ function submit() {
           </label>
         </div>
 
+        <!-- Connection error (invalid/expired token, GitFlame or backend down) -->
+        <div v-if="connectError" class="connect__err">
+          <GfIcon name="alert" :size="16" />
+          <div>
+            <strong>{{ connectError.title }}</strong>
+            <p>{{ connectError.message }}</p>
+          </div>
+        </div>
+
         <div class="connect__cta">
-          <GfButton variant="primary" size="l" @click="submit">
-            Continue to workspace
-            <GfIcon name="chevronRight" :size="16" />
+          <GfButton variant="primary" size="l" :loading="connecting" :class="{ 'connect__go_dim': !formComplete }" @click="submit">
+            {{ connecting ? 'Connecting…' : 'Continue to workspace' }}
+            <GfIcon v-if="!connecting" name="chevronRight" :size="16" />
           </GfButton>
           <p class="connect__foot gf-muted">
             You can change every setting later in the workspace.
@@ -426,53 +444,11 @@ a.hero__eyebrow:hover {
   text-align: left;
 }
 
-.startwith {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 12px;
-  margin-bottom: 18px;
-}
-.startwith__label {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--gf-text-2);
-}
-.startwith__opts {
-  display: flex;
-  gap: 6px;
-  padding: 4px;
-  border: 1px solid var(--gf-line-2);
-  border-radius: 999px;
-  background: var(--gf-surface-2);
-}
-.startwith__opt {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 13px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--gf-text-2);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.startwith__opt_on {
-  background: var(--gf-surface);
-  color: var(--gf-accent);
-  box-shadow: var(--gf-shadow-sm);
-}
-.startwith__opt :deep(.gf-icon) {
-  color: currentColor;
-}
-
-.startwith__hint {
-  flex-basis: 100%;
-  font-size: 11.5px;
+/* Continue button looks dim/inactive until every required field is filled,
+   but stays clickable so a click reveals the red validation. */
+.connect__go_dim {
+  opacity: 0.5;
+  filter: saturate(0.65);
 }
 
 .connect {
@@ -645,6 +621,31 @@ a.hero__eyebrow:hover {
   margin: 12px 0 0;
   font-size: 12px;
   text-align: center;
+}
+.connect__err {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--gf-red);
+  border-radius: 10px;
+  background: var(--gf-red-bg);
+}
+.connect__err :deep(.gf-icon) {
+  color: var(--gf-red);
+  flex: none;
+  margin-top: 1px;
+}
+.connect__err strong {
+  font-size: 13px;
+  color: var(--gf-red);
+}
+.connect__err p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--gf-text-2);
 }
 .connect__cta {
   display: flex;

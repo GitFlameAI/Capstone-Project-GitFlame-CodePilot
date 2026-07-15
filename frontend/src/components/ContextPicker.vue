@@ -101,11 +101,13 @@ function onBlur() {
 <style scoped>
 .picker {
   position: relative;
+  min-width: 0;
 }
 .picker__box {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
   min-height: 38px;
   padding: 6px 8px;
   border: 1px solid var(--gf-line-2);
@@ -119,6 +121,8 @@ function onBlur() {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  max-width: 100%;
+  min-width: 0;
   height: 24px;
   padding: 0 3px 0 8px;
   border-radius: 999px;
@@ -128,6 +132,13 @@ function onBlur() {
 }
 .picker__chip-text {
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker__chip :deep(.gf-icon) {
+  flex: none;
 }
 .picker__chip-x {
   display: inline-flex;
@@ -152,7 +163,7 @@ function onBlur() {
 }
 .picker__input {
   flex: 1;
-  min-width: 140px;
+  min-width: min(140px, 100%);
   border: 0;
   outline: 0;
   background: transparent;
@@ -179,11 +190,18 @@ function onBlur() {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 8px 10px;
   border-radius: 9px;
   font-size: 12.5px;
   color: var(--gf-text-2);
   cursor: pointer;
+}
+.picker__opt .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .picker__opt_active {
   background: var(--gf-purple-soft);
@@ -193,6 +211,8 @@ function onBlur() {
   margin: 6px 0 0;
   font-size: 12px;
   color: var(--gf-text-3);
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .picker__hint kbd {
   font-family: 'JetBrains Mono', monospace;
