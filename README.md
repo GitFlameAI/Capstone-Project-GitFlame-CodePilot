@@ -6,7 +6,7 @@ GitFlame CodePilot is an external AI integration service for GitFlame. The proje
 - repository recommendations workflow: the system analyzes repository context, stores a summary and recommendation cards, and shows them in the demo UI.
 
 The project is intended to be started with Docker Compose.
-
+ 
 ## Project Structure
 
 ```text
