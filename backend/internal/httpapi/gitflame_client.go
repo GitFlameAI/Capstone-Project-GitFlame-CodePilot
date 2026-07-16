@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -184,11 +185,16 @@ func (c *GitFlameClient) ResolveRepository(ctx context.Context, rawURL string) (
 		},
 		RepoURL: parsed.WebURL,
 	}
-	for _, endpoint := range []string{
-		"/api/v1/repositories/" + url.PathEscape(parsed.Path),
-		"/api/v1/projects/" + url.PathEscape(parsed.Path),
-		"/api/v1/repos/" + url.PathEscape(parsed.Path),
-	} {
+	endpoints := make([]string, 0, 4)
+	if endpoint, ok := giteaRepositoryEndpoint(parsed.Path); ok {
+		endpoints = append(endpoints, endpoint)
+	}
+	endpoints = append(endpoints,
+		"/api/v1/repositories/"+url.PathEscape(parsed.Path),
+		"/api/v1/projects/"+url.PathEscape(parsed.Path),
+		"/api/v1/repos/"+url.PathEscape(parsed.Path),
+	)
+	for _, endpoint := range endpoints {
 		var response map[string]any
 		if err := c.getJSON(ctx, endpoint, "", &response); err != nil {
 			continue
@@ -255,7 +261,21 @@ func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string
 }
 
 func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
-	body, err := c.doGET(ctx, fmt.Sprintf("/api/v1/repositories/%s/tree", url.PathEscape(repositoryID)), ref)
+	candidates := make([]gitFlameGETCandidate, 0, 2)
+	if endpoint, ok := giteaRepositoryEndpoint(repositoryID); ok {
+		sha := ref
+		if strings.TrimSpace(sha) == "" {
+			sha = "HEAD"
+		}
+		candidates = append(candidates, gitFlameGETCandidate{
+			Endpoint: endpoint + "/git/trees/" + url.PathEscape(sha) + "?recursive=true&per_page=1000",
+		})
+	}
+	candidates = append(candidates, gitFlameGETCandidate{
+		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/tree", url.PathEscape(repositoryID)),
+		Ref:      ref,
+	})
+	body, err := c.getFirstAvailable(ctx, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +296,14 @@ func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref s
 }
 
 func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID string) ([]domain.IssuePayload, error) {
-	body, err := c.doGET(ctx, fmt.Sprintf("/api/v1/repositories/%s/issues?state=open", url.PathEscape(repositoryID)), "")
+	candidates := make([]gitFlameGETCandidate, 0, 2)
+	if endpoint, ok := giteaRepositoryEndpoint(repositoryID); ok {
+		candidates = append(candidates, gitFlameGETCandidate{Endpoint: endpoint + "/issues?state=open&type=issues&limit=100"})
+	}
+	candidates = append(candidates, gitFlameGETCandidate{
+		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/issues?state=open", url.PathEscape(repositoryID)),
+	})
+	body, err := c.getFirstAvailable(ctx, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -288,21 +315,54 @@ func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID stri
 		Body        string          `json:"body"`
 		Description string          `json:"description"`
 		Author      json.RawMessage `json:"author"`
+		User        json.RawMessage `json:"user"`
 	}
 	if err := decodeGitFlameCollection(body, []string{"issues", "items", "data"}, &raw); err != nil {
 		return nil, err
 	}
 	issues := make([]domain.IssuePayload, 0, len(raw))
 	for _, item := range raw {
-		id := firstNonEmptyValue(item.ID, item.IID, item.Number)
+		id := firstNonEmptyValue(item.IID, item.Number, item.ID)
 		body := item.Body
 		if body == "" {
 			body = item.Description
 		}
 		author := gitFlameIssueAuthor(item.Author)
+		if author == "" {
+			author = gitFlameIssueAuthor(item.User)
+		}
 		issues = append(issues, domain.IssuePayload{ID: id, Title: item.Title, Body: body, Author: author})
 	}
 	return issues, nil
+}
+
+type gitFlameGETCandidate struct {
+	Endpoint string
+	Ref      string
+}
+
+func (c *GitFlameClient) getFirstAvailable(ctx context.Context, candidates []gitFlameGETCandidate) ([]byte, error) {
+	var lastErr error
+	for _, candidate := range candidates {
+		body, err := c.doGET(ctx, candidate.Endpoint, candidate.Ref)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		var integration *IntegrationError
+		if !errors.As(err, &integration) || integration.Status != http.StatusNotFound {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func giteaRepositoryEndpoint(repositoryID string) (string, bool) {
+	parts := strings.SplitN(strings.Trim(strings.TrimSpace(repositoryID), "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	return "/api/v1/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]), true
 }
 
 func decodeGitFlameCollection(body []byte, keys []string, target any) error {
@@ -419,6 +479,7 @@ func (c *GitFlameClient) postJSON(ctx context.Context, endpoint string, payload,
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
+	log.Printf("gitflame_http method=GET path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gitFlameHTTPError(resp)
 	}
@@ -442,7 +503,11 @@ func (c *GitFlameClient) getRaw(ctx context.Context, endpoint, ref string) (stri
 func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byte, error) {
 	requestURL := c.baseURL + endpoint
 	if ref != "" {
-		requestURL += "?ref=" + url.QueryEscape(ref)
+		separator := "?"
+		if strings.Contains(requestURL, "?") {
+			separator = "&"
+		}
+		requestURL += separator + "ref=" + url.QueryEscape(ref)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
@@ -507,7 +572,7 @@ func firstString(document map[string]any, keys ...string) string {
 
 func repositoryMetadataFromGitFlameResponse(response map[string]any, fallback domain.RepositoryMetadata) domain.RepositoryMetadata {
 	metadata := fallback
-	if value := firstString(response, "id", "repository.id", "data.id"); value != "" {
+	if value := firstString(response, "full_name", "fullName", "repository.full_name", "data.full_name", "id", "repository.id", "data.id"); value != "" {
 		metadata.ID = value
 	}
 	if value := firstString(response, "name", "path", "repository.name", "repository.path", "data.name", "data.path"); value != "" {
