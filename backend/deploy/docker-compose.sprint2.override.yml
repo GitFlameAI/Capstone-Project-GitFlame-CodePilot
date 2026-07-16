@@ -19,10 +19,10 @@ services:
       AGENT_QUEUE_NAME: gitflame:agent:tasks
       AGENT_CONSUMER_GROUP: gitflame-agent-workers
       AGENT_QUEUE_MAX_LENGTH: "1000"
-      GITFLAME_BASE_URL: ${GITFLAME_BASE_URL:-}
+      GITFLAME_BASE_URL: ${GITFLAME_BASE_URL:-https://gitflametest.ru}
       GITFLAME_API_KEY: ${GITFLAME_API_KEY:-}
       GITFLAME_TIMEOUT_SECONDS: ${GITFLAME_TIMEOUT_SECONDS:-30}
-      GITFLAME_CREDENTIAL_KEY: ${GITFLAME_CREDENTIAL_KEY:-}
+      GITFLAME_CREDENTIAL_KEY: ${GITFLAME_CREDENTIAL_KEY:-12345678901234567890123456789012}
       GITFLAME_CREDENTIAL_KEY_VERSION: ${GITFLAME_CREDENTIAL_KEY_VERSION:-1}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-codepilot_session}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
@@ -39,7 +39,7 @@ services:
       recommendation-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/ready"]
       interval: 10s
       timeout: 5s
       retries: 10

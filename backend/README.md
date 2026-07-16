@@ -82,9 +82,9 @@ The backend receives:
 ```text
 AGENT_ENGINE_URL=http://agent-engine:8001
 AGENT_ENGINE_TIMEOUT_SECONDS=600
-GITFLAME_BASE_URL=
+GITFLAME_BASE_URL=https://gitflametest.ru
 GITFLAME_API_KEY=
-GITFLAME_CREDENTIAL_KEY=
+GITFLAME_CREDENTIAL_KEY=12345678901234567890123456789012
 GITFLAME_CREDENTIAL_KEY_VERSION=1
 SESSION_COOKIE_NAME=codepilot_session
 SESSION_COOKIE_SECURE=false
@@ -103,7 +103,7 @@ server and `OPENAI_API_KEY` must be set when that provider requires authenticati
 
 `REDIS_URL` matches the Compose Redis service (`redis://redis:6379/0`); host-side tools use `redis://localhost:6379/0`. Redis transports tasks, while PostgreSQL remains the source of truth. Set `TASK_DISPATCH_MODE=redis` only when the `agent-worker` service is running. The default `local` mode is convenient for isolated backend development.
 
-`GITFLAME_CREDENTIAL_KEY` must decode to a 16, 24, or 32 byte AES key. It may be raw text, hex, or base64. Keep it in env/secret manager, not in PostgreSQL. For production set `SESSION_COOKIE_SECURE=true` so the session cookie is sent only over HTTPS.
+`GITFLAME_BASE_URL` points to the GitFlame instance used for token validation and repository metadata lookup. `GITFLAME_API_KEY` is optional for the per-user connection flow; the frontend sends a user token once to `/integrations/gitflame/connections`, and backend stores it encrypted. `GITFLAME_CREDENTIAL_KEY` must decode to a 16, 24, or 32 byte AES key. It may be raw text, hex, or base64. Keep it in env/secret manager, not in PostgreSQL. The shown key is suitable only for local/test VM runs; production must use a stable secret value. For production set `SESSION_COOKIE_SECURE=true` so the session cookie is sent only over HTTPS.
 
 PostgreSQL schema can be applied manually:
 

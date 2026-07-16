@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitflame-codepilot/backend/internal/agent"
+	"gitflame-codepilot/backend/internal/config"
 	"gitflame-codepilot/backend/internal/domain"
 	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/security"
@@ -514,6 +515,17 @@ func TestValidationAndOpenAPI(t *testing.T) {
 		!strings.Contains(spec.Body.String(), `"code_generation"`) ||
 		!strings.Contains(spec.Body.String(), `"/ready"`) {
 		t.Fatal("Sprint 4 API contract is missing from OpenAPI")
+	}
+}
+
+func TestConnectionSetupWithoutGitFlameBaseURLReturnsServiceUnavailable(t *testing.T) {
+	server, err := New(config.Config{SessionCookieName: "codepilot_session", SessionTTL: time.Hour, GitFlameCredentialKey: "12345678901234567890123456789012", GitFlameCredentialKeyVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/connections", `{"access_token":"secret-access-token","repo_url":"https://gitflame.test/tiroro-20-10/test42"}`)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"gitflame_client_unavailable"`) {
+		t.Fatalf("connection status = %d: %s", response.Code, response.Body.String())
 	}
 }
 
