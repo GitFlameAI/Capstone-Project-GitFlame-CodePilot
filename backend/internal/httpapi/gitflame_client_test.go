@@ -92,3 +92,34 @@ func TestGitFlameClientAppliesGeneratedFiles(t *testing.T) {
 		t.Fatalf("unexpected apply result: %+v", result)
 	}
 }
+
+func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case strings.Contains(r.URL.Path, "/tree"):
+			body = `{"data":[{"path":"backend","type":"tree"},{"path":"backend/main.go","type":"blob"}]}`
+		case strings.Contains(r.URL.Path, "/issues"):
+			body = `{"issues":[{"iid":42,"title":"Fix API","description":"Return repository data","author":{"username":"artur"}}]}`
+		default:
+			t.Fatalf("unexpected GitFlame API path: %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+
+	tree, err := client.RepositoryTree(context.Background(), "owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 2 || tree[0].Type != "dir" || tree[1].Type != "file" {
+		t.Fatalf("unexpected normalized tree: %+v", tree)
+	}
+	issues, err := client.RepositoryIssues(context.Background(), "owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || issues[0].ID != "42" || issues[0].Body != "Return repository data" || issues[0].Author != "artur" {
+		t.Fatalf("unexpected normalized issues: %+v", issues)
+	}
+}

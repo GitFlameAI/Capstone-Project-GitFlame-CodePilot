@@ -98,6 +98,8 @@ type fakeGitFlameSource struct {
 	applyContract   domain.GeneratedFilesContract
 	applyResult     domain.GitFlameApplyResult
 	applyErr        error
+	tree            []GitFlameTreeEntry
+	issues          []domain.IssuePayload
 }
 
 func (f *fakeGitFlameSource) BuildAnalyzeRequest(_ context.Context, req GitFlameIssueWebhook) (domain.IssueAnalyzeRequest, error) {
@@ -119,6 +121,57 @@ func (f *fakeGitFlameSource) ApplyGeneratedFiles(_ context.Context, repository d
 
 func (f *fakeGitFlameSource) CurrentUser(context.Context) (GitFlameUserProfile, error) {
 	return GitFlameUserProfile{ID: "gitflame-user-1", Username: "artur"}, nil
+}
+
+func (f *fakeGitFlameSource) RepositoryTree(context.Context, string, string) ([]GitFlameTreeEntry, error) {
+	return f.tree, f.err
+}
+
+func (f *fakeGitFlameSource) RepositoryIssues(context.Context, string) ([]domain.IssuePayload, error) {
+	return f.issues, f.err
+}
+
+func TestRepositoryDataRequiresOwnedConnection(t *testing.T) {
+	store := repository.NewMemoryStore()
+	user, err := store.UpsertAppUser(domain.AppUser{GitFlameUserID: "gitflame-user-1", Username: "artur"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieValue, tokenHash, err := security.GenerateSessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAppSession(user.ID, tokenHash, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := store.SaveGitFlameConnection(domain.GitFlameConnection{
+		UserID:        user.ID,
+		Repository:    domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"},
+		DefaultBranch: "main",
+		TokenStatus:   "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitflame := &fakeGitFlameSource{
+		tree:   []GitFlameTreeEntry{{Path: "README.md", Type: "file"}},
+		issues: []domain.IssuePayload{{ID: "7", Title: "Test issue"}},
+	}
+	server := NewWithDependenciesAndIntegrations(store, &fakeGenerator{}, gitflame, nil)
+
+	unauthorized := request(t, server.Router(), http.MethodGet, "/integrations/gitflame/connections/"+connection.ID+"/tree", "")
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized tree status = %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	cookie := "codepilot_session=" + cookieValue
+	tree := requestWithCookie(t, server.Router(), http.MethodGet, "/integrations/gitflame/connections/"+connection.ID+"/tree", "", cookie)
+	if tree.Code != http.StatusOK || !strings.Contains(tree.Body.String(), `"path":"README.md"`) {
+		t.Fatalf("tree status = %d: %s", tree.Code, tree.Body.String())
+	}
+	issues := requestWithCookie(t, server.Router(), http.MethodGet, "/integrations/gitflame/connections/"+connection.ID+"/issues", "", cookie)
+	if issues.Code != http.StatusOK || !strings.Contains(issues.Body.String(), `"title":"Test issue"`) {
+		t.Fatalf("issues status = %d: %s", issues.Code, issues.Body.String())
+	}
 }
 
 type fakeRecommender struct {

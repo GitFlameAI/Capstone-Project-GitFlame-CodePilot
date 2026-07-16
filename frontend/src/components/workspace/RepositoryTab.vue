@@ -18,7 +18,7 @@ import GfModal from '../ui/GfModal.vue'
 import GfTooltip from '../ui/GfTooltip.vue'
 import FileTree from '../FileTree.vue'
 
-const emit = defineEmits(['go'])
+const emit = defineEmits(['go', 'reload-repository'])
 const router = useRouter()
 
 // --- edit-connection modal (reconnect: replace the token / repo / branch) ---
@@ -48,6 +48,7 @@ async function saveEdit() {
       ? await api.reconnectConnection(session.connectionId, opts)
       : await api.createConnection(opts)
     updateConnection(conn)
+    emit('reload-repository')
     form.token = ''
     editing.value = false
     loadRecSummary()
@@ -182,7 +183,7 @@ onMounted(loadRecSummary)
         <span v-if="session.lastEvent" class="gf-chip events__last">
           <GfIcon name="branch" :size="12" /> last push {{ session.lastEvent.when }}
         </span>
-        <button class="events__sim" title="Demo: simulate a GitFlame push so the tree, issues and recommendations refresh in place" @click="simulatePush">
+        <button v-if="USING_MOCK" class="events__sim" title="Demo: simulate a GitFlame push so the tree, issues and recommendations refresh in place" @click="simulatePush">
           <GfIcon name="refresh" :size="13" /> Simulate a push (demo)
         </button>
       </div>
@@ -221,7 +222,15 @@ onMounted(loadRecSummary)
         it updates your <span class="mono">.ai.yml</span> instantly. CodePilot reads file
         contents only when it generates a plan.
       </p>
+      <p v-if="session.repositoryDataStatus === 'loading'" class="gf-muted">Loading repository files...</p>
+      <div v-else-if="session.repositoryDataStatus === 'error'" class="notice">
+        <GfIcon name="alert" :size="18" />
+        <p>{{ session.repositoryDataError }}</p>
+        <GfButton variant="secondary" size="s" @click="emit('reload-repository')">Retry</GfButton>
+      </div>
+      <p v-else-if="!session.fileTree.length" class="gf-muted">No files were returned for this branch.</p>
       <FileTree
+        v-else
         :nodes="session.fileTree"
         interactive
         :excluded-set="excludedSet"

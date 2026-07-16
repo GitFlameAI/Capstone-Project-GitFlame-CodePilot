@@ -24,11 +24,6 @@ type GitFlameClient struct {
 	httpClient *http.Client
 }
 
-type gitFlameTreeEntry struct {
-	Path string `json:"path"`
-	Type string `json:"type"`
-}
-
 type gitFlameCommitAction struct {
 	Action   string `json:"action"`
 	FilePath string `json:"file_path"`
@@ -255,12 +250,123 @@ func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID str
 	return id, prURL, nil
 }
 
-func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string) ([]gitFlameTreeEntry, error) {
-	var tree []gitFlameTreeEntry
-	if err := c.getJSON(ctx, fmt.Sprintf("/api/v1/repositories/%s/tree", url.PathEscape(repositoryID)), ref, &tree); err != nil {
+func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
+	return c.RepositoryTree(ctx, repositoryID, ref)
+}
+
+func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
+	body, err := c.doGET(ctx, fmt.Sprintf("/api/v1/repositories/%s/tree", url.PathEscape(repositoryID)), ref)
+	if err != nil {
 		return nil, err
 	}
+	var tree []GitFlameTreeEntry
+	if err := decodeGitFlameCollection(body, []string{"tree", "files", "items", "data"}, &tree); err != nil {
+		return nil, err
+	}
+	for i := range tree {
+		tree[i].Path = strings.Trim(strings.TrimSpace(tree[i].Path), "/")
+		switch strings.ToLower(tree[i].Type) {
+		case "tree", "directory", "folder":
+			tree[i].Type = "dir"
+		case "blob", "":
+			tree[i].Type = "file"
+		}
+	}
 	return tree, nil
+}
+
+func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID string) ([]domain.IssuePayload, error) {
+	body, err := c.doGET(ctx, fmt.Sprintf("/api/v1/repositories/%s/issues?state=open", url.PathEscape(repositoryID)), "")
+	if err != nil {
+		return nil, err
+	}
+	var raw []struct {
+		ID          any             `json:"id"`
+		IID         any             `json:"iid"`
+		Number      any             `json:"number"`
+		Title       string          `json:"title"`
+		Body        string          `json:"body"`
+		Description string          `json:"description"`
+		Author      json.RawMessage `json:"author"`
+	}
+	if err := decodeGitFlameCollection(body, []string{"issues", "items", "data"}, &raw); err != nil {
+		return nil, err
+	}
+	issues := make([]domain.IssuePayload, 0, len(raw))
+	for _, item := range raw {
+		id := firstNonEmptyValue(item.ID, item.IID, item.Number)
+		body := item.Body
+		if body == "" {
+			body = item.Description
+		}
+		author := gitFlameIssueAuthor(item.Author)
+		issues = append(issues, domain.IssuePayload{ID: id, Title: item.Title, Body: body, Author: author})
+	}
+	return issues, nil
+}
+
+func decodeGitFlameCollection(body []byte, keys []string, target any) error {
+	if err := json.Unmarshal(body, target); err == nil {
+		return nil
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API returned invalid JSON"}
+	}
+	for _, key := range keys {
+		if raw, ok := envelope[key]; ok {
+			if err := json.Unmarshal(raw, target); err == nil {
+				return nil
+			}
+			var nested map[string]json.RawMessage
+			if json.Unmarshal(raw, &nested) == nil {
+				for _, nestedKey := range keys {
+					if collection, ok := nested[nestedKey]; ok && json.Unmarshal(collection, target) == nil {
+						return nil
+					}
+				}
+			}
+		}
+	}
+	return &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API returned an unexpected collection format"}
+}
+
+func gitFlameIssueAuthor(raw json.RawMessage) string {
+	var author string
+	if json.Unmarshal(raw, &author) == nil {
+		return author
+	}
+	var profile struct {
+		Username string `json:"username"`
+		Login    string `json:"login"`
+		Name     string `json:"name"`
+	}
+	if json.Unmarshal(raw, &profile) != nil {
+		return ""
+	}
+	return firstNonEmptyString(profile.Username, profile.Login, profile.Name)
+}
+
+func firstNonEmptyValue(values ...any) string {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text != "" && text != "<nil>" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c *GitFlameClient) fetchFileContent(ctx context.Context, repositoryID, filePath, ref string) (string, error) {

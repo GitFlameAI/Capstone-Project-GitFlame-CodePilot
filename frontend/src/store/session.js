@@ -27,7 +27,6 @@ import {
   buildYaml,
   parseYamlToForm,
   demoFileTree,
-  demoIssues,
   pushedFileNode,
   pushedIssue,
 } from '../data/demo.js'
@@ -89,6 +88,8 @@ export const session = reactive({
   },
   fileTree: [],
   issues: [],
+  repositoryDataStatus: 'idle', // idle | loading | ready | error
+  repositoryDataError: '',
 
   // --- configuration ---
   configExists: false, // a `.ai.yml` has been saved for this repo (gates AI tabs)
@@ -153,9 +154,8 @@ function rehydrate() {
   session.configForm = { ...defaultConfigForm(), ...(snapshot.configForm || {}) }
   session.configDraft = { ...defaultConfigForm(), ...(snapshot.configDraft || snapshot.configForm || {}) }
   session.configSavedAt = snapshot.configSavedAt || ''
-  // Re-derive demo data (not persisted).
-  session.fileTree = demoFileTree(session.configExists)
-  session.issues = demoIssues.map((i) => ({ ...i }))
+  session.fileTree = []
+  session.issues = []
   session.connected = true
   // The HttpOnly session cookie survives a refresh, so we assume the connection
   // is still usable. If a subsequent call reports 401/403, markTokenInvalid()
@@ -202,8 +202,10 @@ export function connect(conn, { intent } = {}) {
   session.connected = true
   session.lastEvent = null
   session.recommendationsStale = false
-  session.fileTree = demoFileTree(session.configExists)
-  session.issues = demoIssues.map((i) => ({ ...i }))
+  session.fileTree = []
+  session.issues = []
+  session.repositoryDataStatus = 'idle'
+  session.repositoryDataError = ''
   session.configForm.defaultBranch = session.repo.defaultBranch
   session.configDraft.defaultBranch = session.repo.defaultBranch
   persist()
@@ -225,10 +227,12 @@ export function updateConnection(conn) {
     session.configForm.defaultBranch = session.repo.defaultBranch
     session.configDraft.defaultBranch = session.repo.defaultBranch
     session.pendingIssue = null
-    session.issues = demoIssues.map((i) => ({ ...i }))
+    session.issues = []
     session.recommendationsStale = false
   }
-  session.fileTree = demoFileTree(session.configExists)
+  session.fileTree = []
+  session.repositoryDataStatus = 'idle'
+  session.repositoryDataError = ''
   persist()
   return { idChanged }
 }
@@ -251,6 +255,8 @@ export function clearConnection() {
   session.pendingIssue = null
   session.fileTree = []
   session.issues = []
+  session.repositoryDataStatus = 'idle'
+  session.repositoryDataError = ''
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {
@@ -276,6 +282,23 @@ export function hasConnection() {
   return session.connected && !!session.connectionId
 }
 
+export function beginRepositoryDataLoad() {
+  session.repositoryDataStatus = 'loading'
+  session.repositoryDataError = ''
+}
+
+export function setRepositoryData(fileTree, issues) {
+  session.fileTree = fileTree
+  session.issues = issues
+  session.repositoryDataStatus = 'ready'
+  session.repositoryDataError = ''
+}
+
+export function failRepositoryDataLoad(message) {
+  session.repositoryDataStatus = 'error'
+  session.repositoryDataError = message || 'Repository data could not be loaded.'
+}
+
 // ---------------------------------------------------------------------------
 // Configuration draft / save
 // ---------------------------------------------------------------------------
@@ -292,7 +315,7 @@ export function saveConfig(form) {
   session.configYaml = buildYaml(clean)
   session.configExists = true
   session.configSavedAt = new Date().toLocaleString()
-  session.fileTree = demoFileTree(true) // `.ai.yml` now appears in the tree
+  ensureConfigFile()
   persist()
 }
 
@@ -326,7 +349,7 @@ export function loadExistingConfig(yaml) {
   session.configForm = form
   session.configDraft = { ...form, excludePaths: [...form.excludePaths], categories: [...form.categories] }
   session.configExists = true
-  session.fileTree = demoFileTree(true)
+  ensureConfigFile()
   persist()
 }
 
@@ -336,6 +359,12 @@ function normaliseConfig(form) {
     excludePaths: [...(form.excludePaths || [])],
     categories: [...(form.categories || [])],
     retentionDays: form.retentionDays || 30,
+  }
+}
+
+function ensureConfigFile() {
+  if (!session.fileTree.some((node) => node.type === 'file' && node.name === '.ai.yml')) {
+    session.fileTree.push({ type: 'file', name: '.ai.yml', badge: 'CodePilot' })
   }
 }
 
