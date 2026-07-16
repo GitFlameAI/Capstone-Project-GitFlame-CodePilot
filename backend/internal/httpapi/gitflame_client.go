@@ -194,15 +194,24 @@ func (c *GitFlameClient) ResolveRepository(ctx context.Context, rawURL string) (
 		"/api/v1/projects/"+url.PathEscape(parsed.Path),
 		"/api/v1/repos/"+url.PathEscape(parsed.Path),
 	)
+	var lastErr error
 	for _, endpoint := range endpoints {
 		var response map[string]any
 		if err := c.getJSON(ctx, endpoint, "", &response); err != nil {
+			lastErr = err
+			var integration *IntegrationError
+			if !errors.As(err, &integration) || integration.Status != http.StatusNotFound {
+				return resolvedGitFlameRepository{}, err
+			}
 			continue
 		}
 		metadata := repositoryMetadataFromGitFlameResponse(response, fallback.Metadata)
 		return resolvedGitFlameRepository{Metadata: metadata, RepoURL: firstNonEmpty(metadata.WebURL, fallback.RepoURL)}, nil
 	}
-	return fallback, nil
+	if lastErr != nil {
+		return resolvedGitFlameRepository{}, lastErr
+	}
+	return resolvedGitFlameRepository{}, &IntegrationError{Status: http.StatusNotFound, Code: "gitflame_repository_not_found", Detail: "GitFlame repository was not found"}
 }
 
 func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) error {
@@ -261,37 +270,73 @@ func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string
 }
 
 func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
-	candidates := make([]gitFlameGETCandidate, 0, 2)
-	if endpoint, ok := giteaRepositoryEndpoint(repositoryID); ok {
-		sha := ref
-		if strings.TrimSpace(sha) == "" {
-			sha = "HEAD"
+	repositoryEndpoint, ok := giteaRepositoryEndpoint(repositoryID)
+	if !ok {
+		return nil, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repository_id", Detail: "repository id must use owner/repository format"}
+	}
+
+	type contentEntry struct {
+		Path  string `json:"path"`
+		Name  string `json:"name"`
+		Title string `json:"title"`
+		Type  string `json:"type"`
+	}
+
+	const maxTreeEntries = 10_000
+	directories := []string{""}
+	visitedDirectories := map[string]struct{}{"": {}}
+	seenEntries := make(map[string]struct{})
+	tree := make([]GitFlameTreeEntry, 0)
+
+	for len(directories) > 0 {
+		directory := directories[0]
+		directories = directories[1:]
+		endpoint := repositoryEndpoint + "/contents"
+		if directory != "" {
+			endpoint += "/" + escapeRepositoryPath(directory)
 		}
-		candidates = append(candidates, gitFlameGETCandidate{
-			Endpoint: endpoint + "/git/trees/" + url.PathEscape(sha) + "?recursive=true&per_page=1000",
-		})
-	}
-	candidates = append(candidates, gitFlameGETCandidate{
-		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/tree", url.PathEscape(repositoryID)),
-		Ref:      ref,
-	})
-	body, err := c.getFirstAvailable(ctx, candidates)
-	if err != nil {
-		return nil, err
-	}
-	var tree []GitFlameTreeEntry
-	if err := decodeGitFlameCollection(body, []string{"tree", "files", "items", "data"}, &tree); err != nil {
-		return nil, err
-	}
-	for i := range tree {
-		tree[i].Path = strings.Trim(strings.TrimSpace(tree[i].Path), "/")
-		switch strings.ToLower(tree[i].Type) {
-		case "tree", "directory", "folder":
-			tree[i].Type = "dir"
-		case "blob", "":
-			tree[i].Type = "file"
+
+		body, err := c.doGET(ctx, endpoint, ref)
+		if err != nil {
+			return nil, err
+		}
+		var contents []contentEntry
+		if err := decodeGitFlameCollection(body, []string{"contents", "items", "data"}, &contents); err != nil {
+			return nil, err
+		}
+
+		for _, item := range contents {
+			entryPath := strings.Trim(strings.TrimSpace(firstNonEmptyString(item.Path, item.Name, item.Title)), "/")
+			if entryPath == "" {
+				continue
+			}
+			if directory != "" && !strings.Contains(entryPath, "/") {
+				entryPath = path.Join(directory, entryPath)
+			}
+			if _, exists := seenEntries[entryPath]; exists {
+				continue
+			}
+
+			entryType := strings.ToLower(strings.TrimSpace(item.Type))
+			switch entryType {
+			case "dir", "tree", "directory", "folder":
+				entryType = "dir"
+				if _, visited := visitedDirectories[entryPath]; !visited {
+					visitedDirectories[entryPath] = struct{}{}
+					directories = append(directories, entryPath)
+				}
+			default:
+				entryType = "file"
+			}
+
+			seenEntries[entryPath] = struct{}{}
+			tree = append(tree, GitFlameTreeEntry{Path: entryPath, Type: entryType})
+			if len(tree) > maxTreeEntries {
+				return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_tree_too_large", Detail: "GitFlame repository tree exceeds 10000 entries"}
+			}
 		}
 	}
+
 	return tree, nil
 }
 
@@ -365,6 +410,14 @@ func giteaRepositoryEndpoint(repositoryID string) (string, bool) {
 	return "/api/v1/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]), true
 }
 
+func escapeRepositoryPath(filePath string) string {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(filePath), "/"), "/")
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	return strings.Join(parts, "/")
+}
+
 func decodeGitFlameCollection(body []byte, keys []string, target any) error {
 	if err := json.Unmarshal(body, target); err == nil {
 		return nil
@@ -430,23 +483,19 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func (c *GitFlameClient) fetchFileContent(ctx context.Context, repositoryID, filePath, ref string) (string, error) {
-	var response struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+	repositoryEndpoint, ok := giteaRepositoryEndpoint(repositoryID)
+	if !ok {
+		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repository_id", Detail: "repository id must use owner/repository format"}
 	}
-	err := c.getJSON(ctx, fmt.Sprintf("/api/v1/repositories/%s/files/%s", url.PathEscape(repositoryID), url.PathEscape(filePath)), ref, &response)
-	if err == nil {
-		return response.Content, nil
+	return c.getRaw(ctx, repositoryEndpoint+"/raw/"+escapeRepositoryPath(filePath), gitFlameRawRef(ref))
+}
+
+func gitFlameRawRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.HasPrefix(ref, "refs/") {
+		return ref
 	}
-	var integration *IntegrationError
-	if !errors.As(err, &integration) || integration.Code != "invalid_gitflame_response" {
-		return "", err
-	}
-	content, rawErr := c.getRaw(ctx, fmt.Sprintf("/api/v1/repositories/%s/raw/%s", url.PathEscape(repositoryID), url.PathEscape(filePath)), ref)
-	if rawErr != nil {
-		return "", rawErr
-	}
-	return content, nil
+	return "refs/heads/" + ref
 }
 
 func (c *GitFlameClient) getJSON(ctx context.Context, endpoint, ref string, target any) error {
@@ -476,10 +525,11 @@ func (c *GitFlameClient) postJSON(ctx context.Context, endpoint string, payload,
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Printf("gitflame_http method=POST path=%s error=%q", req.URL.EscapedPath(), err)
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=GET path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
+	log.Printf("gitflame_http method=POST path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gitFlameHTTPError(resp)
 	}
@@ -518,9 +568,11 @@ func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byt
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Printf("gitflame_http method=GET path=%s error=%q", req.URL.EscapedPath(), err)
 		return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
+	log.Printf("gitflame_http method=GET path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2_000_000))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &IntegrationError{Status: normalizeIntegrationStatus(resp.StatusCode), Code: "gitflame_api_error", Detail: fmt.Sprintf("GitFlame API returned status %d", resp.StatusCode)}

@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -24,12 +24,18 @@ func TestGitFlameClientBuildsAnalyzeRequestFromAPI(t *testing.T) {
 		}
 		var body string
 		switch {
-		case strings.Contains(r.URL.Path, "/tree"):
-			body = `[{"path":"README.md","type":"file"},{"path":"vendor/generated.go","type":"file"}]`
-		case strings.Contains(r.URL.Path, "/files/.ai.yml"):
-			body = fmt.Sprintf(`{"path":".ai.yml","content":%q}`, "version: 1\nanalysis:\n  include:\n    - \"**/*\"\n  exclude:\n    - \"vendor/**\"\n  max_files: 5\n")
-		case strings.Contains(r.URL.Path, "/files/README.md"):
-			body = `{"path":"README.md","content":"# Project"}`
+		case r.URL.Path == "/api/v1/repos/owner/repo/contents":
+			if r.URL.Query().Get("ref") != "main" {
+				t.Fatalf("unexpected contents ref: %s", r.URL.RawQuery)
+			}
+			body = `{"contents":[{"path":"README.md","type":"file"},{"path":"vendor/generated.go","type":"file"}]}`
+		case r.URL.Path == "/api/v1/repos/owner/repo/raw/.ai.yml":
+			if r.URL.Query().Get("ref") != "refs/heads/main" {
+				t.Fatalf("unexpected raw ref: %s", r.URL.RawQuery)
+			}
+			body = "version: 1\nanalysis:\n  include:\n    - \"**/*\"\n  exclude:\n    - \"vendor/**\"\n  max_files: 5\n"
+		case r.URL.Path == "/api/v1/repos/owner/repo/raw/README.md":
+			body = "# Project"
 		default:
 			t.Fatalf("unexpected GitFlame API path: %s", r.URL.Path)
 		}
@@ -37,9 +43,10 @@ func TestGitFlameClientBuildsAnalyzeRequestFromAPI(t *testing.T) {
 	})
 
 	req, err := client.BuildAnalyzeRequest(context.Background(), GitFlameIssueWebhook{
-		Repository: domain.RepositoryMetadata{ID: "repo", DefaultBranch: "main"},
+		Repository: domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"},
 		Issue:      domain.IssuePayload{ID: "1", Title: "Issue", Body: "Body", Author: "artur"},
 		CommitSHA:  "abc",
+		Ref:        "main",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -98,11 +105,16 @@ func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body string
 		switch {
-		case strings.Contains(r.URL.Path, "/tree"):
-			if r.URL.Path != "/api/v1/repos/owner/repo/git/trees/main" || r.URL.Query().Get("recursive") != "true" {
-				t.Fatalf("unexpected Gitea tree request: %s", r.URL.String())
+		case r.URL.Path == "/api/v1/repos/owner/repo/contents":
+			if r.URL.Query().Get("ref") != "main" {
+				t.Fatalf("unexpected root contents request: %s", r.URL.String())
 			}
-			body = `{"data":[{"path":"backend","type":"tree"},{"path":"backend/main.go","type":"blob"}]}`
+			body = `{"contents":[{"path":"backend","type":"dir"},{"path":"README.md","type":"file"}]}`
+		case r.URL.Path == "/api/v1/repos/owner/repo/contents/backend":
+			if r.URL.Query().Get("ref") != "main" {
+				t.Fatalf("unexpected nested contents request: %s", r.URL.String())
+			}
+			body = `{"contents":[{"path":"backend/main.go","type":"file"}]}`
 		case strings.Contains(r.URL.Path, "/issues"):
 			if r.URL.Path != "/api/v1/repos/owner/repo/issues" || r.URL.Query().Get("type") != "issues" {
 				t.Fatalf("unexpected Gitea issues request: %s", r.URL.String())
@@ -118,7 +130,7 @@ func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree) != 2 || tree[0].Type != "dir" || tree[1].Type != "file" {
+	if len(tree) != 3 || tree[0].Type != "dir" || tree[1].Path != "README.md" || tree[2].Path != "backend/main.go" {
 		t.Fatalf("unexpected normalized tree: %+v", tree)
 	}
 	issues, err := client.RepositoryIssues(context.Background(), "owner/repo")
@@ -127,6 +139,24 @@ func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
 	}
 	if len(issues) != 1 || issues[0].ID != "42" || issues[0].Body != "Return repository data" || issues[0].Author != "artur" {
 		t.Fatalf("unexpected normalized issues: %+v", issues)
+	}
+}
+
+func TestGitFlameClientRejectsInaccessibleRepository(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	requests := 0
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"message":"forbidden"}`)), Header: make(http.Header)}, nil
+	})
+
+	_, err := client.ResolveRepository(context.Background(), "https://gitflame.test/owner/private-repo")
+	var integration *IntegrationError
+	if !errors.As(err, &integration) || integration.Status != http.StatusForbidden {
+		t.Fatalf("expected forbidden repository error, got %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected resolver to stop after forbidden response, got %d requests", requests)
 	}
 }
 
