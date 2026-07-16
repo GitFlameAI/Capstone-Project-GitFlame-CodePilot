@@ -99,8 +99,14 @@ func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
 		var body string
 		switch {
 		case strings.Contains(r.URL.Path, "/tree"):
+			if r.URL.Path != "/api/v1/repos/owner/repo/git/trees/main" || r.URL.Query().Get("recursive") != "true" {
+				t.Fatalf("unexpected Gitea tree request: %s", r.URL.String())
+			}
 			body = `{"data":[{"path":"backend","type":"tree"},{"path":"backend/main.go","type":"blob"}]}`
 		case strings.Contains(r.URL.Path, "/issues"):
+			if r.URL.Path != "/api/v1/repos/owner/repo/issues" || r.URL.Query().Get("type") != "issues" {
+				t.Fatalf("unexpected Gitea issues request: %s", r.URL.String())
+			}
 			body = `{"issues":[{"iid":42,"title":"Fix API","description":"Return repository data","author":{"username":"artur"}}]}`
 		default:
 			t.Fatalf("unexpected GitFlame API path: %s", r.URL.Path)
@@ -121,5 +127,24 @@ func TestGitFlameClientReadsWrappedRepositoryData(t *testing.T) {
 	}
 	if len(issues) != 1 || issues[0].ID != "42" || issues[0].Body != "Return repository data" || issues[0].Author != "artur" {
 		t.Fatalf("unexpected normalized issues: %+v", issues)
+	}
+}
+
+func TestGitFlameClientResolvesGiteaRepositorySlug(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/v1/repos/owner/repo" {
+			t.Fatalf("unexpected repository request: %s", r.URL.Path)
+		}
+		body := `{"id":17,"name":"repo","full_name":"owner/repo","default_branch":"develop","html_url":"https://gitflame.test/owner/repo"}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+
+	resolved, err := client.ResolveRepository(context.Background(), "https://gitflame.test/owner/repo/code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Metadata.ID != "owner/repo" || resolved.Metadata.DefaultBranch != "develop" {
+		t.Fatalf("unexpected resolved repository: %+v", resolved)
 	}
 }
