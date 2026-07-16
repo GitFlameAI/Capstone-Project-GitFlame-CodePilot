@@ -2,15 +2,22 @@
 //
 // Plain `reactive()` singleton — no Pinia, in line with the "boring and reliable"
 // rule. It holds what must survive navigation between the landing screen and the
-// workspace tabs, and (new in this pass) a lightweight snapshot in sessionStorage
-// so a browser refresh restores the workspace instead of dropping to the landing.
+// workspace tabs, plus a lightweight snapshot in sessionStorage so a browser
+// refresh restores the workspace.
+//
+// Sprint 5 — secure connection model:
+//   The frontend no longer owns the GitFlame access token. The user enters it
+//   once on the landing screen; the backend validates it, stores it encrypted,
+//   and returns only connection METADATA plus an HttpOnly `codepilot_session`
+//   cookie. From then on the frontend authenticates with that cookie and keeps
+//   only the metadata (connection id, repository, token_last4, token_status).
+//   The raw token is never held in JS state or storage — not even in memory.
 //
 // Two configuration objects are kept on purpose:
 //   - configForm  : the LAST SAVED configuration (drives the real `.ai.yml`,
 //                   the tab gating and the recommendation analysis);
 //   - configDraft : the WORKING copy edited by the Config form AND the Repository
-//                   file-tree Exclude toggles. Edits persist across tab switches
-//                   and only touch the saved `.ai.yml` when the user presses Save.
+//                   file-tree Exclude toggles.
 //
 //   import { session, connect, saveConfig } from '@/store/session'
 
@@ -26,20 +33,21 @@ import {
 } from '../data/demo.js'
 
 // Where CodePilot is deployed. GitFlame registers the webhook below so branch /
-// issue events reach the service; the backend receiver is Arthur's Sprint 4
-// endpoint `POST /integrations/gitflame/webhooks/issues`, proxied under /api on
-// the VM (see frontend/nginx.conf). Override via VITE_DEPLOY_BASE if needed.
+// issue events reach the service; the backend receiver is
+// `POST /integrations/gitflame/webhooks/issues`, proxied under /api on the VM
+// (see frontend/nginx.conf). Override via VITE_DEPLOY_BASE if needed.
 export const DEPLOY_BASE = (import.meta.env.VITE_DEPLOY_BASE || 'http://10.93.27.34').replace(/\/$/, '')
 export const WEBHOOK_PATH = '/api/integrations/gitflame/webhooks/issues'
 
-const STORAGE_KEY = 'gfcp.session.v1'
-// The raw access token is kept ONLY in memory and is never persisted anywhere.
-let liveToken = ''
+const STORAGE_KEY = 'gfcp.session.v2'
 
-// Derive a slug repository id (no slashes, safe for the `/repositories/{id}` route
-// on the real backend) and a display owner/name from a GitFlame repository URL.
+// Parse a GitFlame repository URL into { owner, name, id, url }.
+//   https://gitflametest.ru/owner/name        -> owner/name
+//   https://gitflametest.ru/owner/name/code    -> owner/name  (/code stripped)
+// The `id` here (owner/name) is only a FALLBACK sent to the backend; the
+// authoritative repository id always comes back in the connection response.
 export function parseRepoUrl(url) {
-  const fallback = { owner: '', name: '', id: '' }
+  const fallback = { owner: '', name: '', id: '', url: url || '' }
   if (!url) return fallback
   let path = url.trim()
   try {
@@ -48,11 +56,13 @@ export function parseRepoUrl(url) {
     path = url.replace(/^https?:\/\/[^/]+/i, '')
   }
   const parts = path.split('/').map((p) => p.trim()).filter(Boolean)
+  // Drop a trailing GitFlame sub-page segment (e.g. /code, /tree/main, /issues).
+  const SUBPAGES = new Set(['code', 'tree', 'issues', 'pulls', 'wiki', 'settings', 'blob'])
+  while (parts.length > 2 && SUBPAGES.has(parts[2])) parts.splice(2)
   if (parts.length < 2) return fallback
   const owner = parts[0]
   const name = parts[1]
-  const id = `${owner}-${name}`.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/(^-|-$)/g, '')
-  return { owner, name, id }
+  return { owner, name, id: `${owner}/${name}`, url: url.trim() }
 }
 
 // The webhook endpoint CodePilot exposes for GitFlame to register. A single
@@ -65,15 +75,17 @@ export function webhookFor(/* id */) {
 export const session = reactive({
   // --- connection ---
   connected: false,
+  connectionId: '', // GitFlame connection id (for PUT reconnect / DELETE revoke)
   intent: 'autogen', // autogen | recommendations — where the workspace opens first
   repo: {
-    id: '',
+    id: '', // backend repository id (authoritative), e.g. "owner/name"
     owner: '',
     name: '',
     url: '',
     defaultBranch: 'main',
     webhookUrl: '',
-    tokenMasked: '', // masked hint only; the raw token lives in `liveToken`
+    tokenLast4: '', // last 4 chars of the token, for display only
+    tokenMasked: '', // "••••••978f" derived from tokenLast4
   },
   fileTree: [],
   issues: [],
@@ -85,8 +97,10 @@ export const session = reactive({
   configDraft: defaultConfigForm(), // working draft (Config form + tree edits)
   configSavedAt: '',
 
-  // --- access token status (point: explicit token problems) ---
-  tokenStatus: 'ok', // ok | missing | invalid
+  // --- session / token status (point: explicit reconnect prompts) ---
+  // 'active'  : the connection is usable (cookie valid, token stored on backend)
+  // 'invalid' : a call reported 401/403 or a gitflame_* connection problem
+  tokenStatus: 'active',
   tokenError: '',
 
   // --- cross-tab handoff ---
@@ -98,15 +112,17 @@ export const session = reactive({
 })
 
 // ---------------------------------------------------------------------------
-// Persistence (sessionStorage). The token is deliberately excluded, and the file
-// tree / issues are re-derived on rehydrate rather than stored.
+// Persistence (sessionStorage). Only connection METADATA is stored — never the
+// token (there is none on the frontend) and never the session cookie (it is
+// HttpOnly and owned by the browser). The file tree / issues are re-derived.
 // ---------------------------------------------------------------------------
 function persist() {
   try {
     const snapshot = {
       connected: session.connected,
+      connectionId: session.connectionId,
       intent: session.intent,
-      repo: { ...session.repo, tokenMasked: '' },
+      repo: { ...session.repo },
       configExists: session.configExists,
       configYaml: session.configYaml,
       configForm: session.configForm,
@@ -128,9 +144,10 @@ function rehydrate() {
     snapshot = null
   }
   if (!snapshot || !snapshot.connected) return
+  session.connectionId = snapshot.connectionId || ''
   session.intent = snapshot.intent || 'autogen'
   Object.assign(session.repo, snapshot.repo || {})
-  session.repo.tokenMasked = ''
+  session.repo.tokenMasked = maskLast4(session.repo.tokenLast4)
   session.configExists = !!snapshot.configExists
   session.configYaml = snapshot.configYaml || ''
   session.configForm = { ...defaultConfigForm(), ...(snapshot.configForm || {}) }
@@ -140,47 +157,65 @@ function rehydrate() {
   session.fileTree = demoFileTree(session.configExists)
   session.issues = demoIssues.map((i) => ({ ...i }))
   session.connected = true
-  // The raw token is gone after a refresh — require the user to re-enter it.
-  liveToken = ''
-  session.tokenStatus = 'missing'
+  // The HttpOnly session cookie survives a refresh, so we assume the connection
+  // is still usable. If a subsequent call reports 401/403, markTokenInvalid()
+  // flips this to 'invalid' and the workspace shows the reconnect gate.
+  session.tokenStatus = 'active'
   session.tokenError = ''
 }
 
 // ---------------------------------------------------------------------------
-// Connection
+// Connection — driven by the backend connection response.
 // ---------------------------------------------------------------------------
-export function connect({ url, owner, name, id, defaultBranch, token, webhookUrl, intent }) {
-  session.repo.url = url
-  session.repo.owner = owner
-  session.repo.name = name
-  session.repo.id = id
-  session.repo.defaultBranch = defaultBranch || 'main'
-  session.repo.webhookUrl = webhookUrl || webhookFor(id)
+// Map a backend GitFlameConnection response onto the session repo metadata.
+// Works identically in mock and live mode (the mock returns the same shape).
+function applyConnectionResponse(conn) {
+  const repository = conn.repository || {}
+  const url = conn.repo_url || repository.web_url || ''
+  const parsed = parseRepoUrl(url)
+  session.connectionId = conn.id || session.connectionId || ''
+  session.repo.id = repository.id || parsed.id || session.repo.id
+  // Prefer a display owner/name parsed from the URL; fall back to the repo id.
+  session.repo.owner = parsed.owner || ownerFromId(session.repo.id)
+  session.repo.name = repository.name || parsed.name || nameFromId(session.repo.id)
+  session.repo.url = url || session.repo.url
+  session.repo.defaultBranch = conn.default_branch || repository.default_branch || session.repo.defaultBranch || 'main'
+  session.repo.webhookUrl = webhookFor(session.repo.id)
+  session.repo.tokenLast4 = conn.token_last4 || ''
+  session.repo.tokenMasked = maskLast4(session.repo.tokenLast4)
+  session.tokenStatus = conn.token_status && conn.token_status !== 'active' ? 'invalid' : 'active'
+  session.tokenError = ''
+}
+
+function ownerFromId(id) {
+  return id && id.includes('/') ? id.split('/')[0] : id || ''
+}
+function nameFromId(id) {
+  return id && id.includes('/') ? id.split('/').slice(1).join('/') : id || ''
+}
+
+// First-time connect (from the landing screen), after api.createConnection().
+// `conn` is the backend connection response; `intent` picks the first AI tab.
+export function connect(conn, { intent } = {}) {
+  applyConnectionResponse(conn)
   session.intent = intent || 'autogen'
-  session.fileTree = demoFileTree(session.configExists)
-  session.issues = demoIssues.map((i) => ({ ...i }))
   session.connected = true
   session.lastEvent = null
   session.recommendationsStale = false
+  session.fileTree = demoFileTree(session.configExists)
+  session.issues = demoIssues.map((i) => ({ ...i }))
   session.configForm.defaultBranch = session.repo.defaultBranch
   session.configDraft.defaultBranch = session.repo.defaultBranch
-  setToken(token)
   persist()
 }
 
-// Change the connected repository (or its branch / token) from the Repository tab.
-export function updateConnection({ url, defaultBranch, token }) {
-  const r = parseRepoUrl(url)
-  const idChanged = !!r.id && r.id !== session.repo.id
-  session.repo.url = url
-  if (r.owner) session.repo.owner = r.owner
-  if (r.name) session.repo.name = r.name
-  if (r.id) session.repo.id = r.id
-  session.repo.defaultBranch = defaultBranch || session.repo.defaultBranch || 'main'
-  session.repo.webhookUrl = webhookFor(session.repo.id)
-  session.configForm.defaultBranch = session.repo.defaultBranch
-  session.configDraft.defaultBranch = session.repo.defaultBranch
-  if (token) setToken(token)
+// Apply a reconnect / repository-change response (from the Repository tab or the
+// reconnect gate). If the repository id changed, the per-repository .ai.yml is
+// cleared so the user re-configures the new repository.
+export function updateConnection(conn) {
+  const previousId = session.repo.id
+  applyConnectionResponse(conn)
+  const idChanged = !!session.repo.id && session.repo.id !== previousId
   if (idChanged) {
     session.configExists = false
     session.configYaml = ''
@@ -198,25 +233,47 @@ export function updateConnection({ url, defaultBranch, token }) {
   return { idChanged }
 }
 
-// ---------------------------------------------------------------------------
-// Access token
-// ---------------------------------------------------------------------------
-export function setToken(token) {
-  liveToken = token || ''
-  session.repo.tokenMasked = maskToken(liveToken)
-  session.tokenStatus = liveToken ? 'ok' : 'missing'
+// Fully clear the connection (logout / revoke). Returns the user to a clean slate.
+export function clearConnection() {
+  session.connected = false
+  session.connectionId = ''
+  session.repo = {
+    id: '', owner: '', name: '', url: '', defaultBranch: 'main',
+    webhookUrl: '', tokenLast4: '', tokenMasked: '',
+  }
+  session.configExists = false
+  session.configYaml = ''
+  session.configForm = defaultConfigForm()
+  session.configDraft = defaultConfigForm()
+  session.configSavedAt = ''
+  session.tokenStatus = 'active'
   session.tokenError = ''
+  session.pendingIssue = null
+  session.fileTree = []
+  session.issues = []
+  try {
+    sessionStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // ignore
+  }
 }
-export function getToken() {
-  return liveToken
-}
-export function hasToken() {
-  return !!liveToken
-}
-// Called when a live backend call reports the GitFlame token is expired/invalid.
+
+// ---------------------------------------------------------------------------
+// Session / token status
+// ---------------------------------------------------------------------------
+// Called when a live backend call reports the session/token is expired/invalid
+// (401/403 or a gitflame_* connection code). Triggers the reconnect gate.
 export function markTokenInvalid(message) {
   session.tokenStatus = 'invalid'
-  session.tokenError = message || 'The access token is invalid or has expired.'
+  session.tokenError = message || 'Your session or access token is invalid or has expired.'
+}
+// Called after a successful reconnect.
+export function markConnected() {
+  session.tokenStatus = 'active'
+  session.tokenError = ''
+}
+export function hasConnection() {
+  return session.connected && !!session.connectionId
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +298,17 @@ export function saveConfig(form) {
 
 // Persist the current draft/session snapshot (called after in-place draft edits).
 export function persistDraft() {
+  persist()
+}
+
+// Discard all unsaved edits: reset the working draft back to the saved config.
+export function resetDraft() {
+  const saved = session.configForm
+  session.configDraft = {
+    ...saved,
+    excludePaths: [...(saved.excludePaths || [])],
+    categories: [...(saved.categories || [])],
+  }
   persist()
 }
 
@@ -289,10 +357,9 @@ export function applyMockPush() {
   return session.lastEvent
 }
 
-function maskToken(token) {
-  if (!token) return ''
-  const tail = token.slice(-4)
-  return `••••••${tail}`
+function maskLast4(last4) {
+  if (!last4) return ''
+  return `••••••${last4}`
 }
 
 // Restore any persisted session as soon as the module loads, before the router

@@ -13,7 +13,7 @@
 // not shown here. A live .ai.yml preview updates as the form changes; saving
 // unlocks the Autogeneration and Recommendations tabs.
 import { computed, ref, watch } from 'vue'
-import { session, saveConfig, updateDraftExcludePaths, configDirty, persistDraft } from '../../store/session.js'
+import { session, saveConfig, updateDraftExcludePaths, configDirty, persistDraft, resetDraft } from '../../store/session.js'
 import { buildYaml, RECOMMENDATION_CATEGORIES, excludePathOptions } from '../../data/demo.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
@@ -21,7 +21,7 @@ import GfTooltip from '../ui/GfTooltip.vue'
 import ContextPicker from '../ContextPicker.vue'
 import { copyText } from '../../utils/clipboard.js'
 
-const emit = defineEmits(['saved'])
+const emit = defineEmits(['go'])
 
 // The Config form edits the shared DRAFT held in the session, so edits persist
 // across tab switches and stay in sync with the Repository file-tree Exclude
@@ -83,13 +83,13 @@ watch(
 // Persist typed field edits (branch, retention) so they survive tab switches.
 watch(
   () => [session.configDraft.defaultBranch, session.configDraft.retentionDays],
-  () => {
-    justSaved.value = false
-    persistDraft()
-  },
+  () => persistDraft(),
 )
-watch(() => session.configDraft.categories.length, () => { justSaved.value = false })
-watch(() => session.configDraft.excludePaths.length, () => { justSaved.value = false })
+// Hide the "saved" banner as soon as there are unsaved changes again (but keep it
+// showing right after a save, when the draft equals the saved config).
+watch(dirty, (isDirty) => {
+  if (isDirty) justSaved.value = false
+})
 
 async function save() {
   clampRetention()
@@ -98,6 +98,12 @@ async function save() {
   saveConfig(session.configDraft)
   saving.value = false
   justSaved.value = true
+}
+
+// Discard every unsaved change: revert the working draft to the saved config.
+function discardChanges() {
+  resetDraft()
+  justSaved.value = false
 }
 
 async function copyYaml() {
@@ -198,13 +204,20 @@ async function copyYaml() {
         <pre class="preview__code mono">{{ yamlPreview }}</pre>
       </div>
 
-      <GfButton variant="primary" size="l" :loading="saving" :disabled="!dirty && session.configExists" class="savebtn" @click="save">
-        <GfIcon name="check" :size="16" /> {{ session.configExists && !dirty ? 'Saved' : 'Save .ai.yml' }}
-      </GfButton>
+      <div class="saverow">
+        <GfButton variant="primary" size="l" :loading="saving" :disabled="!dirty && session.configExists" class="savebtn" @click="save">
+          <GfIcon name="check" :size="16" /> {{ session.configExists && !dirty ? 'Saved' : 'Save .ai.yml' }}
+        </GfButton>
+        <GfButton v-if="dirty" variant="secondary" size="l" @click="discardChanges">
+          Discard changes
+        </GfButton>
+      </div>
       <p class="savehint gf-muted">
-        <template v-if="dirty || !session.configExists">
-          Saves to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch and unlocks
-          Autogeneration &amp; Recommendations.
+        <template v-if="!session.configExists">
+          Save to unlock Autogeneration &amp; Recommendations.
+        </template>
+        <template v-else-if="dirty">
+          Save changes to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
         </template>
         <template v-else>
           All changes are saved to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
@@ -212,9 +225,9 @@ async function copyYaml() {
       </p>
 
       <transition name="okfade">
-        <p v-if="justSaved" class="okmsg">
+        <p v-if="justSaved && !dirty" class="okmsg">
           <GfIcon name="check" :size="15" />
-          Saved. <button class="inline-link" @click="emit('saved')">Go to Autogeneration →</button>
+          Configuration saved. <button class="inline-link" @click="emit('go', 'autogen')">Go to Autogeneration →</button>
         </p>
       </transition>
     </aside>
@@ -399,8 +412,12 @@ async function copyYaml() {
   max-height: 420px;
   color: var(--gf-text);
 }
+.saverow {
+  display: flex;
+  gap: 10px;
+}
 .savebtn {
-  width: 100%;
+  flex: 1;
 }
 .savehint {
   margin: 10px 0 0;

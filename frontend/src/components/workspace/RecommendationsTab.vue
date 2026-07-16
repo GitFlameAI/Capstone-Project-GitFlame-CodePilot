@@ -13,8 +13,10 @@
 // explained in a small legend and in the detail overlay.
 import { ref, computed, onMounted } from 'vue'
 import { api, ApiError, USING_MOCK } from '../../api/index.js'
+import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
 import { RECOMMENDATION_CATEGORIES } from '../../data/demo.js'
+import { flattenFiles, computeExcludedSet } from '../../utils/excludePaths.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfSpinner from '../ui/GfSpinner.vue'
@@ -126,9 +128,19 @@ async function load({ auto = false } = {}) {
       state.value = 'no_categories'
     }
   } catch (e) {
-    errorMessage.value = e.message || 'Failed to load analysis.'
+    errorMessage.value = describeError(e).message
     state.value = 'error'
   }
+}
+
+// File paths CodePilot may analyse: everything in the known repository tree that
+// is not excluded by the configuration. The backend's direct analyze endpoint
+// requires at least one path (repository_context); the backend then reads the
+// file contents through the GitFlame connection.
+function analyzableContext() {
+  const all = flattenFiles(session.fileTree)
+  const excluded = computeExcludedSet(all, session.configForm.excludePaths || [])
+  return all.filter((p) => !excluded.has(p))
 }
 
 async function runAnalysis({ auto = false } = {}) {
@@ -137,14 +149,20 @@ async function runAnalysis({ auto = false } = {}) {
   errorMessage.value = ''
   try {
     await api.analyzeRepository(session.repo.id, {
-      repository: { id: session.repo.id, default_branch: session.repo.defaultBranch },
+      repository: {
+        id: session.repo.id,
+        name: session.repo.name,
+        default_branch: session.repo.defaultBranch,
+        web_url: session.repo.url,
+      },
       yaml_config: session.configYaml,
       categories: configuredCategories.value,
+      repository_context: analyzableContext(),
     })
     session.recommendationsStale = false
     await load({ auto })
   } catch (e) {
-    errorMessage.value = e.message || 'Analysis failed.'
+    errorMessage.value = describeError(e).message
     state.value = 'error'
   }
 }

@@ -13,6 +13,7 @@
 // file operations follow {path, action, description} (generated_files_contract.md).
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError, pollTask, USING_MOCK } from '../../api/index.js'
+import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
@@ -53,6 +54,14 @@ const planRevision = ref(1)
 const contract = ref(null)
 const expanded = ref({})
 const outcome = ref('')
+
+// --- apply-to-GitFlame step (Sprint 5) ---
+const applying = ref(false)
+const applyErr = ref(null) // { title, message, retryable } from describeError
+const applied = computed(() => {
+  const c = contract.value
+  return !!c && (c.apply_status === 'applied' || !!c.pull_request_url)
+})
 
 const showCorrect = ref(false)
 const correctionText = ref('')
@@ -255,8 +264,26 @@ function backToIssues() {
   formError.value = ''
   actionError.value = ''
   taskError.value = null
+  applyErr.value = null
+  applying.value = false
   sessionId.value = ''
   currentTaskId.value = ''
+}
+
+// Apply the approved, generated files to GitFlame: create the branch, commit and
+// pull request. Uses the session cookie + the stored connection on the backend.
+async function applyToGitFlame() {
+  applying.value = true
+  applyErr.value = null
+  actionError.value = ''
+  try {
+    const res = await api.applyToGitFlame(sessionId.value || issueId.value)
+    if (res && res.generated_files_contract) contract.value = res.generated_files_contract
+  } catch (e) {
+    applyErr.value = describeError(e)
+  } finally {
+    applying.value = false
+  }
 }
 
 function goToPr() {
@@ -265,6 +292,7 @@ function goToPr() {
     window.open(url, '_blank', 'noopener')
     return
   }
+  // No PR yet (not applied) — fall back to the repository's pull-requests page.
   if (!session.repo.url) return
   window.open(`${session.repo.url}/pulls`, '_blank', 'noopener')
 }
@@ -457,14 +485,18 @@ onBeforeUnmount(stopPolling)
     <!-- Step: done -->
     <template v-else>
       <div v-if="outcome === 'approved'" class="card gf-card">
-        <div class="result result_ok">
-          <div class="result__icon"><GfIcon name="check" :size="22" /></div>
-          <h4>Plan approved · code generated</h4>
+        <div class="result" :class="applied ? 'result_ok' : 'result_info'">
+          <div class="result__icon"><GfIcon :name="applied ? 'check' : 'sparkles'" :size="22" /></div>
+          <h4>{{ applied ? 'Applied to GitFlame · pull request opened' : 'Plan approved · code generated' }}</h4>
+          <p v-if="!applied" class="result__note gf-muted">
+            Review the generated file operations below, then apply them to GitFlame to open a pull request.
+          </p>
         </div>
         <dl v-if="contract" class="contract">
           <div><dt>Branch</dt><dd class="mono">{{ contract.branch_name }}</dd></div>
           <div><dt>Base branch</dt><dd class="mono">{{ contract.base_branch || session.repo.defaultBranch }}</dd></div>
           <div><dt>Commit</dt><dd>{{ contract.commit_message }}</dd></div>
+          <div v-if="applied && contract.commit_sha"><dt>Commit SHA</dt><dd class="mono">{{ contract.commit_sha }}</dd></div>
           <div><dt>PR title</dt><dd>{{ contract.pr_title }}</dd></div>
           <div><dt>Reviewer</dt><dd>{{ contract.reviewer }}</dd></div>
         </dl>
@@ -475,6 +507,7 @@ onBeforeUnmount(stopPolling)
             <button class="file__head" @click="toggleFile(f.path)">
               <span class="file__action" :class="`file__action_${f.action}`">{{ f.action }}</span>
               <span class="file__path mono">{{ f.path }}</span>
+              <span v-if="f.status === 'applied'" class="file__applied"><GfIcon name="check" :size="12" /> applied</span>
               <GfIcon name="chevronRight" :size="14" class="file__caret" :class="{ file__caret_open: expanded[f.path] }" />
             </button>
             <div v-if="expanded[f.path]" class="file__body">
@@ -483,11 +516,27 @@ onBeforeUnmount(stopPolling)
           </li>
         </ul>
 
+        <!-- Apply error -->
+        <div v-if="applyErr" class="applyerr">
+          <div class="applyerr__head"><GfIcon name="alert" :size="15" /> {{ applyErr.title }}</div>
+          <p class="applyerr__msg">{{ applyErr.message }}</p>
+        </div>
+
         <div class="actions actions_split">
           <GfButton variant="secondary" @click="backToIssues">
             <GfIcon name="chevronRight" :size="14" class="back-link__ic" /> Back to issues
           </GfButton>
-          <GfButton variant="primary" @click="goToPr">
+          <!-- Not applied yet: primary action is Apply to GitFlame -->
+          <GfButton
+            v-if="!applied"
+            variant="primary"
+            :loading="applying"
+            @click="applyToGitFlame"
+          >
+            <GfIcon name="branch" :size="15" /> {{ applyErr ? 'Retry apply to GitFlame' : 'Apply to GitFlame' }}
+          </GfButton>
+          <!-- Applied: go to the real pull request -->
+          <GfButton v-else variant="primary" @click="goToPr">
             <GfIcon name="branch" :size="15" /> Go to pull request
           </GfButton>
         </div>
@@ -823,6 +872,44 @@ onBeforeUnmount(stopPolling)
 .result_warn .result__icon {
   background: var(--gf-amber-bg);
   color: var(--gf-amber);
+}
+.result_info .result__icon {
+  background: var(--gf-purple-soft);
+  color: var(--gf-purple);
+}
+.file__applied {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--gf-green);
+  background: var(--gf-green-bg);
+}
+.applyerr {
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--gf-red);
+  border-radius: 10px;
+  background: var(--gf-red-bg);
+}
+.applyerr__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--gf-red);
+}
+.applyerr__msg {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--gf-text-2);
 }
 .result h4 {
   margin: 0 0 6px;

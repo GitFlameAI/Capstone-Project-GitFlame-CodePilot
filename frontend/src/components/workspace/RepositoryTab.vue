@@ -6,8 +6,10 @@
 //                     analysis, which keeps the .ai.yml analysis.exclude list in sync.
 //   Recommendations — a short analysis summary, or a prompt to configure / analyse.
 import { reactive, ref, computed, onMounted } from 'vue'
-import { session, updateConnection, updateDraftExcludePaths, applyMockPush, configDirty } from '../../store/session.js'
-import { api } from '../../api/index.js'
+import { useRouter } from 'vue-router'
+import { session, updateConnection, clearConnection, updateDraftExcludePaths, applyMockPush, configDirty } from '../../store/session.js'
+import { api, USING_MOCK } from '../../api/index.js'
+import { describeError } from '../../api/errors.js'
 import { copyText } from '../../utils/clipboard.js'
 import { flattenFiles, computeExcludedSet, toggleFileExclude, toggleFolderExclude } from '../../utils/excludePaths.js'
 import GfIcon from '../ui/GfIcon.vue'
@@ -17,26 +19,68 @@ import GfTooltip from '../ui/GfTooltip.vue'
 import FileTree from '../FileTree.vue'
 
 const emit = defineEmits(['go'])
+const router = useRouter()
 
-// --- edit-connection modal ---
+// --- edit-connection modal (reconnect: replace the token / repo / branch) ---
 const editing = ref(false)
 const showToken = ref(false)
+const savingEdit = ref(false)
+const editError = ref(null)
 const form = reactive({ url: '', defaultBranch: '', token: '' })
 
 function openEdit() {
   form.url = session.repo.url
   form.defaultBranch = session.repo.defaultBranch
   form.token = ''
+  editError.value = null
   editing.value = true
 }
-function saveEdit() {
-  updateConnection({
-    url: form.url.trim(),
-    defaultBranch: form.defaultBranch.trim(),
-    token: form.token,
-  })
-  editing.value = false
-  loadRecSummary()
+
+// Reconnect always re-validates the token with GitFlame, so a token is required.
+async function saveEdit() {
+  editError.value = null
+  if (!form.url.trim()) { editError.value = { message: 'A repository URL is required.' }; return }
+  if (!form.token.trim()) { editError.value = { message: 'An access token is required to re-verify the connection.' }; return }
+  savingEdit.value = true
+  try {
+    const opts = { token: form.token, repoUrl: form.url.trim(), defaultBranch: form.defaultBranch.trim() || 'main' }
+    const conn = session.connectionId
+      ? await api.reconnectConnection(session.connectionId, opts)
+      : await api.createConnection(opts)
+    updateConnection(conn)
+    form.token = ''
+    editing.value = false
+    loadRecSummary()
+  } catch (e) {
+    editError.value = describeError(e)
+  } finally {
+    savingEdit.value = false
+  }
+}
+
+// --- disconnect (revoke) ---
+const disconnecting = ref(false)
+async function disconnect() {
+  disconnecting.value = true
+  try {
+    if (session.connectionId) await api.revokeConnection(session.connectionId)
+    try { await api.logout() } catch { /* best-effort */ }
+  } catch {
+    // Even if the backend call fails, clear the local session so the user is not stuck.
+  } finally {
+    disconnecting.value = false
+    clearConnection()
+    router.push('/codepilot')
+  }
+}
+
+// Demo-only helper: simulate an expired session so the reconnect gate is
+// demonstrable in mock mode (in live mode this happens when the backend returns
+// 401/403). Available only in mock mode.
+function simulateExpiry() {
+  // markTokenInvalid lives in the store; import lazily to keep this demo-only.
+  session.tokenStatus = 'invalid'
+  session.tokenError = 'Your session expired (demo).'
 }
 
 // --- webhook copy ---
@@ -109,7 +153,18 @@ onMounted(loadRecSummary)
         <div><dt>Repository</dt><dd>{{ session.repo.owner }}/{{ session.repo.name }}</dd></div>
         <div><dt>URL</dt><dd class="mono"><a :href="session.repo.url" target="_blank" rel="noopener">{{ session.repo.url }}</a></dd></div>
         <div><dt>Default branch</dt><dd class="mono">{{ session.repo.defaultBranch }}</dd></div>
-        <div><dt>Access token</dt><dd class="mono">{{ session.repo.tokenMasked || '—' }}</dd></div>
+        <div>
+          <dt>Access token</dt>
+          <dd class="tokline">
+            <span class="mono">{{ session.repo.tokenMasked || '—' }}</span>
+            <span
+              class="gf-chip tokstatus"
+              :class="session.tokenStatus === 'invalid' ? 'tokstatus_bad' : 'tokstatus_ok'"
+            >
+              {{ session.tokenStatus === 'invalid' ? 'needs reconnect' : 'stored securely' }}
+            </span>
+          </dd>
+        </div>
         <div v-if="session.repo.webhookUrl">
           <dt>Webhook <GfTooltip text="A URL you register in GitFlame. GitFlame calls it when an issue or branch changes, so CodePilot is notified and pulls the updated repository data. It is inbound (GitFlame → CodePilot), separate from your access token." /></dt>
           <dd class="webhookrow">
@@ -129,6 +184,21 @@ onMounted(loadRecSummary)
         </span>
         <button class="events__sim" title="Demo: simulate a GitFlame push so the tree, issues and recommendations refresh in place" @click="simulatePush">
           <GfIcon name="refresh" :size="13" /> Simulate a push (demo)
+        </button>
+      </div>
+
+      <!-- connection actions -->
+      <div class="connactions">
+        <button
+          v-if="USING_MOCK"
+          class="connactions__demo"
+          title="Demo: simulate an expired session so the reconnect prompt appears"
+          @click="simulateExpiry"
+        >
+          <GfIcon name="key" :size="13" /> Simulate expired session (demo)
+        </button>
+        <button class="connactions__revoke" :disabled="disconnecting" @click="disconnect">
+          <GfIcon name="close" :size="13" /> Disconnect repository
         </button>
       </div>
     </section>
@@ -192,9 +262,10 @@ onMounted(loadRecSummary)
       </div>
     </section>
 
-    <!-- Edit-connection modal -->
+    <!-- Edit-connection modal (reconnect) -->
     <GfModal v-if="editing" title="Change connection" subtitle="Switch repository, branch, or token" @close="editing = false">
       <p class="modalnote gf-muted">
+        Re-verifying re-checks the access token with GitFlame and replaces the stored token.
         Changing to a different repository clears the saved <span class="mono">.ai.yml</span>
         (configuration is per-repository), so you will set it up again.
       </p>
@@ -207,18 +278,19 @@ onMounted(loadRecSummary)
         <input v-model="form.defaultBranch" class="minput mono" placeholder="main" />
       </label>
       <label class="mfield">
-        <span class="mfield__label">Access token <span class="mfield__opt">leave blank to keep current</span></span>
+        <span class="mfield__label">Access token <span class="mfield__opt">required to re-verify</span></span>
         <div class="minput minput_group">
           <GfIcon name="key" :size="15" class="minput__lead" />
-          <input v-model="form.token" :type="showToken ? 'text' : 'password'" class="minput__field" placeholder="xxxxxxxxxxxxxxxxxxxx" />
+          <input v-model="form.token" :type="showToken ? 'text' : 'password'" class="minput__field" placeholder="xxxxxxxxxxxxxxxxxxxx" @keyup.enter="saveEdit" />
           <button type="button" class="minput__toggle" @click="showToken = !showToken">
             <GfIcon :name="showToken ? 'eyeOff' : 'eye'" :size="15" />
           </button>
         </div>
       </label>
+      <p v-if="editError" class="medit-err"><GfIcon name="alert" :size="14" /> {{ editError.message }}</p>
       <template #footer>
-        <GfButton variant="ghost" @click="editing = false">Cancel</GfButton>
-        <GfButton variant="primary" :disabled="!form.url.trim()" @click="saveEdit">Save connection</GfButton>
+        <GfButton variant="ghost" :disabled="savingEdit" @click="editing = false">Cancel</GfButton>
+        <GfButton variant="primary" :loading="savingEdit" :disabled="!form.url.trim() || !form.token.trim()" @click="saveEdit">Save connection</GfButton>
       </template>
     </GfModal>
 
@@ -294,6 +366,76 @@ onMounted(loadRecSummary)
   font-size: 13.5px;
   word-break: break-all;
   min-width: 0;
+}
+.tokline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tokstatus {
+  height: 20px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-color: transparent;
+}
+.tokstatus_ok {
+  color: var(--gf-green);
+  background: var(--gf-green-bg);
+}
+.tokstatus_bad {
+  color: var(--gf-amber);
+  background: var(--gf-amber-bg);
+}
+.connactions {
+  display: flex;
+  align-items: center;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--gf-line);
+}
+.connactions__demo,
+.connactions__revoke {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.connactions__demo {
+  color: var(--gf-text-3);
+}
+.connactions__demo:hover {
+  color: var(--gf-text);
+  text-decoration: underline;
+}
+.connactions__revoke {
+  margin-left: auto;
+  color: var(--gf-red);
+}
+.connactions__revoke:hover {
+  text-decoration: underline;
+}
+.connactions__revoke:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.medit-err {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--gf-red);
+}
+.medit-err :deep(.gf-icon) {
+  flex: none;
 }
 .webhookrow {
   display: flex;

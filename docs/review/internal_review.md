@@ -1,7 +1,64 @@
 # Internal Review
 
-Per-sprint integration reviews. The **Sprint 4** review is current; the **Sprint 3**
-and **Sprint 2** reviews are kept below for history.
+Per-sprint integration reviews. The **Sprint 5** review is current; the **Sprint 4**,
+**Sprint 3** and **Sprint 2** reviews are kept below for history.
+
+---
+
+# Internal Review — Sprint 5 (Version 5)
+
+Reviewer: Roman (frontend) · Date: Sprint 5 / Week 6
+Scope: connecting the frontend to the real Go backend end-to-end (secure GitFlame
+connection flow, apply-to-GitFlame, error states), reviewed against the Sprint 5 backend
+branches (`sprint-5/arthur-backend-fix`, `sprint-5/amir-db-storage`) and their OpenAPI.
+Frontend flows verified in **mock mode** (no backend required); the mock mirrors the new
+endpoints, and the mock flow is covered by a runtime smoke test.
+
+## 1. Verified scenarios (frontend)
+
+| # | Scenario | Result |
+| --- | --- | --- |
+| S1 | Connect: token sent once to `POST /connections`, only metadata stored, no token in storage/memory | PASS |
+| S2 | Invalid / expired token → friendly "Access token problem" + field highlight | PASS |
+| S3 | Save `.ai.yml` → Autogeneration & Recommendations unlock | PASS |
+| S4 | Issue → plan → **edit** → approve forwards the edited `plan_markdown` | PASS |
+| S5 | Approve → code-generation task → generated file operations listed | PASS |
+| S6 | **Apply to GitFlame** → commit SHA + real PR URL; files marked *applied* | PASS |
+| S7 | Apply idempotent; apply failure recoverable (default branch untouched) | PASS |
+| S8 | Request correction / Reject still work | PASS |
+| S9 | Recommendations analyze sends `repository_context`; grid + Create issue | PASS |
+| S10 | Refresh keeps the workspace via the HttpOnly session cookie (no re-entry) | PASS |
+| S11 | Reconnect gate on 401/403 → `PUT /connections/{id}` restores the session | PASS |
+| S12 | Disconnect → revoke + logout → back to connect screen | PASS |
+| S13 | Backend unreachable / GitFlame down / Agent busy → distinct messages | PASS |
+
+## 2. Contract alignment (checked against the backend branches)
+
+- Routes, cookie name (`codepilot_session`) and the `GitFlameConnection(Request)` schemas
+  match Arthur's `openapi.json` and handlers. Connection request needs only
+  `access_token` (+ `repo_url` when `repository.id` is omitted); the response
+  `token_status` enum (`active|invalid|expired|revoked|reauth_required`) is handled.
+- `POST /ai/issues/{id}/approve` accepts `{ plan_markdown }`; `POST .../gitflame/apply`
+  returns the contract with `apply_status`, `commit_sha`, `pull_request_url`.
+- Every authenticated call sends `credentials:'include'`; same-origin nginx proxy means
+  no extra CORS. On HTTP the backend runs `SESSION_COOKIE_SECURE=false` (VM default).
+
+## 3. Follow-up issues to open
+
+- [ ] Backend: add `GET /integrations/gitflame/connections` so a fresh browser tab can
+      restore the connection list (currently metadata lives only in `sessionStorage`).
+- [ ] Backend: have the direct `.../recommendations/analyze` fetch repository context via
+      the connection (like the webhook path), so the frontend need not send
+      `repository_context`.
+- [ ] Frontend: generate a typed API client from OpenAPI (carried over from Sprint 4).
+- [ ] Frontend: add component tests to CI (carried over).
+
+## 4. Notes for the integration merge
+
+- Frontend talks only to the Go backend; no direct Agent Engine calls. Confirmed.
+- Frontend builds cleanly in both mock and `VITE_API_BASE=/api` modes (79 modules).
+- Docker build bakes `VITE_API_BASE=/api`; nginx proxies `/api/ → backend:8000`.
+- Recommended merge order keeps this branch **last**, after the backend/db/agent branches.
 
 ---
 
@@ -9,51 +66,51 @@ and **Sprint 2** reviews are kept below for history.
 
 Reviewer: Roman (frontend) · Date: Sprint 4 / Week 5
 Scope: the Sprint 4 usability changes and the alignment with the new backend GitFlame
-integration endpoints, reviewed across the Sprint 4 branches (`arthur-backend`,
-`amir-db-storage`, `main+karim`).
+integration endpoints, reviewed across the Sprint 4 branches. All scenarios verified in
+**mock mode** (no backend required).
 
 ## 1. Verified scenarios (frontend, mock mode)
 
 | # | Scenario | Result |
 | --- | --- | --- |
-| S1 | Landing roadmap: two tracks with a toggle; steps auto-advance; a progress bar fills toward the next step; auto-switches to the other track at the end | PASS |
-| S2 | Landing preview: Generate -> Edit/Preview the plan -> Request correction (revises) / Reject (red) / Approve -> generated files; clearly badged as a demo | PASS |
-| S3 | Landing: single consent checkbox; empty -> red underline blocks Continue; `external` icon by "GitFlame"; Connect header outside the card and width matches other blocks | PASS |
-| S4 | Repository: Exclude a file -> strikethrough; excluded row shows **Include** with an open-eye icon | PASS |
-| S5 | Repository: exclude every file in a folder -> collapses to `folder/**`; `.ai.yml` cannot be excluded; folders start collapsed | PASS |
-| S6 | Config draft: edit categories/excludes, switch tabs and back -> edits are still there; `.ai.yml` preview reflects the draft | PASS |
-| S7 | Config: `.ai.yml` and tab unlock change only on **Save**; Save is disabled when there is nothing to save; Repository shows "Unsaved · review in Config" when the draft is dirty | PASS |
-| S8 | Config: All / None for categories; Clear all for excludes; retention clamped to 1–365 whole number; spacing fits one screen | PASS |
-| S9 | Recommendations: first open with categories -> analysis auto-runs; dismissing the last card does NOT re-run immediately; re-opening the tab re-runs it | PASS |
-| S10 | Refresh on the workspace: stays in the workspace (not the landing), re-derives data, and shows a mandatory, non-dismissable **token gate** (purple token field) | PASS |
-| S11 | Token gate: cannot continue with an empty token; "Back to connect screen" escape works | PASS |
-| S12 | Workspace: sticky top bar keeps repo name + config status visible; switching tabs scrolls to the header (not the AI disclaimer); disclaimer fits one line | PASS |
-| S13 | Repository: webhook URL copies; an "i" tooltip explains the webhook; "Simulate a push" updates the tree + issues in place | PASS |
-| S14 | Autogeneration: contract shows base branch; "or" is vertically centered between the pickers | PASS |
-| S15 | Responsive: at high browser zoom / narrow widths no element overflows to the right (grids, rows, overlays wrap or scroll) | PASS |
+| S1 | Roadmap: two tracks behind a **sliding toggle** (animated), hover outline on the inactive tab | PASS |
+| S2 | Roadmap: steps auto-advance; the **progress bar and the step change stay in sync** (no late jumps after hover or manual clicks) | PASS |
+| S3 | Roadmap: **play/pause** control stops/starts auto-advance; hovering still pauses; resumes correctly | PASS |
+| S4 | Roadmap: reaching a track's last step **auto-switches** to the other track | PASS |
+| S5 | Landing preview: **Preview renders Markdown** (not raw code); **Request correction** takes typed input and produces a revision; **Reject** is red | PASS |
+| S6 | Landing: single consent; empty → red underline blocks Continue; **Continue is dimmed until the form is complete** but still clickable; **Default branch is empty**; `external` icon by "GitFlame" | PASS |
+| S7 | Routing: **"Start with" is gone**; the workspace always opens on **Config** | PASS |
+| S8 | Repository: Exclude a file → excluded row shows **Include**; a fully-excluded folder collapses to `folder/**`; `.ai.yml` cannot be excluded; folders start collapsed | PASS |
+| S9 | Config draft: edit categories/excludes, switch tabs and back → edits persist; `.ai.yml` and the tab unlock change only on **Save** | PASS |
+| S10 | Config: **Discard changes** reverts the draft to the saved config; the button appears only when dirty | PASS |
+| S11 | Config: save hint matches state (unlock wording only before first save); the **first save shows a green "Go to Autogeneration" banner** | PASS |
+| S12 | Config **Exclude paths**: typing/adding a very long token no longer stretches the page — chips ellipsise, the hint wraps | PASS |
+| S13 | Recommendations: first open auto-runs; dismissing the last card re-runs on the next visit, not immediately | PASS |
+| S14 | Refresh on the workspace: stays in the workspace and shows a **mandatory token gate in mock mode** (token never persisted) | PASS |
+| S15 | Locked tab hint: **Config** is a link to the tab; the plate shrinks to its content | PASS |
+| S16 | Responsive: at high zoom / narrow widths the roadmap toggle **stacks** and no label clips; no right-overflow elsewhere | PASS |
 
 ## 2. Findings and follow-ups
 
 ### F1 — Browser push for live updates is a backend follow-up (medium)
-The webhook is GitFlame -> backend. Pushing updates to the open browser needs backend SSE or
-polling (e.g. `GET .../events`), which is not in scope this sprint. The frontend demonstrates
-the UX with a mock push (`applyMockPush`) that mutates the reactive session; wiring it to real
-events is tracked for a later sprint.
+The webhook is GitFlame → backend. Pushing updates to an open browser needs backend SSE or
+polling (e.g. `GET .../events`), out of scope this sprint. The frontend demonstrates the UX with
+a mock push (`applyMockPush`); wiring it to real events is tracked for a later sprint.
 
 ### F2 — Expired-token detection is live-mode only (low, honest limitation)
-The token gate's *invalid/expired* state is triggered by a backend 401/403, caught in the API
-facade. Mock mode has no real auth, so in the demo the gate is exercised via the *missing*-token
-path (after a refresh). Against the real backend the *invalid* path applies once the backend maps
-GitFlame auth failures to 401/403.
+The token gate's *missing* state is exercised on every refresh (mock and live). The
+*invalid/expired* state is triggered by a backend 401/403, so it only appears against the real
+backend; mock has no real auth.
 
 ### F3 — Config is applied on Save, not on tree toggle (by design)
-Following the "changes apply on Save" rule, excluding files in the Repository tree edits the
-**draft** only; the `.ai.yml` changes when the user Saves in the Config tab. The Repository tab
-surfaces a "Unsaved · review in Config" hint so this is discoverable.
+Excluding files in the Repository tree edits the **draft** only; the `.ai.yml` changes on Save in
+the Config tab. The Repository tab surfaces an "Unsaved · review in Config" hint, and Config now
+has a **Discard changes** button so the draft can be reverted.
 
-### F4 — Generated file operation field name (`explanation` vs `description`) (low)
-The Sprint 4 backend serialises `explanation`; the Sprint 3 mock used `description`. The
-Autogeneration contract UI reads `description || explanation`, so both render correctly.
+### F4 — Roadmap timing relies on wall-clock pause/resume (low)
+The progress bar (CSS) and the advance (JS timer) are kept in sync by pausing/resuming both on the
+same events and tracking remaining time. This is robust for hover/button pauses and manual step
+selection; it does not attempt frame-accurate sync, which is unnecessary for a decorative bar.
 
 ---
 

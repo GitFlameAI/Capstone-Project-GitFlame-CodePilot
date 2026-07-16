@@ -27,9 +27,50 @@ const reports = new Map() // repositoryId -> { summary, recommendations[], statu
 const sessions = new Map() // sessionId -> session
 const issueAlias = new Map() // issueId -> sessionId
 const tasks = new Map() // taskId -> task
+const connections = new Map() // connectionId -> connection (mock GitFlame connections)
 
 const QUEUED_MS = 700
 const PROCESSING_MS = 2000
+
+// Minimal repo-url parser used only by the mock connection endpoints, so the
+// mock can derive an owner/name/id exactly like the backend does (it strips a
+// trailing /code or other sub-page segment). Kept local to avoid coupling the
+// mock to the session store.
+function mockParseRepoUrl(url) {
+  let path = String(url || '').trim()
+  try {
+    path = new URL(path).pathname
+  } catch {
+    path = path.replace(/^https?:\/\/[^/]+/i, '')
+  }
+  const parts = path.split('/').map((p) => p.trim()).filter(Boolean)
+  const SUBPAGES = new Set(['code', 'tree', 'issues', 'pulls', 'wiki', 'settings', 'blob'])
+  while (parts.length > 2 && SUBPAGES.has(parts[2])) parts.splice(2)
+  if (parts.length < 2) return { owner: '', name: '', id: '' }
+  return { owner: parts[0], name: parts[1], id: `${parts[0]}/${parts[1]}` }
+}
+
+// Build a backend-shaped GitFlameConnection response for the mock.
+function buildConnection({ id, token, repoUrl, repository, defaultBranch }) {
+  const parsed = mockParseRepoUrl(repoUrl)
+  const repoId = (repository && repository.id) || parsed.id || 'demo/repo'
+  const name = (repository && repository.name) || parsed.name || repoId.split('/').pop()
+  const webBase = String(repoUrl || '').replace(/\/(code|tree\/.*|issues|pulls|wiki|settings)\/?$/, '')
+  return {
+    id: id || uid('conn'),
+    user_id: 'mock-user',
+    repository: {
+      id: repoId,
+      name,
+      default_branch: defaultBranch || (repository && repository.default_branch) || 'main',
+      web_url: webBase || repoUrl || '',
+    },
+    repo_url: webBase || repoUrl || '',
+    default_branch: defaultBranch || 'main',
+    token_last4: String(token || '').slice(-4) || '0000',
+    token_status: 'active',
+  }
+}
 
 function resolveSession(idOrIssueId) {
   if (sessions.has(idOrIssueId)) return sessions.get(idOrIssueId)
@@ -226,10 +267,64 @@ function categoriesFromPayload(payload) {
   return []
 }
 
+let lastRepoWebUrl = ''
+
 export const mockApi = {
   async getHealth() {
     await delay(150)
     return { status: 'ok', service: 'mock' }
+  },
+  async getReady() {
+    await delay(150)
+    return { status: 'ready', components: { storage: 'ready', redis: 'ready', agent_engine: 'ready' }, service: 'mock' }
+  },
+
+  // --- GitFlame connection lifecycle (mock) ---
+  // Mirrors POST /integrations/gitflame/connections: validates the token,
+  // "creates a session" and returns backend-shaped connection metadata. A token
+  // containing "invalid", "bad" or "expired" simulates a rejected token so the
+  // error / reconnect states are demonstrable without a backend.
+  async createConnection({ token, repoUrl, repository, defaultBranch } = {}) {
+    await delay(700)
+    if (!token || !token.trim()) throw new ApiError('access_token is required', 422, 'missing_access_token')
+    const lower = token.toLowerCase()
+    if (lower.includes('invalid') || lower.includes('bad') || lower.includes('expired')) {
+      throw new ApiError('GitFlame rejected the access token.', 401, 'gitflame_auth_error')
+    }
+    const parsed = mockParseRepoUrl(repoUrl)
+    if (!parsed.id && !(repository && repository.id)) {
+      throw new ApiError('Enter a valid repository URL (owner/name).', 422, 'validation_error')
+    }
+    const conn = buildConnection({ token, repoUrl, repository, defaultBranch })
+    connections.set(conn.id, conn)
+    lastRepoWebUrl = conn.repository.web_url
+    return conn
+  },
+  async reconnectConnection(connectionId, { token, repoUrl, repository, defaultBranch } = {}) {
+    await delay(600)
+    if (!token || !token.trim()) throw new ApiError('access_token is required', 422, 'missing_access_token')
+    if (token.toLowerCase().includes('invalid')) throw new ApiError('GitFlame rejected the access token.', 401, 'gitflame_auth_error')
+    const existing = connections.get(connectionId)
+    const conn = buildConnection({
+      id: connectionId,
+      token,
+      repoUrl: repoUrl || (existing && existing.repo_url),
+      repository: repository || (existing && existing.repository),
+      defaultBranch: defaultBranch || (existing && existing.default_branch),
+    })
+    connections.set(conn.id, conn)
+    lastRepoWebUrl = conn.repository.web_url
+    return conn
+  },
+  async revokeConnection(connectionId) {
+    await delay(300)
+    const conn = connections.get(connectionId)
+    connections.delete(connectionId)
+    return conn ? { ...conn, token_status: 'revoked' } : null
+  },
+  async logout() {
+    await delay(150)
+    return null
   },
 
   // --- Recommendation flow ---
@@ -395,6 +490,43 @@ export const mockApi = {
     }
     if (!latest) throw new ApiError('code generation has not been queued for this issue', 409, 'code_generation_not_started')
     return taskView(latest)
+  },
+
+  // Apply the generated files to GitFlame: create a branch, commit and pull
+  // request. Mirrors POST /ai/issues/{id}/gitflame/apply and returns the contract
+  // with apply_status/commit_sha/pull_request_url. Idempotent once applied.
+  async applyToGitFlame(idOrIssueId) {
+    await delay(1000)
+    const session = resolveSession(idOrIssueId)
+    if (!session) throw new ApiError('issue session was not found', 404, 'session_not_found')
+    const contract = session.generatedFiles
+    if (!contract || !contract.files || !contract.files.length) {
+      throw new ApiError('code generation has not produced files to apply', 409, 'generated_files_not_ready')
+    }
+    // Demo hook: an issue titled with "apply-fail" simulates a GitFlame apply error.
+    if ((session.title || '').toLowerCase().includes('apply-fail')) {
+      contract.apply_status = 'failed'
+      contract.apply_error = 'GitFlame rejected the pull request (simulated).'
+      throw new ApiError('GitFlame rejected the pull request (simulated).', 502, 'gitflame_apply_error')
+    }
+    if (contract.apply_status === 'applied' && contract.pull_request_url) {
+      return { session_id: session.sessionId, issue_id: session.issueId, status: session.status, message: 'Generated files already applied to GitFlame.', generated_files_contract: contract }
+    }
+    const commitSha = Math.random().toString(16).slice(2, 9) + Math.random().toString(16).slice(2, 6)
+    const prNumber = 100 + Math.floor(Math.random() * 900)
+    const base = (lastRepoWebUrl || 'https://gitflametest.ru/demo/repo').replace(/\/$/, '')
+    contract.apply_status = 'applied'
+    contract.commit_sha = commitSha
+    contract.pull_request_id = String(prNumber)
+    contract.pull_request_url = `${base}/pulls/${prNumber}`
+    contract.applied_at = new Date().toISOString()
+    contract.base_branch = contract.base_branch || 'main'
+    contract.files = contract.files.map((f) => ({ ...f, status: 'applied' }))
+    session.status = 'applied'
+    return {
+      session_id: session.sessionId, issue_id: session.issueId, status: session.status,
+      message: 'Generated files applied to GitFlame.', generated_files_contract: contract,
+    }
   },
 
   async correctIssue(idOrIssueId, feedback) {

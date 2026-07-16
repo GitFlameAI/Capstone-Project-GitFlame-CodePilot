@@ -2,13 +2,14 @@
 // Landing "How it works" roadmap.
 //
 // Two tracks — Autogeneration and Recommendations — shown one at a time via a
-// toggle (like the old capability switcher, but now step-by-step). Steps
-// auto-advance; a progress bar fills along the connector toward the next circle
-// so the visitor can see when the next step will appear. When the last step of a
-// track is reached, the roadmap automatically switches to the other track, so a
-// visitor who does nothing sees the whole product tour. Clicking a step number or
-// a track button jumps there and briefly pauses auto-advance.
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+// sliding toggle. Steps auto-advance; a progress bar fills along the connector
+// toward the next circle. Timing is driven by a SINGLE timer whose remaining time
+// is tracked across pauses, and the CSS progress bar pauses/resumes on the same
+// events, so the bar and the step change stay in sync. Auto-advance can be paused
+// with the play/pause control (top-left) and also pauses while the cursor is over
+// the block. When a track ends it auto-switches to the other, so a visitor who
+// does nothing still sees the whole tour.
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import GfIcon from '../ui/GfIcon.vue'
 
 const AUTO_MS = 4200
@@ -40,8 +41,8 @@ const trackKeys = ['autogen', 'recommendations']
 
 const track = ref('autogen')
 const active = ref(0)
-const running = ref(true)
-let timer = null
+const autoOn = ref(true) // manual play/pause
+const hovering = ref(false)
 
 const steps = computed(() => tracks[track.value].steps)
 const current = computed(() => steps.value[active.value])
@@ -51,6 +52,36 @@ const reduceMotion =
   window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
+// Effective running state: auto-advance is on AND the cursor isn't hovering.
+const running = computed(() => autoOn.value && !hovering.value && !reduceMotion)
+
+let timer = null
+let startTs = 0
+let remaining = AUTO_MS
+
+function clearTimer() {
+  if (timer) {
+    clearTimeout(timer)
+    timer = null
+  }
+}
+function runTimer() {
+  clearTimer()
+  if (!running.value) return
+  startTs = Date.now()
+  timer = setTimeout(() => {
+    advance()
+    remaining = AUTO_MS
+    if (running.value) runTimer()
+  }, remaining)
+}
+function holdTimer() {
+  clearTimer()
+  if (startTs) remaining = Math.max(150, remaining - (Date.now() - startTs))
+}
+function resetStep() {
+  remaining = AUTO_MS
+}
 function advance() {
   if (active.value < steps.value.length - 1) {
     active.value += 1
@@ -59,54 +90,66 @@ function advance() {
     active.value = 0
   }
 }
-function start() {
-  if (reduceMotion) return
-  stop()
-  running.value = true
-  timer = setInterval(advance, AUTO_MS)
-}
-function stop() {
-  running.value = false
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
-}
-function pauseThenResume() {
-  stop()
-  if (!reduceMotion) setTimeout(start, AUTO_MS * 2)
+
+// Pause / resume the single timer whenever the effective running state flips.
+watch(running, (on) => {
+  if (on) runTimer()
+  else holdTimer()
+})
+
+function toggleAuto() {
+  autoOn.value = !autoOn.value
 }
 function selectTrack(t) {
   if (track.value !== t) {
     track.value = t
     active.value = 0
   }
-  pauseThenResume()
+  resetStep()
+  if (running.value) runTimer()
 }
 function selectStep(i) {
   active.value = i
-  pauseThenResume()
+  resetStep()
+  if (running.value) runTimer()
 }
 
-onMounted(start)
-onBeforeUnmount(stop)
+onMounted(() => {
+  if (running.value) runTimer()
+})
+onBeforeUnmount(clearTimer)
 </script>
 
 <template>
-  <div class="rm" :class="{ rm_paused: !running }" @mouseenter="stop" @mouseleave="start">
-    <!-- track toggle -->
-    <div class="rm__tabs" role="tablist" aria-label="Capabilities">
+  <div class="rm" :class="{ rm_paused: !running }" @mouseenter="hovering = true" @mouseleave="hovering = false">
+    <!-- top bar: play/pause + sliding track toggle -->
+    <div class="rm__top">
       <button
-        v-for="k in trackKeys"
-        :key="k"
-        class="rm__tab"
-        :class="{ rm__tab_on: track === k }"
-        role="tab"
-        :aria-selected="track === k"
-        @click="selectTrack(k)"
+        class="rm__pp"
+        :class="{ rm__pp_off: !autoOn }"
+        :aria-label="autoOn ? 'Pause auto-advance' : 'Resume auto-advance'"
+        :title="autoOn ? 'Pause auto-advance' : 'Resume auto-advance'"
+        @click="toggleAuto"
       >
-        <GfIcon :name="tracks[k].icon" :size="15" /> {{ tracks[k].label }}
+        <GfIcon :name="autoOn ? 'pause' : 'play'" :size="13" />
       </button>
+
+      <div class="rm__tabs" role="tablist" aria-label="Capabilities">
+        <span class="rm__pill" :class="{ rm__pill_right: track === 'recommendations' }" aria-hidden="true" />
+        <button
+          v-for="k in trackKeys"
+          :key="k"
+          class="rm__tab"
+          :class="{ rm__tab_on: track === k }"
+          role="tab"
+          :aria-selected="track === k"
+          @click="selectTrack(k)"
+        >
+          <GfIcon :name="tracks[k].icon" :size="15" /> <span class="rm__tab-label">{{ tracks[k].label }}</span>
+        </button>
+      </div>
+
+      <span class="rm__top-spacer" aria-hidden="true" />
     </div>
 
     <!-- numbered track with a flowing progress connector -->
@@ -229,24 +272,79 @@ onBeforeUnmount(stop)
 
 <style scoped>
 .rm {
+  position: relative;
   border: 1px solid var(--gf-line);
   border-radius: var(--gf-radius-lg);
   background: var(--gf-surface);
   box-shadow: var(--gf-shadow-sm);
-  padding: 18px 22px 20px;
+  padding: 16px 22px 20px;
 }
-.rm__tabs {
+
+/* top bar */
+.rm__top {
   display: flex;
-  gap: 4px;
-  padding: 4px;
-  margin: 0 auto 20px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.rm__pp {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--gf-line-2);
+  border-radius: 8px;
+  background: var(--gf-surface-2);
+  color: #9a90b3; /* dim grey-purple */
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+.rm__pp:hover {
+  color: var(--gf-accent);
+  border-color: var(--gf-purple);
+}
+.rm__pp_off {
+  background: var(--gf-purple-soft);
+  color: var(--gf-purple);
+}
+.rm__top-spacer {
+  flex: none;
+  width: 28px;
+}
+
+/* sliding track toggle */
+.rm__tabs {
+  position: relative;
+  display: flex;
+  gap: 0;
+  margin: 0 auto;
+  width: 100%;
   max-width: 420px;
+  padding: 4px;
   border: 1px solid var(--gf-line-2);
   border-radius: 999px;
   background: var(--gf-surface-2);
 }
+.rm__pill {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  height: calc(100% - 8px);
+  border-radius: 999px;
+  background: var(--gf-surface);
+  box-shadow: var(--gf-shadow-sm);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rm__pill_right {
+  transform: translateX(100%);
+}
 .rm__tab {
-  flex: 1;
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -260,16 +358,26 @@ onBeforeUnmount(stop)
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.18s ease, box-shadow 0.15s ease;
+}
+.rm__tab-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rm__tab_on {
-  background: var(--gf-surface);
   color: var(--gf-accent);
-  box-shadow: var(--gf-shadow-sm);
+}
+.rm__tab:not(.rm__tab_on):hover {
+  color: var(--gf-accent);
+  box-shadow: inset 0 0 0 1.5px var(--gf-purple);
 }
 .rm__tab :deep(.gf-icon) {
+  flex: none;
   color: currentColor;
 }
+
+/* numbered track */
 .rm__track {
   display: flex;
   align-items: flex-start;
@@ -367,6 +475,8 @@ onBeforeUnmount(stop)
 .rm__node_active .rm__caption {
   color: var(--gf-accent);
 }
+
+/* detail panel */
 .rm__panel {
   display: grid;
   grid-template-columns: 220px 1fr;
@@ -412,6 +522,8 @@ onBeforeUnmount(stop)
   line-height: 1.6;
   color: var(--gf-text-2);
 }
+
+/* scene primitives */
 .s-card { fill: var(--gf-surface); stroke: var(--gf-line-2); stroke-width: 2; }
 .s-card-2 { fill: var(--gf-purple-soft); stroke: var(--gf-purple); stroke-width: 2; }
 .s-line { fill: var(--gf-text-3); opacity: 0.55; }
@@ -438,6 +550,7 @@ onBeforeUnmount(stop)
 .s-conf-fill { fill: var(--gf-purple); }
 .s-arrow { fill: none; stroke: var(--gf-purple); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
 .s-plus { stroke: var(--gf-purple); stroke-width: 2.5; stroke-linecap: round; }
+
 .rm-fade-enter-active,
 .rm-fade-leave-active {
   transition: opacity 0.25s ease, transform 0.25s ease;
@@ -450,6 +563,7 @@ onBeforeUnmount(stop)
   opacity: 0;
   transform: translateY(-6px);
 }
+
 @media (max-width: 620px) {
   .rm__caption {
     display: none;
@@ -460,6 +574,32 @@ onBeforeUnmount(stop)
   }
   .rm__scene {
     height: 120px;
+  }
+}
+
+/* very narrow / high zoom: stack the toggle so long labels never overflow */
+@media (max-width: 440px) {
+  .rm__top {
+    flex-wrap: wrap;
+  }
+  .rm__top-spacer {
+    display: none;
+  }
+  .rm__tabs {
+    flex-direction: column;
+    gap: 4px;
+    border-radius: 14px;
+  }
+  .rm__pill {
+    display: none;
+  }
+  .rm__tab {
+    justify-content: flex-start;
+    padding: 0 12px;
+  }
+  .rm__tab_on {
+    background: var(--gf-surface);
+    box-shadow: var(--gf-shadow-sm);
   }
 }
 </style>

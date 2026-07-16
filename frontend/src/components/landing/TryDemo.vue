@@ -1,16 +1,21 @@
 <script setup>
 // "Try it yourself" — a tiny, self-contained interactive preview of the flow for
-// visitors who would rather click than read. It is deliberately a MOCK: no
-// backend, no repository, local timers only, clearly badged as a preview. It
-// mirrors the real flow's emphasis on USER CONTROL: you can edit the plan, and
-// approve / request a correction / reject it yourself.
+// visitors who would rather click than read. It is deliberately a MOCK (no
+// backend, no repository, local timers) and is clearly badged as a preview. It
+// reuses the SAME plan editor (MarkdownView, with a working Edit/Preview) and the
+// SAME "Request correction" interaction as the real Autogeneration tab, so the
+// preview matches the product and emphasises that YOU approve.
 import { ref, onBeforeUnmount } from 'vue'
 import GfIcon from '../ui/GfIcon.vue'
+import GfButton from '../ui/GfButton.vue'
+import MarkdownView from '../MarkdownView.vue'
 
 // step: idle -> planning -> plan -> correcting -> generating -> done -> rejected
 const step = ref('idle')
-const view = ref('preview') // preview | edit
-const revised = ref(false)
+const planMode = ref('preview')
+const revision = ref(1)
+const showCorrect = ref(false)
+const correctionText = ref('')
 let timer = null
 
 const basePlan = `# Implementation Plan
@@ -20,8 +25,8 @@ Add pagination to the repository list endpoint.
 
 ## Steps
 1. Read the current handler and confirm the response shape.
-2. Parse ?limit and ?offset with safe defaults.
-3. Return items plus a total count for the UI.`
+2. Parse \`?limit\` and \`?offset\` with safe defaults.
+3. Return \`items\` plus a \`total\` count for the UI.`
 
 const planText = ref(basePlan)
 
@@ -39,15 +44,19 @@ function generate() {
   step.value = 'planning'
   timer = setTimeout(() => (step.value = 'plan'), 1200)
 }
-function requestCorrection() {
+function submitCorrection() {
+  const note = correctionText.value.trim()
+  if (!note) return
   clear()
   step.value = 'correcting'
   timer = setTimeout(() => {
-    planText.value = basePlan + '\n4. Add a test covering the empty and last page.'
-    revised.value = true
-    view.value = 'preview'
+    revision.value += 1
+    planText.value = `${planText.value}\n\n## Revision ${revision.value}\nApplied your note: _${note}_`
+    correctionText.value = ''
+    showCorrect.value = false
+    planMode.value = 'preview'
     step.value = 'plan'
-  }, 1200)
+  }, 1100)
 }
 function approve() {
   clear()
@@ -61,8 +70,10 @@ function reject() {
 function reset() {
   clear()
   planText.value = basePlan
-  revised.value = false
-  view.value = 'preview'
+  planMode.value = 'preview'
+  revision.value = 1
+  showCorrect.value = false
+  correctionText.value = ''
   step.value = 'idle'
 }
 onBeforeUnmount(clear)
@@ -85,34 +96,36 @@ onBeforeUnmount(clear)
 
       <!-- idle -->
       <div v-if="step === 'idle'" class="try__cta">
-        <button class="try__btn" @click="generate"><GfIcon name="sparkles" :size="15" /> Generate plan</button>
+        <GfButton variant="primary" @click="generate"><GfIcon name="sparkles" :size="15" /> Generate plan</GfButton>
       </div>
 
-      <!-- planning / correcting / generating -->
+      <!-- loading states -->
       <div v-else-if="step === 'planning'" class="try__loading"><span class="try__spin" /> Drafting a plan…</div>
       <div v-else-if="step === 'correcting'" class="try__loading"><span class="try__spin" /> Revising the plan…</div>
       <div v-else-if="step === 'generating'" class="try__loading"><span class="try__spin" /> Generating code…</div>
 
-      <!-- plan: you review, edit and decide -->
+      <!-- plan: you review, edit and decide (same editor + correction as the real tab) -->
       <template v-else-if="step === 'plan'">
-        <div class="try__plan-head">
-          <span class="try__plan-status">
-            <GfIcon name="check" :size="13" /> {{ revised ? 'Plan revised' : 'Plan generated' }}
-          </span>
-          <div class="try__viewtabs">
-            <button class="try__viewtab" :class="{ 'try__viewtab_on': view === 'edit' }" @click="view = 'edit'"><GfIcon name="pencil" :size="12" /> Edit</button>
-            <button class="try__viewtab" :class="{ 'try__viewtab_on': view === 'preview' }" @click="view = 'preview'"><GfIcon name="eye" :size="12" /> Preview</button>
+        <div class="try__planhead">
+          <span class="try__plan-status"><GfIcon name="check" :size="13" /> Plan generated</span>
+          <span v-if="revision > 1" class="try__rev">revision {{ revision }}</span>
+        </div>
+
+        <MarkdownView v-model="planText" v-model:mode="planMode" :rows="10" />
+
+        <div v-if="showCorrect" class="try__correctbox">
+          <textarea v-model="correctionText" class="try__correction mono" rows="2" placeholder="What should change in the plan?"></textarea>
+          <div class="try__correctbox-actions">
+            <GfButton variant="secondary" size="s" @click="showCorrect = false">Cancel</GfButton>
+            <GfButton variant="primary" size="s" @click="submitCorrection">Submit correction</GfButton>
           </div>
         </div>
 
-        <textarea v-if="view === 'edit'" v-model="planText" class="try__editor mono" spellcheck="false"></textarea>
-        <pre v-else class="try__plan">{{ planText }}</pre>
-
         <p class="try__control-note"><GfIcon name="info" :size="12" /> You are in control — approve, ask for a correction, or reject.</p>
-        <div class="try__cta try__cta_row">
-          <button class="try__btn" @click="approve"><GfIcon name="check" :size="15" /> Approve &amp; generate code</button>
-          <button class="try__btn try__btn_ghost" @click="requestCorrection"><GfIcon name="refresh" :size="14" /> Request correction</button>
-          <button class="try__btn try__btn_reject" @click="reject">Reject</button>
+        <div class="try__actions">
+          <GfButton variant="primary" @click="approve"><GfIcon name="check" :size="16" /> Approve &amp; generate code</GfButton>
+          <GfButton variant="secondary" @click="showCorrect = !showCorrect"><GfIcon name="refresh" :size="15" /> Request correction</GfButton>
+          <GfButton variant="danger" @click="reject">Reject</GfButton>
         </div>
       </template>
 
@@ -122,7 +135,7 @@ onBeforeUnmount(clear)
           <p class="try__rejected-head"><GfIcon name="close" :size="15" /> Plan rejected — nothing was generated.</p>
         </div>
         <div class="try__cta">
-          <button class="try__btn try__btn_ghost" @click="reset"><GfIcon name="refresh" :size="14" /> Start over</button>
+          <GfButton variant="secondary" @click="reset"><GfIcon name="refresh" :size="14" /> Start over</GfButton>
         </div>
       </template>
 
@@ -139,7 +152,7 @@ onBeforeUnmount(clear)
           <p class="try__branch"><GfIcon name="branch" :size="13" /> branch <span class="mono">ai/ISSUE-101-add-pagination</span> · PR ready for review</p>
         </div>
         <div class="try__cta">
-          <button class="try__btn try__btn_ghost" @click="reset"><GfIcon name="refresh" :size="14" /> Run it again</button>
+          <GfButton variant="secondary" @click="reset"><GfIcon name="refresh" :size="14" /> Run it again</GfButton>
         </div>
       </template>
     </div>
@@ -221,36 +234,6 @@ onBeforeUnmount(clear)
   justify-content: center;
   flex-wrap: wrap;
 }
-.try__cta_row { gap: 10px; }
-.try__btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 38px;
-  padding: 0 16px;
-  border: 0;
-  border-radius: var(--gf-radius);
-  background: var(--gf-purple);
-  color: #fff;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-.try__btn:hover { background: var(--gf-purple-hover); }
-.try__btn_ghost {
-  background: transparent;
-  border: 1px solid var(--gf-line-2);
-  color: var(--gf-text-2);
-}
-.try__btn_ghost:hover { background: var(--gf-surface-3); color: var(--gf-text); }
-.try__btn_reject {
-  background: transparent;
-  border: 1px solid #e2b4b4;
-  color: #c0392b;
-}
-.try__btn_reject:hover { background: #fdecec; border-color: #c0392b; }
 .try__loading {
   display: flex;
   align-items: center;
@@ -269,10 +252,9 @@ onBeforeUnmount(clear)
   animation: try-spin 0.7s linear infinite;
 }
 @keyframes try-spin { to { transform: rotate(360deg); } }
-.try__plan-head {
+.try__planhead {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
 }
@@ -287,59 +269,33 @@ onBeforeUnmount(clear)
   font-size: 11.5px;
   font-weight: 700;
 }
-.try__viewtabs {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid var(--gf-line-2);
-  border-radius: 8px;
-  background: var(--gf-surface-2);
-}
-.try__viewtab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--gf-text-2);
-  font: inherit;
+.try__rev {
   font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
+  color: var(--gf-text-3);
 }
-.try__viewtab_on {
-  background: var(--gf-surface);
-  color: var(--gf-accent);
-  box-shadow: var(--gf-shadow-sm);
+.try__correctbox {
+  display: grid;
+  gap: 8px;
 }
-.try__plan {
-  margin: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--gf-line);
-  border-radius: var(--gf-radius);
-  background: var(--gf-surface);
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--gf-text);
-  white-space: pre-wrap;
-  max-height: 190px;
-  overflow: auto;
-}
-.try__editor {
+.try__correction {
   width: 100%;
-  min-height: 160px;
-  padding: 14px 16px;
-  border: 1px solid var(--gf-purple);
+  padding: 10px 12px;
+  border: 1px solid var(--gf-line-2);
   border-radius: var(--gf-radius);
   background: var(--gf-surface);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 12.5px;
+  line-height: 1.5;
   color: var(--gf-text);
   resize: vertical;
   outline: none;
+}
+.try__correction:focus {
+  border-color: var(--gf-purple);
+}
+.try__correctbox-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .try__control-note {
   display: flex;
@@ -350,6 +306,11 @@ onBeforeUnmount(clear)
   color: var(--gf-text-3);
 }
 .try__control-note :deep(.gf-icon) { color: var(--gf-purple); }
+.try__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 .try__rejected {
   padding: 14px 16px;
   border: 1px solid #e2b4b4;

@@ -8,8 +8,9 @@
 // repository's .ai.yml. Clicking a locked tab nudges the user to the Config tab.
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { session, setToken } from '../store/session.js'
-import { USING_MOCK } from '../api/index.js'
+import { session, updateConnection, markConnected } from '../store/session.js'
+import { api } from '../api/index.js'
+import { describeError } from '../api/errors.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
 import RepositoryTab from '../components/workspace/RepositoryTab.vue'
@@ -29,17 +30,36 @@ watch(active, async () => {
   window.scrollTo({ top: 0, behavior: 'auto' })
 })
 
-// --- access token gate (the token is never persisted, so a refresh needs it) ---
+// --- reconnect gate ------------------------------------------------------
+// The secure HttpOnly session cookie survives a page refresh, so a refresh does
+// NOT ask for the token again. The gate only appears when a backend call reports
+// the session / stored token is expired or revoked (401/403), i.e.
+// session.tokenStatus === 'invalid'. Re-entering the token calls the backend to
+// re-establish the connection (PUT reconnect, or POST connect as a fallback).
 const tokenInput = ref('')
 const showToken = ref(false)
-// In mock mode there is no real auth, so a restored session doesn't need a token.
-const tokenRequired = computed(() => !USING_MOCK && session.tokenStatus !== 'ok')
+const reconnecting = ref(false)
+const reconnectError = ref(null)
+const tokenRequired = computed(() => session.connected && session.tokenStatus === 'invalid')
 
-function submitToken() {
+async function submitToken() {
   const t = tokenInput.value.trim()
   if (!t) return
-  setToken(t)
-  tokenInput.value = ''
+  reconnecting.value = true
+  reconnectError.value = null
+  try {
+    const opts = { token: t, repoUrl: session.repo.url, defaultBranch: session.repo.defaultBranch }
+    const conn = session.connectionId
+      ? await api.reconnectConnection(session.connectionId, opts)
+      : await api.createConnection(opts)
+    updateConnection(conn)
+    markConnected()
+    tokenInput.value = ''
+  } catch (e) {
+    reconnectError.value = describeError(e)
+  } finally {
+    reconnecting.value = false
+  }
 }
 
 onMounted(() => {
@@ -47,10 +67,9 @@ onMounted(() => {
     router.replace('/codepilot')
     return
   }
-  // Where to land: no saved config yet → Config (you must set it up first);
-  // otherwise open the capability chosen on the landing screen.
-  if (!session.configExists) active.value = 'config'
-  else active.value = session.intent === 'recommendations' ? 'recommendations' : 'autogen'
+  // Always open on Config: a first-time user must set it up, and a returning user
+  // often wants to review it before generating or fetching recommendations.
+  active.value = 'config'
 })
 
 const tabs = computed(() => [
@@ -106,7 +125,7 @@ function goTo(id) {
       <div class="disclaimer">
         <GfIcon name="info" :size="15" />
         <span>
-          CodePilot uses AI. Plans, generated code and advices may contain mistakes —
+          CodePilot uses AI. Plans, generated code and recommendations may contain mistakes —
           <strong>trust, but verify</strong> before you apply them.
         </span>
       </div>
@@ -128,14 +147,16 @@ function goTo(id) {
       <transition name="lockfade">
         <p v-if="lockHint" class="lockmsg">
           <GfIcon name="lock" :size="14" />
-          Save a configuration in the <strong>Config</strong> tab to unlock this.
+          Save a configuration in the
+          <button type="button" class="lockmsg__link" @click="goTo('config')">Config</button>
+          tab to unlock this.
         </p>
       </transition>
 
       <!-- Tab content -->
       <div class="content">
         <RepositoryTab v-if="active === 'repository'" @go="goTo" />
-        <ConfigTab v-else-if="active === 'config'" @saved="goTo('autogen')" />
+        <ConfigTab v-else-if="active === 'config'" @go="goTo" />
         <AutogenTab v-else-if="active === 'autogen'" />
         <RecommendationsTab v-else-if="active === 'recommendations'" @go="goTo" />
       </div>
@@ -146,18 +167,14 @@ function goTo(id) {
          re-enter it. The overlay cannot be dismissed until a token is provided. -->
     <div v-if="tokenRequired" class="tokgate">
       <div class="tokgate__card">
-        <div class="tokgate__icon" :class="{ 'tokgate__icon_err': session.tokenStatus === 'invalid' }">
-          <GfIcon :name="session.tokenStatus === 'invalid' ? 'alert' : 'key'" :size="22" />
+        <div class="tokgate__icon tokgate__icon_err">
+          <GfIcon name="alert" :size="22" />
         </div>
-        <h2 class="tokgate__title">
-          {{ session.tokenStatus === 'invalid' ? 'Access token problem' : 'Enter your access token' }}
-        </h2>
-        <p v-if="session.tokenStatus === 'invalid'" class="tokgate__err">
-          {{ session.tokenError || 'The access token is invalid or has expired.' }} Please enter a valid token to continue.
-        </p>
-        <p v-else class="tokgate__sub">
-          Your workspace for <strong>{{ session.repo.owner }}/{{ session.repo.name }}</strong> was restored,
-          but the access token isn’t kept after a refresh. Re-enter it to keep using CodePilot.
+        <h2 class="tokgate__title">Reconnect your repository</h2>
+        <p class="tokgate__err">
+          {{ session.tokenError || 'Your session or access token has expired.' }}
+          Enter a valid GitFlame access token for
+          <strong>{{ session.repo.owner }}/{{ session.repo.name }}</strong> to continue.
         </p>
 
         <label class="tokgate__field">
@@ -178,8 +195,12 @@ function goTo(id) {
           </div>
         </label>
 
-        <GfButton variant="primary" size="l" class="tokgate__btn" :disabled="!tokenInput.trim()" @click="submitToken">
-          Continue
+        <p v-if="reconnectError" class="tokgate__err tokgate__err_inline">
+          {{ reconnectError.message }}
+        </p>
+
+        <GfButton variant="primary" size="l" class="tokgate__btn" :loading="reconnecting" :disabled="!tokenInput.trim()" @click="submitToken">
+          Reconnect
         </GfButton>
         <button class="tokgate__exit" @click="router.push('/codepilot')">Back to connect screen</button>
       </div>
@@ -330,15 +351,28 @@ function goTo(id) {
 .lockmsg {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  max-width: var(--ws-narrow);
+  width: fit-content;
+  max-width: 100%;
   margin: 12px auto 0;
-  padding: 8px 12px;
+  padding: 8px 14px;
   border-radius: 10px;
   background: var(--gf-amber-bg);
   color: var(--gf-amber);
   font-size: 12.5px;
+}
+.lockmsg__link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--gf-amber);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.lockmsg__link:hover {
+  color: var(--gf-accent);
 }
 .lockfade-enter-active,
 .lockfade-leave-active {
@@ -403,6 +437,10 @@ function goTo(id) {
 }
 .tokgate__err {
   color: #c0392b;
+}
+.tokgate__err_inline {
+  margin: -6px 0 14px;
+  font-size: 12.5px;
 }
 .tokgate__sub strong {
   color: var(--gf-text);
