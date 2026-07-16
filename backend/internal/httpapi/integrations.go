@@ -14,6 +14,16 @@ type GitFlameSource interface {
 	ApplyGeneratedFiles(context.Context, domain.RepositoryMetadata, domain.GeneratedFilesContract) (domain.GitFlameApplyResult, error)
 }
 
+type GitFlameRepositoryReader interface {
+	RepositoryTree(context.Context, string, string) ([]GitFlameTreeEntry, error)
+	RepositoryIssues(context.Context, string) ([]domain.IssuePayload, error)
+}
+
+type GitFlameTreeEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
 type RecommendationAnalyzer interface {
 	AnalyzeRecommendations(context.Context, string, []domain.RepositoryFile) (string, []domain.RecommendationCard, error)
 }

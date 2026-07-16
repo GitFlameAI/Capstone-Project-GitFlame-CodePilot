@@ -68,12 +68,9 @@ async function request(method, path, body) {
 
 // Build the request body for POST/PUT connection. The backend's authoritative
 // contract only needs { access_token, repo_url }, and it parses the repo_url to
-// derive the repository id. We ALSO include a parsed `repository` object so the
-// same call works against an earlier backend build that requires repository.id;
-// the backend ignores the extra fields it does not need.
-function connectionBody({ token, repoUrl, repository, defaultBranch }) {
+// derive authoritative repository metadata through GitFlame.
+function connectionBody({ token, repoUrl, defaultBranch }) {
   const body = { access_token: token, repo_url: repoUrl }
-  if (repository && repository.id) body.repository = repository
   if (defaultBranch) body.default_branch = defaultBranch
   return body
 }
@@ -101,6 +98,13 @@ export const httpApi = {
     request('DELETE', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}`),
   // DELETE /auth/session — end the server session (clears the cookie).
   logout: () => request('DELETE', '/auth/session'),
+  getRepositoryTree: (connectionId, ref) =>
+    request(
+      'GET',
+      `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/tree${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`,
+    ),
+  listRepositoryIssues: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/issues`),
 
   // --- Recommendation flow ---
   analyzeRepository: (repositoryId, payload) =>

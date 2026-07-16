@@ -12,7 +12,7 @@
 // editable before approval; approval produces a generated-files contract whose
 // file operations follow {path, action, description} (generated_files_contract.md).
 import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { api, ApiError, pollTask, USING_MOCK } from '../../api/index.js'
+import { api, ApiError, pollTask } from '../../api/index.js'
 import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
 import GfIcon from '../ui/GfIcon.vue'
@@ -26,10 +26,9 @@ const issueSource = ref('new') // existing | new
 
 // issue dropdown (existing issues)
 const issueMenuOpen = ref(false)
-// Existing issues come from the session (GitFlame supplies them in real mode; the
-// mock seeds them and a simulated webhook push can add new ones live). Against a
-// real backend there is no list-issues endpoint yet, so the picker stays empty.
-const issues = computed(() => (USING_MOCK ? session.issues : []))
+// Existing issues come from GitFlame through the backend. The mock API returns
+// the same response shape for local demos.
+const issues = computed(() => session.issues)
 
 const analyzing = ref(false)
 const approveLoading = ref(false)

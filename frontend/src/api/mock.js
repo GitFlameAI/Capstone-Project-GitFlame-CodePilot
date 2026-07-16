@@ -15,7 +15,7 @@
 // "fail" or "timeout".
 
 import { ApiError } from './client.js'
-import { parseYamlToForm } from '../data/demo.js'
+import { parseYamlToForm, demoFileTree, demoIssues } from '../data/demo.js'
 
 const LATENCY = 600
 const delay = (ms = LATENCY) => new Promise((r) => setTimeout(r, ms))
@@ -326,6 +326,14 @@ export const mockApi = {
     await delay(150)
     return null
   },
+  async getRepositoryTree() {
+    await delay(350)
+    return { tree: flattenMockTree(demoFileTree(false)) }
+  },
+  async listRepositoryIssues() {
+    await delay(350)
+    return { issues: demoIssues.map((issue) => ({ ...issue })) }
+  },
 
   // --- Recommendation flow ---
   async analyzeRepository(repositoryId, payload) {
@@ -556,4 +564,14 @@ export const mockApi = {
     session.status = 'rejected'
     return { session_id: session.sessionId, issue_id: session.issueId, status: session.status, message: 'Plan rejected.' }
   },
+}
+
+function flattenMockTree(nodes, base = '') {
+  const entries = []
+  for (const node of nodes) {
+    const path = base ? `${base}/${node.name}` : node.name
+    entries.push({ path, type: node.type })
+    if (node.children) entries.push(...flattenMockTree(node.children, path))
+  }
+  return entries
 }

@@ -101,6 +101,8 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("POST /integrations/gitflame/connections", s.saveGitFlameConnection)
 	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
 	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
+	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
+	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
 	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
 	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
 	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
@@ -121,12 +123,13 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	return s
 }
 func (s *Server) Router() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/docs" && !strings.HasPrefix(r.URL.Path, "/swagger/") {
 			w.Header().Set("Content-Type", "application/json")
 		}
 		s.router.ServeHTTP(w, r)
 	})
+	return requestLogger(handler)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

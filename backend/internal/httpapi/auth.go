@@ -285,6 +285,47 @@ func (s *Server) gitFlameSourceForRepository(r *http.Request, repositoryID strin
 	return NewGitFlameClient(s.gitflameBaseURL, accessToken, s.gitflameTimeout), connection, nil
 }
 
+func (s *Server) gitFlameReaderForConnection(r *http.Request, connectionID string) (GitFlameRepositoryReader, *domain.GitFlameConnection, error) {
+	session, err := s.authenticate(r)
+	if err != nil {
+		return nil, nil, &IntegrationError{Status: http.StatusUnauthorized, Code: "unauthorized", Detail: "valid application session cookie is required"}
+	}
+	connection, err := s.store.UserGitFlameConnection(session.User.ID, connectionID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, nil, &IntegrationError{Status: http.StatusNotFound, Code: "connection_not_found", Detail: "GitFlame connection was not found"}
+		}
+		return nil, nil, err
+	}
+	if connection.RevokedAt != nil || (connection.TokenStatus != "" && connection.TokenStatus != "active") {
+		return nil, nil, &IntegrationError{Status: http.StatusUnauthorized, Code: "gitflame_token_inactive", Detail: "GitFlame connection token is not active"}
+	}
+	if connection.TokenExpiresAt != nil && !connection.TokenExpiresAt.After(time.Now().UTC()) {
+		return nil, nil, &IntegrationError{Status: http.StatusUnauthorized, Code: "gitflame_token_expired", Detail: "GitFlame connection token is expired"}
+	}
+
+	if s.credentialCipher == nil || strings.TrimSpace(s.gitflameBaseURL) == "" {
+		reader, ok := s.gitflame.(GitFlameRepositoryReader)
+		if !ok {
+			return nil, nil, &IntegrationError{Status: http.StatusServiceUnavailable, Code: "gitflame_client_unavailable", Detail: "GitFlame repository client is not configured"}
+		}
+		return reader, connection, nil
+	}
+	if len(connection.TokenMaterial.Ciphertext) == 0 || len(connection.TokenMaterial.Nonce) == 0 || connection.TokenMaterial.KeyVersion == 0 {
+		return nil, nil, &IntegrationError{Status: http.StatusUnauthorized, Code: "gitflame_reauth_required", Detail: "GitFlame connection must be reconnected before use"}
+	}
+	accessToken, err := s.credentialCipher.Decrypt(
+		connection.TokenMaterial.Ciphertext,
+		connection.TokenMaterial.Nonce,
+		connection.TokenMaterial.KeyVersion,
+		credentialAAD(session.User.ID, connection.Repository.ID),
+	)
+	if err != nil {
+		return nil, nil, &IntegrationError{Status: http.StatusUnauthorized, Code: "gitflame_reauth_required", Detail: "GitFlame connection token could not be decrypted"}
+	}
+	return NewGitFlameClient(s.gitflameBaseURL, accessToken, s.gitflameTimeout), connection, nil
+}
+
 func (s *Server) authenticate(r *http.Request) (*domain.AppSession, error) {
 	cookie, err := r.Cookie(s.sessionCookie)
 	if err != nil {

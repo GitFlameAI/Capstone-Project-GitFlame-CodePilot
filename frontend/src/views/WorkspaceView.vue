@@ -8,9 +8,17 @@
 // repository's .ai.yml. Clicking a locked tab nudges the user to the Config tab.
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { session, updateConnection, markConnected } from '../store/session.js'
+import {
+  session,
+  updateConnection,
+  markConnected,
+  beginRepositoryDataLoad,
+  setRepositoryData,
+  failRepositoryDataLoad,
+} from '../store/session.js'
 import { api } from '../api/index.js'
 import { describeError } from '../api/errors.js'
+import { buildRepositoryTree } from '../utils/repositoryTree.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
 import RepositoryTab from '../components/workspace/RepositoryTab.vue'
@@ -42,6 +50,29 @@ const reconnecting = ref(false)
 const reconnectError = ref(null)
 const tokenRequired = computed(() => session.connected && session.tokenStatus === 'invalid')
 
+async function loadRepositoryData() {
+  if (!session.connectionId) return
+  beginRepositoryDataLoad()
+  try {
+    const treeResponse = await api.getRepositoryTree(
+      session.connectionId,
+      session.repo.defaultBranch,
+    )
+    let issuesResponse = { issues: [] }
+    try {
+      issuesResponse = await api.listRepositoryIssues(session.connectionId)
+    } catch {
+      // Some GitFlame installations do not expose an issues collection yet.
+    }
+    setRepositoryData(
+      buildRepositoryTree(treeResponse?.tree || []),
+      issuesResponse?.issues || [],
+    )
+  } catch (e) {
+    failRepositoryDataLoad(describeError(e).message)
+  }
+}
+
 async function submitToken() {
   const t = tokenInput.value.trim()
   if (!t) return
@@ -54,6 +85,7 @@ async function submitToken() {
       : await api.createConnection(opts)
     updateConnection(conn)
     markConnected()
+    await loadRepositoryData()
     tokenInput.value = ''
   } catch (e) {
     reconnectError.value = describeError(e)
@@ -62,7 +94,7 @@ async function submitToken() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!session.connected) {
     router.replace('/codepilot')
     return
@@ -70,6 +102,7 @@ onMounted(() => {
   // Always open on Config: a first-time user must set it up, and a returning user
   // often wants to review it before generating or fetching recommendations.
   active.value = 'config'
+  await loadRepositoryData()
 })
 
 const tabs = computed(() => [
@@ -155,7 +188,7 @@ function goTo(id) {
 
       <!-- Tab content -->
       <div class="content">
-        <RepositoryTab v-if="active === 'repository'" @go="goTo" />
+        <RepositoryTab v-if="active === 'repository'" @go="goTo" @reload-repository="loadRepositoryData" />
         <ConfigTab v-else-if="active === 'config'" @go="goTo" />
         <AutogenTab v-else-if="active === 'autogen'" />
         <RecommendationsTab v-else-if="active === 'recommendations'" @go="goTo" />
