@@ -1,4 +1,4 @@
-INSERT INTO repositories (
+fisINSERT INTO repositories (
     id,
     external_id,
     name,
