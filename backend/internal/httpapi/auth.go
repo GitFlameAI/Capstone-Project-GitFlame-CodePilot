@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -149,15 +150,26 @@ func (s *Server) connectionFromRequest(ctx context.Context, user domain.AppUser,
 	if strings.TrimSpace(req.AccessToken) == "" {
 		return domain.GitFlameConnection{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "missing_access_token", Detail: "access_token is required"}
 	}
-	if strings.TrimSpace(req.Repository.ID) == "" {
-		return domain.GitFlameConnection{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "missing_repository_id", Detail: "repository.id is required"}
-	}
 	profile, err := s.validateGitFlameToken(ctx, req.AccessToken)
 	if err != nil {
 		return domain.GitFlameConnection{}, err
 	}
 	if profile.ID != "" && user.GitFlameUserID != "" && profile.ID != user.GitFlameUserID {
 		return domain.GitFlameConnection{}, &IntegrationError{Status: http.StatusForbidden, Code: "gitflame_user_mismatch", Detail: "GitFlame token belongs to another user"}
+	}
+	if strings.TrimSpace(req.Repository.ID) == "" {
+		resolved, err := s.resolveConnectionRepository(ctx, req.AccessToken, req.RepoURL)
+		if err != nil {
+			return domain.GitFlameConnection{}, err
+		}
+		req.Repository = resolved.Metadata
+		req.RepoURL = resolved.RepoURL
+	}
+	if strings.TrimSpace(req.Repository.ID) == "" {
+		return domain.GitFlameConnection{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "missing_repository_id", Detail: "repository.id or repo_url is required"}
+	}
+	if strings.TrimSpace(req.RepoURL) == "" {
+		req.RepoURL = req.Repository.WebURL
 	}
 	defaultBranch := req.DefaultBranch
 	if defaultBranch == "" {
@@ -177,6 +189,26 @@ func (s *Server) connectionFromRequest(ctx context.Context, user domain.AppUser,
 		TokenMaterial: domain.GitFlameTokenMaterial{Ciphertext: ciphertext, Nonce: nonce, KeyVersion: keyVersion},
 		TokenLast4:    security.TokenLast4(req.AccessToken), TokenStatus: "active", Scopes: req.Scopes,
 		TokenExpiresAt: req.TokenExpiresAt, LastValidatedAt: &now,
+	}, nil
+}
+
+func (s *Server) resolveConnectionRepository(ctx context.Context, accessToken, repoURL string) (resolvedGitFlameRepository, error) {
+	client := NewGitFlameClient(s.gitflameBaseURL, accessToken, s.gitflameTimeout)
+	if client != nil {
+		return client.ResolveRepository(ctx, repoURL)
+	}
+	parsed, err := parseGitFlameRepositoryURL(repoURL)
+	if err != nil {
+		return resolvedGitFlameRepository{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repo_url", Detail: err.Error()}
+	}
+	return resolvedGitFlameRepository{
+		Metadata: domain.RepositoryMetadata{
+			ID:            parsed.Path,
+			Name:          path.Base(parsed.Path),
+			DefaultBranch: "main",
+			WebURL:        parsed.WebURL,
+		},
+		RepoURL: parsed.WebURL,
 	}, nil
 }
 

@@ -39,6 +39,7 @@ Current Sprint 4 Go backend includes:
 - approval can include an edited `plan_markdown`; backend validates and sends that exact final plan to code generation
 - GitFlame access tokens are never stored on the frontend; the browser receives only an HttpOnly application session cookie
 - GitFlame repository connections are owned by `app_users` and store AES-GCM token ciphertext, nonce, key version, scopes, expiration, validation, and revocation metadata
+- GitFlame connection setup accepts a user-facing `repo_url`; backend strips view suffixes like `/code`, resolves repository metadata when possible, and stores the resulting repository id/path
 - GitFlame webhook ingestion can fetch `.ai.yml`, repository tree, and file contents through `GITFLAME_BASE_URL`
 - generated file operations can be applied back to GitFlame through the saved per-user connection, creating a branch, commit, pull request, and saved `pull_request_url`
 - repository recommendations are generated through the external recommendation service and persisted without a fallback card

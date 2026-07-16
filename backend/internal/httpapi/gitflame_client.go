@@ -43,6 +43,11 @@ type GitFlameUserProfile struct {
 	Email    string `json:"email"`
 }
 
+type resolvedGitFlameRepository struct {
+	Metadata domain.RepositoryMetadata
+	RepoURL  string
+}
+
 func NewGitFlameClient(baseURL, apiKey string, timeout time.Duration) *GitFlameClient {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil
@@ -168,6 +173,35 @@ func (c *GitFlameClient) CurrentUser(ctx context.Context) (GitFlameUserProfile, 
 		lastErr = &IntegrationError{Status: http.StatusUnauthorized, Code: "invalid_gitflame_token", Detail: "GitFlame token could not be validated"}
 	}
 	return GitFlameUserProfile{}, lastErr
+}
+
+func (c *GitFlameClient) ResolveRepository(ctx context.Context, rawURL string) (resolvedGitFlameRepository, error) {
+	parsed, err := parseGitFlameRepositoryURL(rawURL)
+	if err != nil {
+		return resolvedGitFlameRepository{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repo_url", Detail: err.Error()}
+	}
+	fallback := resolvedGitFlameRepository{
+		Metadata: domain.RepositoryMetadata{
+			ID:            parsed.Path,
+			Name:          path.Base(parsed.Path),
+			DefaultBranch: "main",
+			WebURL:        parsed.WebURL,
+		},
+		RepoURL: parsed.WebURL,
+	}
+	for _, endpoint := range []string{
+		"/api/v1/repositories/" + url.PathEscape(parsed.Path),
+		"/api/v1/projects/" + url.PathEscape(parsed.Path),
+		"/api/v1/repos/" + url.PathEscape(parsed.Path),
+	} {
+		var response map[string]any
+		if err := c.getJSON(ctx, endpoint, "", &response); err != nil {
+			continue
+		}
+		metadata := repositoryMetadataFromGitFlameResponse(response, fallback.Metadata)
+		return resolvedGitFlameRepository{Metadata: metadata, RepoURL: firstNonEmpty(metadata.WebURL, fallback.RepoURL)}, nil
+	}
+	return fallback, nil
 }
 
 func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) error {
@@ -360,6 +394,85 @@ func firstString(document map[string]any, keys ...string) string {
 					return fmt.Sprint(typed)
 				}
 			}
+		}
+	}
+	return ""
+}
+
+func repositoryMetadataFromGitFlameResponse(response map[string]any, fallback domain.RepositoryMetadata) domain.RepositoryMetadata {
+	metadata := fallback
+	if value := firstString(response, "id", "repository.id", "data.id"); value != "" {
+		metadata.ID = value
+	}
+	if value := firstString(response, "name", "path", "repository.name", "repository.path", "data.name", "data.path"); value != "" {
+		metadata.Name = value
+	}
+	if value := firstString(response, "default_branch", "defaultBranch", "repository.default_branch", "data.default_branch"); value != "" {
+		metadata.DefaultBranch = value
+	}
+	if value := firstString(response, "web_url", "html_url", "url", "repository.web_url", "data.web_url"); value != "" {
+		metadata.WebURL = value
+	}
+	if value := firstString(response, "commit_sha", "sha", "default_branch_sha", "repository.commit_sha", "data.commit_sha"); value != "" {
+		metadata.CommitSHA = value
+	}
+	if metadata.DefaultBranch == "" {
+		metadata.DefaultBranch = "main"
+	}
+	return metadata
+}
+
+type parsedGitFlameRepositoryURL struct {
+	Path   string
+	WebURL string
+}
+
+func parseGitFlameRepositoryURL(rawURL string) (parsedGitFlameRepositoryURL, error) {
+	value := strings.TrimSpace(rawURL)
+	if value == "" {
+		return parsedGitFlameRepositoryURL{}, errors.New("repo_url is required when repository.id is empty")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		trimmed := strings.Trim(value, "/")
+		trimmed = strings.TrimSuffix(trimmed, ".git")
+		trimmed = stripRepositoryViewSuffix(trimmed)
+		if strings.Count(trimmed, "/") < 1 {
+			return parsedGitFlameRepositoryURL{}, errors.New("repo_url must be a GitFlame repository URL or owner/repository path")
+		}
+		return parsedGitFlameRepositoryURL{Path: trimmed, WebURL: ""}, nil
+	}
+	repoPath := strings.Trim(parsed.EscapedPath(), "/")
+	unescaped, err := url.PathUnescape(repoPath)
+	if err != nil {
+		return parsedGitFlameRepositoryURL{}, errors.New("repo_url contains invalid escaping")
+	}
+	unescaped = strings.TrimSuffix(unescaped, ".git")
+	unescaped = stripRepositoryViewSuffix(unescaped)
+	if strings.Count(unescaped, "/") < 1 {
+		return parsedGitFlameRepositoryURL{}, errors.New("repo_url does not include owner and repository")
+	}
+	webURL := parsed.Scheme + "://" + parsed.Host + "/" + unescaped
+	return parsedGitFlameRepositoryURL{Path: unescaped, WebURL: webURL}, nil
+}
+
+func stripRepositoryViewSuffix(repoPath string) string {
+	parts := strings.Split(strings.Trim(repoPath, "/"), "/")
+	for index, part := range parts {
+		switch part {
+		case "code", "issues", "pulls", "pull-requests", "merge_requests", "branches", "commits", "settings":
+			if index >= 2 {
+				return strings.Join(parts[:index], "/")
+			}
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
 		}
 	}
 	return ""
