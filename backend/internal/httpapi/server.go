@@ -42,7 +42,10 @@ func New(cfg config.Config) (*Server, error) {
 		store = postgres
 	}
 	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
-	gitflame := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout)
+	var gitflame GitFlameSource
+	if client := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout); client != nil {
+		gitflame = client
+	}
 	var credentialCipher *security.CredentialCipher
 	if strings.TrimSpace(cfg.GitFlameCredentialKey) != "" {
 		var err error
