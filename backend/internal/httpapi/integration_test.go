@@ -226,6 +226,33 @@ func TestAnalyzeHydratesPathOnlyRepositoryFilesBeforeAgentRequest(t *testing.T) 
 	}
 }
 
+func TestAnalyzeHydratesEmptyRepositoryFilesBeforeAgentRequest(t *testing.T) {
+	store := repository.NewMemoryStore()
+	generator := &fakeGenerator{}
+	gitflame := &fakeGitFlameSource{files: []domain.RepositoryFile{{Path: "README.md", Content: "# Backend from GitFlame"}}}
+	server := NewWithDependenciesAndIntegrations(store, generator, gitflame, nil)
+
+	body := `{"repository":{"id":"owner/repo","default_branch":"main"},"issue":{"id":"48","title":"Hydrate empty files","body":"Use real contents","author":"artur"},"yaml_config":"version: 1"}`
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("analyze status = %d: %s", response.Code, response.Body.String())
+	}
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, response, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+
+	generator.mu.Lock()
+	defer generator.mu.Unlock()
+	if len(generator.requests) != 1 || len(generator.requests[0].RepositoryFiles) != 1 {
+		t.Fatalf("agent requests = %+v", generator.requests)
+	}
+	if generator.requests[0].RepositoryFiles[0].Content != "# Backend from GitFlame" {
+		t.Fatalf("repository content was not hydrated: %+v", generator.requests[0].RepositoryFiles)
+	}
+}
+
 type fakeRecommender struct {
 	configYAML string
 	files      []domain.RepositoryFile

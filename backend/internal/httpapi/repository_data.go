@@ -105,7 +105,7 @@ func (s *Server) hydrateAnalyzeRequest(r *http.Request, req domain.IssueAnalyzeR
 
 func repositoryFilesNeedContent(files []domain.RepositoryFile, legacyPaths []string) bool {
 	if len(files) == 0 {
-		return len(legacyPaths) > 0
+		return true
 	}
 	for _, file := range files {
 		if strings.TrimSpace(file.Content) == "" {
