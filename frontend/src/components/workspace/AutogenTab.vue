@@ -15,6 +15,7 @@ import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError, pollTask } from '../../api/index.js'
 import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
+import { flattenFiles, computeExcludedSet } from '../../utils/excludePaths.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfSpinner from '../ui/GfSpinner.vue'
@@ -103,6 +104,13 @@ function pickIssue(it) {
 function repositoryPayload() {
   return { id: session.repo.id, name: session.repo.name, default_branch: session.repo.defaultBranch, web_url: session.repo.url }
 }
+
+function analyzableContext() {
+  const all = flattenFiles(session.fileTree)
+  const excluded = computeExcludedSet(all, session.configForm.excludePaths || [])
+  return all.filter((p) => !excluded.has(p))
+}
+
 function stopPolling() {
   if (poller) { poller.abort(); poller = null }
 }
@@ -153,6 +161,7 @@ async function analyze() {
       repository: repositoryPayload(),
       issue: { id: issue.id, title: issue.title.trim(), body: issue.body.trim(), author: issue.author.trim() },
       yaml_config: session.configYaml,
+      repository_context: analyzableContext(),
     })
     sessionId.value = res.session_id
     issueId.value = res.issue_id
