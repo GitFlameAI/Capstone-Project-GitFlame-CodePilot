@@ -102,6 +102,7 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
 	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
 	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
+	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
 	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
 	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
 	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
@@ -173,6 +174,12 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	var req domain.IssueAnalyzeRequest
 	if err := decode(r, &req); err != nil {
 		problem(w, 400, "invalid_json", err.Error())
+		return
+	}
+	var err error
+	req, err = s.hydrateAnalyzeRequest(r, req)
+	if err != nil {
+		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
 	session, task, err := s.workflow.Analyze(req)
@@ -404,6 +411,21 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 	if len(files) == 0 {
 		problem(w, 422, "validation_error", "repository_files must contain at least one file")
 		return
+	}
+	if repositoryFilesNeedContent(files, nil) {
+		reader, connection, err := s.gitFlameReaderForRepository(r, req.Repository.ID)
+		if err != nil {
+			integrationError(w, err, "gitflame_repository_error")
+			return
+		}
+		req.YAMLConfig, files, err = reader.RepositoryFiles(r.Context(), req.Repository.ID, req.Repository.DefaultBranch, req.YAMLConfig, files)
+		if err != nil {
+			integrationError(w, err, "gitflame_files_error")
+			return
+		}
+		if connection != nil {
+			_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
+		}
 	}
 	if err := service.ValidateRepositoryFilesForIntegration(files); err != nil {
 		problem(w, 422, "validation_error", err.Error())
