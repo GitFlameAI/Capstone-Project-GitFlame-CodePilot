@@ -285,6 +285,18 @@ func (s *Server) gitFlameSourceForRepository(r *http.Request, repositoryID strin
 	return NewGitFlameClient(s.gitflameBaseURL, accessToken, s.gitflameTimeout), connection, nil
 }
 
+func (s *Server) gitFlameReaderForRepository(r *http.Request, repositoryID string) (GitFlameRepositoryReader, *domain.GitFlameConnection, error) {
+	source, connection, err := s.gitFlameSourceForRepository(r, repositoryID)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, ok := source.(GitFlameRepositoryReader)
+	if !ok {
+		return nil, nil, &IntegrationError{Status: http.StatusServiceUnavailable, Code: "gitflame_client_unavailable", Detail: "GitFlame repository client is not configured"}
+	}
+	return reader, connection, nil
+}
+
 func (s *Server) gitFlameReaderForConnection(r *http.Request, connectionID string) (GitFlameRepositoryReader, *domain.GitFlameConnection, error) {
 	session, err := s.authenticate(r)
 	if err != nil {

@@ -65,40 +65,9 @@ func (c *GitFlameClient) BuildAnalyzeRequest(ctx context.Context, webhook GitFla
 	if ref == "" {
 		ref = webhook.Repository.DefaultBranch
 	}
-	yamlConfig := webhook.YAMLConfig
-	if strings.TrimSpace(yamlConfig) == "" {
-		content, err := c.fetchFileContent(ctx, webhook.Repository.ID, ".ai.yml", ref)
-		if err != nil {
-			return domain.IssueAnalyzeRequest{}, err
-		}
-		yamlConfig = content
-	}
-	cfg, err := service.ParseAIConfig(yamlConfig)
+	yamlConfig, files, err := c.RepositoryFiles(ctx, webhook.Repository.ID, ref, webhook.YAMLConfig, webhook.RepositoryFiles)
 	if err != nil {
-		return domain.IssueAnalyzeRequest{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_ai_config", Detail: err.Error()}
-	}
-	files := append([]domain.RepositoryFile(nil), webhook.RepositoryFiles...)
-	if len(files) == 0 {
-		tree, err := c.fetchTree(ctx, webhook.Repository.ID, ref)
-		if err != nil {
-			return domain.IssueAnalyzeRequest{}, err
-		}
-		for _, entry := range tree {
-			if len(files) >= cfg.MaxFiles {
-				break
-			}
-			if entry.Type != "" && entry.Type != "file" && entry.Type != "blob" {
-				continue
-			}
-			if !matchesRepositoryRules(entry.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
-				continue
-			}
-			content, err := c.fetchFileContent(ctx, webhook.Repository.ID, entry.Path, ref)
-			if err != nil {
-				return domain.IssueAnalyzeRequest{}, err
-			}
-			files = append(files, domain.RepositoryFile{Path: entry.Path, Content: content})
-		}
+		return domain.IssueAnalyzeRequest{}, err
 	}
 	if len(files) == 0 {
 		return domain.IssueAnalyzeRequest{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "empty_repository_context", Detail: "GitFlame API returned no repository files after applying .ai.yml analysis rules"}
@@ -267,6 +236,78 @@ func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID str
 
 func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
 	return c.RepositoryTree(ctx, repositoryID, ref)
+}
+
+func (c *GitFlameClient) RepositoryFiles(ctx context.Context, repositoryID, ref, yamlConfig string, requested []domain.RepositoryFile) (string, []domain.RepositoryFile, error) {
+	if strings.TrimSpace(yamlConfig) == "" {
+		content, err := c.fetchFileContent(ctx, repositoryID, ".ai.yml", ref)
+		if err != nil {
+			return "", nil, err
+		}
+		yamlConfig = content
+	}
+	cfg, err := service.ParseAIConfig(yamlConfig)
+	if err != nil {
+		return "", nil, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_ai_config", Detail: err.Error()}
+	}
+	if len(requested) > 0 {
+		files := make([]domain.RepositoryFile, 0, min(len(requested), cfg.MaxFiles))
+		for _, file := range requested {
+			if len(files) >= cfg.MaxFiles {
+				break
+			}
+			if !repositoryFileIsReadable(file.Type) {
+				continue
+			}
+			file.Path = normalizeRepositoryPath(file.Path)
+			if file.Path == "" || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
+				continue
+			}
+			if strings.TrimSpace(file.Content) == "" {
+				content, err := c.fetchFileContent(ctx, repositoryID, file.Path, ref)
+				if err != nil {
+					return "", nil, err
+				}
+				file.Content = content
+			}
+			file.Type = ""
+			files = append(files, file)
+		}
+		return yamlConfig, files, nil
+	}
+
+	tree, err := c.fetchTree(ctx, repositoryID, ref)
+	if err != nil {
+		return "", nil, err
+	}
+	files := make([]domain.RepositoryFile, 0, min(len(tree), cfg.MaxFiles))
+	for _, entry := range tree {
+		if len(files) >= cfg.MaxFiles {
+			break
+		}
+		if entry.Type != "" && entry.Type != "file" && entry.Type != "blob" {
+			continue
+		}
+		filePath := normalizeRepositoryPath(entry.Path)
+		if !matchesRepositoryRules(filePath, cfg.IncludePatterns, cfg.ExcludePatterns) {
+			continue
+		}
+		content, err := c.fetchFileContent(ctx, repositoryID, filePath, ref)
+		if err != nil {
+			return "", nil, err
+		}
+		files = append(files, domain.RepositoryFile{Path: filePath, Content: content})
+	}
+	return yamlConfig, files, nil
+}
+
+func repositoryFileIsReadable(fileType string) bool {
+	switch strings.ToLower(strings.TrimSpace(fileType)) {
+	case "", "file", "blob":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
@@ -717,7 +758,7 @@ func nestedValue(value any, path []string) (any, bool) {
 }
 
 func matchesRepositoryRules(filePath string, include, exclude []string) bool {
-	normalized := strings.TrimPrefix(path.Clean(strings.ReplaceAll(filePath, "\\", "/")), "./")
+	normalized := normalizeRepositoryPath(filePath)
 	if normalized == "." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") {
 		return false
 	}
@@ -732,6 +773,14 @@ func matchesRepositoryRules(filePath string, include, exclude []string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeRepositoryPath(filePath string) string {
+	normalized := strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(filePath), "\\", "/")), "./")
+	if normalized == "." {
+		return ""
+	}
+	return normalized
 }
 
 func matchRepositoryPattern(pattern, value string) bool {

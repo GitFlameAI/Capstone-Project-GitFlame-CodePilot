@@ -16,6 +16,7 @@ type GitFlameSource interface {
 
 type GitFlameRepositoryReader interface {
 	RepositoryTree(context.Context, string, string) ([]GitFlameTreeEntry, error)
+	RepositoryFiles(context.Context, string, string, string, []domain.RepositoryFile) (string, []domain.RepositoryFile, error)
 	RepositoryIssues(context.Context, string) ([]domain.IssuePayload, error)
 }
 

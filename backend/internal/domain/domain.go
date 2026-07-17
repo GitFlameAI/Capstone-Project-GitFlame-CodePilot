@@ -52,6 +52,7 @@ type IssueAnalyzeRequest struct {
 type RepositoryFile struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	Type    string `json:"type,omitempty"`
 }
 
 type AIConfig struct {

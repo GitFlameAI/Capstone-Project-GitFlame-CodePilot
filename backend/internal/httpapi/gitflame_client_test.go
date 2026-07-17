@@ -59,6 +59,31 @@ func TestGitFlameClientBuildsAnalyzeRequestFromAPI(t *testing.T) {
 	}
 }
 
+func TestGitFlameClientHydratesRequestedRepositoryFiles(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body string
+		switch r.URL.Path {
+		case "/api/v1/repos/owner/repo/raw/README.md":
+			if r.URL.Query().Get("ref") != "refs/heads/main" {
+				t.Fatalf("unexpected raw ref: %s", r.URL.RawQuery)
+			}
+			body = "# Project"
+		default:
+			t.Fatalf("unexpected GitFlame API path: %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+
+	yamlConfig, files, err := client.RepositoryFiles(context.Background(), "owner/repo", "main", "version: 1", []domain.RepositoryFile{{Path: "backend", Type: "dir"}, {Path: "README.md", Type: "file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yamlConfig != "version: 1" || len(files) != 1 || files[0].Content != "# Project" {
+		t.Fatalf("repository files were not hydrated: yaml=%q files=%+v", yamlConfig, files)
+	}
+}
+
 func TestGitFlameClientAppliesGeneratedFiles(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	var paths []string

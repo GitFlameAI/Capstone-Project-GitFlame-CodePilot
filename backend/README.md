@@ -15,6 +15,9 @@ Current Sprint 4 Go backend includes:
   - `POST /integrations/gitflame/connections`
   - `PUT /integrations/gitflame/connections/{id}`
   - `DELETE /integrations/gitflame/connections/{id}`
+  - `GET /integrations/gitflame/connections/{id}/tree`
+  - `GET /integrations/gitflame/connections/{id}/files`
+  - `GET /integrations/gitflame/connections/{id}/issues`
   - `POST /integrations/gitflame/issues/analyze`
   - `POST /integrations/gitflame/webhooks/issues`
   - `GET /ai/tasks/{taskId}`
@@ -40,7 +43,8 @@ Current Sprint 4 Go backend includes:
 - GitFlame access tokens are never stored on the frontend; the browser receives only an HttpOnly application session cookie
 - GitFlame repository connections are owned by `app_users` and store AES-GCM token ciphertext, nonce, key version, scopes, expiration, validation, and revocation metadata
 - GitFlame connection setup accepts a user-facing `repo_url`; backend strips view suffixes like `/code`, resolves repository metadata when possible, and stores the resulting repository id/path
-- GitFlame webhook ingestion can fetch `.ai.yml`, repository tree, and file contents through `GITFLAME_BASE_URL`
+- GitFlame webhook ingestion and authenticated analyze/recommendation requests can fetch `.ai.yml`, repository tree, and raw file contents through `GITFLAME_BASE_URL`
+- Repository tree is exposed separately for UI selection, while backend hydrates path-only `repository_files` into full `{path, content}` payloads before calling Agent Engine or the recommendation service
 - generated file operations can be applied back to GitFlame through the saved per-user connection, creating a branch, commit, pull request, and saved `pull_request_url`
 - repository recommendations are generated through the external recommendation service and persisted without a fallback card
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations

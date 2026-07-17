@@ -99,6 +99,7 @@ type fakeGitFlameSource struct {
 	applyResult     domain.GitFlameApplyResult
 	applyErr        error
 	tree            []GitFlameTreeEntry
+	files           []domain.RepositoryFile
 	issues          []domain.IssuePayload
 }
 
@@ -125,6 +126,25 @@ func (f *fakeGitFlameSource) CurrentUser(context.Context) (GitFlameUserProfile, 
 
 func (f *fakeGitFlameSource) RepositoryTree(context.Context, string, string) ([]GitFlameTreeEntry, error) {
 	return f.tree, f.err
+}
+
+func (f *fakeGitFlameSource) RepositoryFiles(_ context.Context, _ string, _ string, yamlConfig string, requested []domain.RepositoryFile) (string, []domain.RepositoryFile, error) {
+	if f.err != nil {
+		return "", nil, f.err
+	}
+	if yamlConfig == "" {
+		yamlConfig = "version: 1"
+	}
+	if len(f.files) > 0 {
+		return yamlConfig, append([]domain.RepositoryFile(nil), f.files...), nil
+	}
+	files := append([]domain.RepositoryFile(nil), requested...)
+	for index := range files {
+		if files[index].Content == "" {
+			files[index].Content = "content for " + files[index].Path
+		}
+	}
+	return yamlConfig, files, nil
 }
 
 func (f *fakeGitFlameSource) RepositoryIssues(context.Context, string) ([]domain.IssuePayload, error) {
@@ -155,6 +175,7 @@ func TestRepositoryDataRequiresOwnedConnection(t *testing.T) {
 	}
 	gitflame := &fakeGitFlameSource{
 		tree:   []GitFlameTreeEntry{{Path: "README.md", Type: "file"}},
+		files:  []domain.RepositoryFile{{Path: "README.md", Content: "# Backend"}},
 		issues: []domain.IssuePayload{{ID: "7", Title: "Test issue"}},
 	}
 	server := NewWithDependenciesAndIntegrations(store, &fakeGenerator{}, gitflame, nil)
@@ -168,9 +189,40 @@ func TestRepositoryDataRequiresOwnedConnection(t *testing.T) {
 	if tree.Code != http.StatusOK || !strings.Contains(tree.Body.String(), `"path":"README.md"`) {
 		t.Fatalf("tree status = %d: %s", tree.Code, tree.Body.String())
 	}
+	files := requestWithCookie(t, server.Router(), http.MethodGet, "/integrations/gitflame/connections/"+connection.ID+"/files", "", cookie)
+	if files.Code != http.StatusOK || !strings.Contains(files.Body.String(), `"content":"# Backend"`) {
+		t.Fatalf("files status = %d: %s", files.Code, files.Body.String())
+	}
 	issues := requestWithCookie(t, server.Router(), http.MethodGet, "/integrations/gitflame/connections/"+connection.ID+"/issues", "", cookie)
 	if issues.Code != http.StatusOK || !strings.Contains(issues.Body.String(), `"title":"Test issue"`) {
 		t.Fatalf("issues status = %d: %s", issues.Code, issues.Body.String())
+	}
+}
+
+func TestAnalyzeHydratesPathOnlyRepositoryFilesBeforeAgentRequest(t *testing.T) {
+	store := repository.NewMemoryStore()
+	generator := &fakeGenerator{}
+	gitflame := &fakeGitFlameSource{files: []domain.RepositoryFile{{Path: "README.md", Content: "# Backend from GitFlame"}}}
+	server := NewWithDependenciesAndIntegrations(store, generator, gitflame, nil)
+
+	body := `{"repository":{"id":"owner/repo","default_branch":"main"},"issue":{"id":"47","title":"Hydrate files","body":"Use real contents","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":""}]}`
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("analyze status = %d: %s", response.Code, response.Body.String())
+	}
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, response, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+
+	generator.mu.Lock()
+	defer generator.mu.Unlock()
+	if len(generator.requests) != 1 || len(generator.requests[0].RepositoryFiles) != 1 {
+		t.Fatalf("agent requests = %+v", generator.requests)
+	}
+	if generator.requests[0].RepositoryFiles[0].Content != "# Backend from GitFlame" {
+		t.Fatalf("repository content was not hydrated: %+v", generator.requests[0].RepositoryFiles)
 	}
 }
 
