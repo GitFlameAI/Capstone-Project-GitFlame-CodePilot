@@ -30,22 +30,25 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 	if err != nil {
 		return domain.AIConfig{}, err
 	}
+	recommendationCategories := list(doc, "recommendations.categories", nil)
 	cfg := domain.AIConfig{
-		Raw:                raw,
-		Version:            scalar(doc, "version", "1"),
-		DefaultBranch:      scalar(doc, "repository.default_branch", "main"),
-		TargetBranchPrefix: scalar(doc, "repository.target_branch_prefix", "ai/"),
-		AnalysisEnabled:    boolean(doc, "analysis.enabled", true),
-		RequireApproval:    boolean(doc, "code_generation.require_user_approval", true),
-		IncludePatterns:    list(doc, "analysis.include", []string{"**/*"}),
-		ExcludePatterns:    list(doc, "analysis.exclude", []string{".git/**", "node_modules/**", "dist/**", "build/**"}),
-		MaxFiles:           integer(doc, "analysis.max_files", 20),
-		MaxSnippetsPerFile: integer(doc, "analysis.max_snippets_per_file", 3),
-		RetentionDays:      retentionDays,
-		ReviewerPolicy:     scalar(doc, "code_generation.reviewer_policy", "issue_author"),
-		ApproveCommand:     scalar(doc, "code_generation.allowed_actions.approve_command", "/approve"),
-		CorrectCommand:     scalar(doc, "code_generation.allowed_actions.correct_command", "/correct"),
-		RejectCommand:      scalar(doc, "code_generation.allowed_actions.reject_command", "/reject"),
+		Raw:                      raw,
+		Version:                  scalar(doc, "version", "1"),
+		DefaultBranch:            scalar(doc, "repository.default_branch", "main"),
+		TargetBranchPrefix:       scalar(doc, "repository.target_branch_prefix", "ai/"),
+		AnalysisEnabled:          boolean(doc, "analysis.enabled", true),
+		RequireApproval:          boolean(doc, "code_generation.require_user_approval", true),
+		RecommendationsEnabled:   boolean(doc, "recommendations.enabled", true),
+		IncludePatterns:          list(doc, "analysis.include", []string{"**/*"}),
+		ExcludePatterns:          list(doc, "analysis.exclude", []string{".git/**", "node_modules/**", "dist/**", "build/**"}),
+		RecommendationCategories: recommendationCategories,
+		MaxFiles:                 integer(doc, "analysis.max_files", 20),
+		MaxSnippetsPerFile:       integer(doc, "analysis.max_snippets_per_file", 3),
+		RetentionDays:            retentionDays,
+		ReviewerPolicy:           scalar(doc, "code_generation.reviewer_policy", "issue_author"),
+		ApproveCommand:           scalar(doc, "code_generation.allowed_actions.approve_command", "/approve"),
+		CorrectCommand:           scalar(doc, "code_generation.allowed_actions.correct_command", "/correct"),
+		RejectCommand:            scalar(doc, "code_generation.allowed_actions.reject_command", "/reject"),
 	}
 	if !cfg.AnalysisEnabled {
 		return cfg, errors.New("repository analysis is disabled in .yml configuration")
@@ -109,7 +112,7 @@ func boolean(d yamlDoc, k string, f bool) bool {
 	return strings.EqualFold(v, "true")
 }
 func list(d yamlDoc, k string, f []string) []string {
-	if v, ok := d.lists[k]; ok && len(v) > 0 {
+	if v, ok := d.lists[k]; ok {
 		return append([]string(nil), v...)
 	}
 	return append([]string(nil), f...)

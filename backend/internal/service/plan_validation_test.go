@@ -63,6 +63,32 @@ func TestValidateGeneratedFiles(t *testing.T) {
 	}
 }
 
+func TestNormalizeGeneratedFilesMergesDuplicatePaths(t *testing.T) {
+	files := NormalizeGeneratedFiles([]domain.GeneratedFileOperation{
+		{
+			Action:      "modify",
+			Path:        "./app/main.py",
+			Content:     "old content",
+			Explanation: "First pass.",
+		},
+		{
+			Action:      "modify",
+			Path:        "app/main.py",
+			Content:     "new content",
+			Explanation: "Final pass.",
+		},
+	})
+	if len(files) != 1 {
+		t.Fatalf("expected duplicate paths to be merged, got %+v", files)
+	}
+	if files[0].Path != "app/main.py" || files[0].Content != "new content" || !strings.Contains(files[0].Explanation, "First pass.") || !strings.Contains(files[0].Explanation, "Final pass.") {
+		t.Fatalf("unexpected merged operation: %+v", files[0])
+	}
+	if err := ValidateGeneratedFiles(files, []domain.RepositoryFile{{Path: "app/main.py", Content: "package"}}); err != nil {
+		t.Fatalf("merged operation should validate: %v", err)
+	}
+}
+
 func validPlan(path string) string {
 	return `# Implementation Plan
 

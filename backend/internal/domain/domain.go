@@ -58,7 +58,9 @@ type RepositoryFile struct {
 type AIConfig struct {
 	Raw, Version, DefaultBranch, TargetBranchPrefix string
 	AnalysisEnabled, RequireApproval                bool
+	RecommendationsEnabled                          bool
 	IncludePatterns, ExcludePatterns                []string
+	RecommendationCategories                        []string
 	MaxFiles, MaxSnippetsPerFile                    int
 	RetentionDays                                   int
 	ReviewerPolicy                                  string
