@@ -223,6 +223,7 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
+	result.Files = NormalizeGeneratedFiles(result.Files)
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -473,6 +474,52 @@ func validateRepositoryFiles(files []domain.RepositoryFile) error {
 
 func ValidateRepositoryFilesForIntegration(files []domain.RepositoryFile) error {
 	return validateRepositoryFiles(files)
+}
+
+func NormalizeGeneratedFiles(files []domain.GeneratedFileOperation) []domain.GeneratedFileOperation {
+	merged := make([]domain.GeneratedFileOperation, 0, len(files))
+	indexByPath := make(map[string]int, len(files))
+	for _, file := range files {
+		file.Path = normalizePlanPath(file.Path)
+		if file.Path == "" {
+			merged = append(merged, file)
+			continue
+		}
+		index, exists := indexByPath[file.Path]
+		if !exists {
+			indexByPath[file.Path] = len(merged)
+			merged = append(merged, file)
+			continue
+		}
+		previous := merged[index]
+		if strings.TrimSpace(file.Action) == "" {
+			file.Action = previous.Action
+		}
+		if strings.TrimSpace(file.Content) == "" {
+			file.Content = previous.Content
+		}
+		if strings.TrimSpace(file.Diff) == "" {
+			file.Diff = previous.Diff
+		}
+		file.Explanation = mergeExplanation(previous.Explanation, file.Explanation)
+		merged[index] = file
+	}
+	return merged
+}
+
+func mergeExplanation(previous, next string) string {
+	previous = strings.TrimSpace(previous)
+	next = strings.TrimSpace(next)
+	switch {
+	case previous == "":
+		return next
+	case next == "":
+		return previous
+	case previous == next:
+		return next
+	default:
+		return previous + "\n" + next
+	}
 }
 
 func ValidateGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) error {

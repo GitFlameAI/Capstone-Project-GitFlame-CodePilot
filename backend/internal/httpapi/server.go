@@ -402,6 +402,15 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 422, "validation_error", err.Error())
 		return
 	}
+	if !cfg.RecommendationsEnabled {
+		report, err := s.store.SaveRecommendations(req.Repository, cfg, "Recommendation analysis is disabled by .ai.yml categories.", []domain.RecommendationCard{})
+		if err != nil {
+			problem(w, 500, "storage_error", err.Error())
+			return
+		}
+		write(w, 200, recommendationReportResponse(report))
+		return
+	}
 	files := append([]domain.RepositoryFile(nil), req.RepositoryFiles...)
 	if len(files) == 0 {
 		for _, path := range req.RepositoryContext {
@@ -456,7 +465,15 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 500, "storage_error", err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"repository_id": report.RepositoryID, "status": report.Status, "summary": report.Summary, "recommendations": report.Recommendations})
+	write(w, 200, recommendationReportResponse(report))
+}
+
+func recommendationReportResponse(report *domain.RecommendationReport) map[string]any {
+	recommendations := report.Recommendations
+	if recommendations == nil {
+		recommendations = []domain.RecommendationCard{}
+	}
+	return map[string]any{"repository_id": report.RepositoryID, "status": report.Status, "summary": report.Summary, "recommendations": recommendations}
 }
 func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
 	v, err := s.store.Recommendations(r.PathValue("id"))

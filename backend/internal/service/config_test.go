@@ -41,4 +41,35 @@ storage:
 	if len(cfg.ExcludePatterns) != 2 || cfg.ExcludePatterns[0] != "node_modules/**" || cfg.ExcludePatterns[1] != "dist/**" {
 		t.Fatalf("unexpected exclude patterns: %#v", cfg.ExcludePatterns)
 	}
+	if !cfg.RecommendationsEnabled || len(cfg.RecommendationCategories) != 1 || cfg.RecommendationCategories[0] != "security" {
+		t.Fatalf("unexpected recommendation config: enabled=%v categories=%#v", cfg.RecommendationsEnabled, cfg.RecommendationCategories)
+	}
+	if cfg.TargetBranchPrefix != "ai/" || !cfg.RequireApproval {
+		t.Fatalf("legacy code-generation defaults should not be required in frontend config: %+v", cfg)
+	}
+}
+
+func TestParseAIConfigSupportsDisabledRecommendations(t *testing.T) {
+	cfg, err := ParseAIConfig(`repository:
+  default_branch: main
+analysis:
+  enabled: true
+  exclude:
+    []
+recommendations:
+  enabled: false
+  categories:
+    []
+storage:
+  recommendation_ttl_days: 30
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RecommendationsEnabled || len(cfg.RecommendationCategories) != 0 {
+		t.Fatalf("recommendations should be disabled: %+v", cfg)
+	}
+	if len(cfg.ExcludePatterns) != 0 {
+		t.Fatalf("explicit empty analysis.exclude should stay empty: %#v", cfg.ExcludePatterns)
+	}
 }

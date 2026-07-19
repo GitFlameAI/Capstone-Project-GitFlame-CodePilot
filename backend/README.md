@@ -45,6 +45,8 @@ Current Sprint 4 Go backend includes:
 - GitFlame connection setup accepts a user-facing `repo_url`; backend strips view suffixes like `/code`, resolves repository metadata when possible, and stores the resulting repository id/path
 - GitFlame webhook ingestion and authenticated analyze/recommendation requests can fetch `.ai.yml`, repository tree, and raw file contents through `GITFLAME_BASE_URL`
 - Repository tree is exposed separately for UI selection, while backend hydrates path-only `repository_files` into full `{path, content}` payloads before calling Agent Engine or the recommendation service
+- `.ai.yml` parsing matches the frontend public contract for `repository.default_branch`, `analysis.exclude`, `recommendations.categories`, and `storage.recommendation_ttl_days`; explicit empty lists stay empty, while legacy fields remain tolerated as backend defaults
+- code-generation results are normalized before validation so duplicate generated file operations for the same path are merged instead of failing the task
 - generated file operations can be applied back to GitFlame through the saved per-user connection, creating a branch, commit, pull request, and saved `pull_request_url`
 - repository recommendations are generated through the external recommendation service and persisted without a fallback card
 - PostgreSQL storage for issue sessions, revisions, agent tasks, and recommendations

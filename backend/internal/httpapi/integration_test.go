@@ -474,6 +474,22 @@ func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	}
 }
 
+func TestRecommendationsDisabledByConfigReturnsEmptyReport(t *testing.T) {
+	recommender := &fakeRecommender{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
+	body := `{"repository":{"id":"repo-no-rec","default_branch":"main"},"yaml_config":"repository:\n  default_branch: main\nanalysis:\n  enabled: true\n  exclude:\n    []\nrecommendations:\n  enabled: false\n  categories:\n    []\nstorage:\n  recommendation_ttl_days: 30\n","repository_files":[{"path":"src/app.go","content":"package app"}]}`
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/repositories/repo-no-rec/recommendations/analyze", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recommendations status = %d: %s", response.Code, response.Body.String())
+	}
+	if recommender.configYAML != "" || len(recommender.files) != 0 {
+		t.Fatalf("recommendation service should not be called when disabled: %+v", recommender)
+	}
+	if !strings.Contains(response.Body.String(), `"recommendations":[]`) {
+		t.Fatalf("disabled recommendations should return an empty report: %s", response.Body.String())
+	}
+}
+
 func TestGitFlameConnectionStoresEncryptedTokenAndSessionCookie(t *testing.T) {
 	store := repository.NewMemoryStore()
 	source := &fakeGitFlameSource{}
