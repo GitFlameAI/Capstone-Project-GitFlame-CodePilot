@@ -74,6 +74,50 @@ services:
       retries: 20
       start_period: 60s
 
+  coderag-database:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: gitflame_coderag
+      POSTGRES_USER: gitflame
+      POSTGRES_PASSWORD: gitflame
+    ports:
+      - "${CODERAG_DATABASE_PORT:-5433}:5432"
+    volumes:
+      - coderag_postgres_data:/var/lib/postgresql/data
+      - ./coderag/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitflame -d gitflame_coderag"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rag-service:
+    build:
+      context: ./coderag
+    environment:
+      DATABASE_URL: postgresql+psycopg://gitflame:gitflame@coderag-database:5432/gitflame_coderag
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      RAG_USE_DENSE: ${RAG_USE_DENSE:-true}
+      RAG_CANDIDATE_TOP_K: ${RAG_CANDIDATE_TOP_K:-50}
+      RAG_MIN_RELEVANCE_SCORE: ${RAG_MIN_RELEVANCE_SCORE:-}
+      RAG_MAX_CONTEXT_FILES: ${RAG_MAX_CONTEXT_FILES:-20}
+      RAG_MAX_CHUNKS_PER_FILE: ${RAG_MAX_CHUNKS_PER_FILE:-3}
+      RAG_MAX_CONTEXT_TOKENS: ${RAG_MAX_CONTEXT_TOKENS:-12000}
+      RAG_DEDUPLICATE_OVERLAPS: ${RAG_DEDUPLICATE_OVERLAPS:-true}
+      RAG_OVERLAP_THRESHOLD: ${RAG_OVERLAP_THRESHOLD:-0.8}
+    ports:
+      - "${RAG_PORT:-8004}:8004"
+    depends_on:
+      coderag-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
   agent-worker:
     build:
       context: ./backend
@@ -122,10 +166,13 @@ services:
       AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-20}
       MAX_TOOL_OUTPUT_CHARS: ${MAX_TOOL_OUTPUT_CHARS:-8192}
       MODEL_CONTEXT_LIMIT: ${MODEL_CONTEXT_LIMIT:-32768}
-      RAG_BASE_URL: ${RAG_BASE_URL:-}
+      RAG_BASE_URL: ${RAG_BASE_URL:-http://rag-service:8004}
       RAG_API_KEY: ${RAG_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      rag-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3).read()"]
       interval: 10s
@@ -154,3 +201,4 @@ services:
 
 volumes:
   redis_data:
+  coderag_postgres_data:
