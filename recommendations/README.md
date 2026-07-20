@@ -32,6 +32,17 @@ Sprint 4 keeps recommendations as a separate service boundary while Agent Engine
 issue-to-plan and generated-files generation. The model strategy and final recommendation category
 decision are documented in [`../context_AI/ml/sprint4_model_strategy.md`](../context_AI/ml/sprint4_model_strategy.md).
 
+## Sprint 6 CodeRAG integration
+
+Agent Engine connects to the external CodeRAG HTTP service through `RAG_BASE_URL` and
+`RAG_API_KEY`. CodeRAG exposes `/health` and `/search`; the search response is validated against
+the strict `RagResult` contract before any snippet can enter model context. Configure a separate
+private RAG key and keep `MODEL_CONTEXT_LIMIT=32768` for the current Laguna runtime.
+
+The service boundary, environment variables, direct curl checks, Agent Engine verification, and
+RAG-quality checklist are documented in
+[`sprint6_rag_integration.md`](sprint6_rag_integration.md).
+
 ## Sprint 3: SERGE-based Agent Engine
 
 The repository now also contains a separate stateless issue-to-plan service in
@@ -92,6 +103,7 @@ unavailable, slow, or returns invalid output, the API returns an explicit error.
 | Model Comparison | [`model_comparison.md`](model_comparison.md) |
 | Sprint 4 Model Strategy | [`../context_AI/ml/sprint4_model_strategy.md`](../context_AI/ml/sprint4_model_strategy.md) |
 | Future RAG / Vector Search | [`rag_vector_search_direction.md`](rag_vector_search_direction.md) |
+| Sprint 6 CodeRAG Integration | [`sprint6_rag_integration.md`](sprint6_rag_integration.md) |
 | Deployment Guide | [`deployment_guide.md`](deployment_guide.md) |
 | Public Hugging Face Space | [`KarimKhab/gitflame-codepilot-recommendations`](https://huggingface.co/spaces/KarimKhab/gitflame-codepilot-recommendations) |
 

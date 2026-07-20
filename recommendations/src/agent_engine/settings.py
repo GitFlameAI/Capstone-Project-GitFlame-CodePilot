@@ -22,7 +22,7 @@ class AgentSettings:
     max_steps: int = 12
     max_tool_calls: int = 20
     max_tool_output_chars: int = 8_192
-    context_limit_tokens: int = 65_536
+    context_limit_tokens: int = 32_768
     max_retries: int = 2
     retry_backoff_seconds: float = 0.25
     rag_base_url: str | None = None
