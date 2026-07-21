@@ -20,6 +20,13 @@ new file with `(create)`. Use `TBD` when details are unknown. You may call read_
 grep, and search_repository. Do not request shell, network, GitHub, branch, commit, PR,
 code-generation, or repository-modifying operations.
 
+Treat RAG as optional evidence, not as a source of truth by itself. If search_repository returns
+`status: "empty"` with no results, continue with the supplied repository files and write `TBD` for
+unknown file-level details. If RAG is unavailable or not configured, use only the supplied
+repository files and do not infer that missing RAG results mean no relevant files exist. If the
+backend supplied the complete small-repository context, inspect those files directly and do not
+invent additional paths.
+
 Return only valid Markdown with exactly these headings in this order:
 
 # Implementation Plan

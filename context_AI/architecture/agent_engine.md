@@ -266,6 +266,7 @@ Calls the external RAG API and returns:
 
 ```json
 {
+  "status": "completed",
   "results": [
     {
       "path": "internal/auth/token.go",
@@ -278,12 +279,30 @@ Calls the external RAG API and returns:
 }
 ```
 
+If the external RAG service is reachable but no relevant snippets are found, the
+tool returns:
+
+```json
+{
+  "status": "empty",
+  "results": []
+}
+```
+
 RAG results are treated as untrusted input. Paths and result sizes are validated
 before content is added to the model conversation.
 
 RAG finds semantically relevant candidates. `read_file`, `list_dir`, and `grep`
 verify exact repository content. The Agent Loop may combine both mechanisms but must
 remain within configured step, tool-call, context, and timeout limits.
+
+RAG is optional evidence. When RAG returns `status: "empty"`, the model must continue
+with supplied repository files and use `TBD` for unknown file-level details. When RAG is
+unavailable or not configured, the request fails with `rag_unavailable` if the model
+calls `search_repository`; this must not be interpreted as evidence that no relevant
+files exist. For small repositories, the backend can supply the complete allowed file
+context directly, so the model should inspect those files with `read_file`, `list_dir`,
+and `grep` instead of inventing paths outside the supplied inventory.
 
 ## Security Limits
 
