@@ -474,6 +474,24 @@ func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	}
 }
 
+func TestRecommendationsSupportRepositoryIDWithSlash(t *testing.T) {
+	recommender := &fakeRecommender{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
+	body := `{"repository":{"id":"owner/repo","default_branch":"main"},"yaml_config":"version: 1","repository_files":[{"path":"src/app.go","content":"package app"}]}`
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/recommendations/analyze?repository_id=owner%2Frepo", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recommendations status = %d: %s", response.Code, response.Body.String())
+	}
+	list := request(t, server.Router(), http.MethodGet, "/repositories/recommendations?repository_id=owner%2Frepo", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"repository_id":"owner/repo"`) || !strings.Contains(list.Body.String(), `"state":"open"`) {
+		t.Fatalf("persisted slash-id recommendations = %d: %s", list.Code, list.Body.String())
+	}
+	summary := request(t, server.Router(), http.MethodGet, "/repositories/recommendations/summary?repository_id=owner%2Frepo", "")
+	if summary.Code != http.StatusOK || !strings.Contains(summary.Body.String(), `"repository_id":"owner/repo"`) {
+		t.Fatalf("slash-id summary = %d: %s", summary.Code, summary.Body.String())
+	}
+}
+
 func TestRecommendationsDisabledByConfigReturnsEmptyReport(t *testing.T) {
 	recommender := &fakeRecommender{}
 	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)

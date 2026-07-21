@@ -13,6 +13,7 @@ from agent_engine.errors import (
     ToolLimitExceededError,
 )
 from agent_engine.llm_client import ChatCompletion, CompletionUsage, ToolCall
+from agent_engine.prompt import CODE_GENERATION_SYSTEM_PROMPT, build_validation_feedback
 from agent_engine.settings import AgentSettings
 
 
@@ -70,8 +71,17 @@ class FakeChatClient:
 
 
 class FakeGeneratedFilesClient:
-    def __init__(self, contract, *, ready=True, error=None, model="test-codegen-model"):
+    def __init__(
+        self,
+        contract=None,
+        *,
+        contracts=None,
+        ready=True,
+        error=None,
+        model="test-codegen-model",
+    ):
         self.contract = contract
+        self.contracts = list(contracts or [])
         self.is_ready = ready
         self.error = error
         self.model = model
@@ -88,7 +98,8 @@ class FakeGeneratedFilesClient:
         self.response_schema = response_schema
         if self.error:
             raise self.error
-        content = self.contract if isinstance(self.contract, str) else json.dumps(self.contract)
+        contract = self.contracts.pop(0) if self.contracts else self.contract
+        content = contract if isinstance(contract, str) else json.dumps(contract)
         return ChatCompletion(
             content,
             "hidden codegen reasoning",
@@ -303,6 +314,44 @@ async def test_generate_files_returns_contract_without_writing_files(
 
 
 @pytest.mark.asyncio
+async def test_generate_files_merges_duplicate_paths(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Implemented expiration validation.",
+            "files": [
+                {
+                    "action": "modify",
+                    "path": "src/auth.py",
+                    "content": "def validate(token):\n    return token.valid\n",
+                    "explanation": "Keeps the original validation flow.",
+                },
+                {
+                    "action": "modify",
+                    "path": "./src/auth.py",
+                    "content": (
+                        "def validate(token):\n"
+                        "    return token.valid and not token.expired\n"
+                    ),
+                    "explanation": "Adds token expiration validation.",
+                },
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["files"]) == 1
+    assert payload["files"][0]["path"] == "src/auth.py"
+    assert payload["files"][0]["content"].strip().endswith("not token.expired")
+    assert "Keeps the original validation flow." in payload["files"][0]["explanation"]
+    assert "Adds token expiration validation." in payload["files"][0]["explanation"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad_file",
     [
@@ -346,6 +395,189 @@ async def test_generate_files_rejects_invalid_model_contract(generated_files_req
 
     assert response.status_code == 502
     assert response.json()["code"] == "invalid_generated_files"
+
+
+@pytest.mark.asyncio
+async def test_generate_files_error_identifies_invalid_file_candidate(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Bad output.",
+            "files": [
+                {
+                    "action": "create",
+                    "path": "backend-python/app/__init__.py",
+                    "explanation": "Adds a package initialization file.",
+                }
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "invalid file candidate at files.0" in detail
+    assert "action=create" in detail
+    assert "path=backend-python/app/__init__.py" in detail
+
+
+@pytest.mark.asyncio
+async def test_generate_files_repairs_missing_modify_content(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        contracts=[
+            {
+                "summary": "Bad output.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "explanation": "Adds token expiration validation.",
+                    }
+                ],
+            },
+            {
+                "summary": "Validated token expiration.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "def validate(token):\n"
+                            "    return token.valid and not token.expired\n"
+                        ),
+                        "explanation": "Rejects expired tokens before accepting valid tokens.",
+                    }
+                ],
+            },
+        ]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"][0]["content"].strip().endswith("not token.expired")
+    assert len(model.messages) == 2
+    assert "The previous generated files JSON was invalid" in model.messages[1][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_repairs_compressed_modify_content(generated_files_request):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    model = FakeGeneratedFilesClient(
+        contracts=[
+            {
+                "summary": "Bad compressed output.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "import logging def validate(token): "
+                            "return token.valid and not token.expired"
+                        ),
+                        "explanation": "Adds token expiration validation.",
+                    }
+                ],
+            },
+            {
+                "summary": "Validated token expiration.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "import logging\n\n"
+                            "def validate(token):\n"
+                            "    logging.info('validating token')\n"
+                            "    return token.valid and not token.expired\n"
+                        ),
+                        "explanation": "Rejects expired tokens before accepting valid tokens.",
+                    }
+                ],
+            },
+        ]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "\n" in body["files"][0]["content"]
+    assert len(model.messages) == 2
+    assert "compressed or partial" in model.messages[1][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_rejects_compressed_modify_after_repair(generated_files_request):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    compressed = {
+        "summary": "Bad compressed output.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging def validate(token): "
+                    "return token.valid and not token.expired"
+                ),
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(contracts=[compressed, compressed])
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "invalid_generated_files"
+    assert "compressed or partial" in response.json()["detail"]
+
+
+def test_code_generation_prompt_distinguishes_create_and_modify_actions():
+    assert "Never use action" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "for a path already present" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "`repository_file_inventory`" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "use action `modify`" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "for existing" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "entire final file" in CODE_GENERATION_SYSTEM_PROMPT
+
+
+def test_plan_validation_feedback_includes_heading_skeleton():
+    feedback = build_validation_feedback(["headings are missing, duplicated, or out of order"])
+
+    assert "# Implementation Plan" in feedback
+    assert "## Issue Summary" in feedback
+    assert "## Risks and Open Questions" in feedback
+    assert "no extra headings" in feedback
 
 
 @pytest.mark.asyncio

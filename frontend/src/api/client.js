@@ -31,6 +31,10 @@ export class ApiError extends Error {
   }
 }
 
+function repositoryQuery(repositoryId) {
+  return `repository_id=${encodeURIComponent(repositoryId)}`
+}
+
 async function request(method, path, body) {
   let res
   try {
@@ -110,15 +114,15 @@ export const httpApi = {
   analyzeRepository: (repositoryId, payload) =>
     request(
       'POST',
-      `/integrations/gitflame/repositories/${encodeURIComponent(repositoryId)}/recommendations/analyze`,
+      `/integrations/gitflame/recommendations/analyze?${repositoryQuery(repositoryId)}`,
       payload,
     ),
   getRecommendationStatus: (repositoryId) =>
-    request('GET', `/repositories/${encodeURIComponent(repositoryId)}/recommendations/status`),
+    request('GET', `/repositories/recommendations/status?${repositoryQuery(repositoryId)}`),
   getRecommendationSummary: (repositoryId) =>
-    request('GET', `/repositories/${encodeURIComponent(repositoryId)}/recommendations/summary`),
+    request('GET', `/repositories/recommendations/summary?${repositoryQuery(repositoryId)}`),
   listRecommendations: (repositoryId) =>
-    request('GET', `/repositories/${encodeURIComponent(repositoryId)}/recommendations`),
+    request('GET', `/repositories/recommendations?${repositoryQuery(repositoryId)}`),
   closeRecommendation: (recommendationId) =>
     request('PATCH', `/recommendations/${encodeURIComponent(recommendationId)}/close`),
   deleteRecommendation: (recommendationId) =>

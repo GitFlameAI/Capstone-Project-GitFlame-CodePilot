@@ -89,6 +89,36 @@ func TestNormalizeGeneratedFilesMergesDuplicatePaths(t *testing.T) {
 	}
 }
 
+func TestDropNoopGeneratedFilesSkipsUnchangedModifies(t *testing.T) {
+	files := DropNoopGeneratedFiles([]domain.GeneratedFileOperation{
+		{
+			Action:      "modify",
+			Path:        "./app/main.py",
+			Content:     "package main\n",
+			Explanation: "No effective change.",
+		},
+		{
+			Action:      "modify",
+			Path:        "app/routes.py",
+			Content:     "def route():\n    return 'ok'\n",
+			Explanation: "Adds a real change.",
+		},
+	}, []domain.RepositoryFile{
+		{Path: "app/main.py", Content: "package main\r\n"},
+		{Path: "app/routes.py", Content: "def route():\n    pass\n"},
+	})
+	if len(files) != 1 || files[0].Path != "app/routes.py" {
+		t.Fatalf("expected only changed file to remain, got %+v", files)
+	}
+}
+
+func TestNormalizeGitFlameBranchNameRemovesSlashes(t *testing.T) {
+	branch := normalizeGitFlameBranchName("ai/ISSUE-170-improve-project")
+	if branch != "ai-ISSUE-170-improve-project" {
+		t.Fatalf("unexpected branch name: %s", branch)
+	}
+}
+
 func validPlan(path string) string {
 	return `# Implementation Plan
 
