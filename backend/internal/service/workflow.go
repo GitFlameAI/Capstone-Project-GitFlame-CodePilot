@@ -223,7 +223,7 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	result.Files = NormalizeGeneratedFiles(result.Files)
+	result.Files = DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles)
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -399,7 +399,9 @@ func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract
 	if slug == "" {
 		slug = "issue"
 	}
-	branch := session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug
+	branch := normalizeGitFlameBranchName(
+		session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug,
+	)
 	return domain.GeneratedFilesContract{
 		BranchName:    branch,
 		BaseBranch:    session.Request.Repository.DefaultBranch,
@@ -408,6 +410,15 @@ func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract
 		PRTitle:       session.Request.Issue.Title,
 		Reviewer:      session.Request.Issue.Author,
 	}
+}
+
+func normalizeGitFlameBranchName(value string) string {
+	normalized := regexp.MustCompile(`[^a-zA-Z0-9._-]+`).ReplaceAllString(strings.TrimSpace(value), "-")
+	normalized = strings.Trim(normalized, "-.")
+	if normalized == "" {
+		return "ai-issue"
+	}
+	return normalized
 }
 
 func queuedStatusForTask(taskType string) string {
@@ -505,6 +516,25 @@ func NormalizeGeneratedFiles(files []domain.GeneratedFileOperation) []domain.Gen
 		merged[index] = file
 	}
 	return merged
+}
+
+func DropNoopGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func normalizeGeneratedFileContent(value string) string {
+	return strings.ReplaceAll(value, "\r\n", "\n")
 }
 
 func mergeExplanation(previous, next string) string {

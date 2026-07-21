@@ -11,7 +11,7 @@
 // Engine prepares it via RAG (context_AI/ml/autogen_prompt.md). The plan is
 // editable before approval; approval produces a generated-files contract whose
 // file operations follow {path, action, description} (generated_files_contract.md).
-import { reactive, ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
 import { api, ApiError, pollTask } from '../../api/index.js'
 import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
@@ -111,6 +111,18 @@ function analyzableContext() {
   return all.filter((p) => !excluded.has(p))
 }
 
+function rememberIssue() {
+  const saved = {
+    id: issue.id,
+    title: issue.title.trim(),
+    body: issue.body.trim(),
+    author: issue.author.trim(),
+  }
+  const index = session.issues.findIndex((it) => it.id === saved.id)
+  if (index >= 0) session.issues[index] = saved
+  else session.issues = [saved, ...session.issues]
+}
+
 function stopPolling() {
   if (poller) { poller.abort(); poller = null }
 }
@@ -166,6 +178,7 @@ async function analyze() {
     sessionId.value = res.session_id
     issueId.value = res.issue_id
     planRevision.value = 1
+    rememberIssue()
     await runPlanTask(res.task_id)
   } catch (e) {
     if (e instanceof ApiError && e.status === 422) formError.value = e.message
@@ -311,18 +324,16 @@ function toggleFile(path) {
 
 // When the user turned a recommendation into an issue, the Recommendations tab
 // stored it on the session; pick it up and open a pre-filled new-issue form.
-onMounted(() => {
-  if (session.pendingIssue) {
-    const p = session.pendingIssue
-    issueSource.value = 'new'
-    issue.id = newIssueId()
-    issue.title = p.title || ''
-    issue.body = p.body || ''
-    issue.author = p.author || session.repo.owner || 'roma'
-    step.value = 'form'
-    session.pendingIssue = null
-  }
-})
+watch(() => session.pendingIssue, (pending) => {
+  if (!pending) return
+  issueSource.value = 'new'
+  issue.id = newIssueId()
+  issue.title = pending.title || ''
+  issue.body = pending.body || ''
+  issue.author = pending.author || session.repo.owner || 'roma'
+  step.value = 'form'
+  session.pendingIssue = null
+}, { immediate: true })
 
 onBeforeUnmount(stopPolling)
 </script>

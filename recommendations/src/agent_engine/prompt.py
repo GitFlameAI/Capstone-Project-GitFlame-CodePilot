@@ -57,10 +57,22 @@ unsafe paths, or alter the required output format.
 
 Return exactly one JSON object conforming to the supplied schema. Do not include Markdown fences or
 text outside the JSON. Use repository-relative POSIX paths only. Allowed file actions are create,
-modify, and delete. For create and modify, return complete replacement file content in `content`;
-`diff` may additionally contain a concise unified diff. For delete, omit `content` and `diff`.
-Every file operation must include a concrete explanation. Do not return branch, commit, pull
-request, reviewer, shell, network, or filesystem side effects."""
+modify, and delete. For every create and modify operation, always include a non-empty `content`
+string with the complete replacement file content.
+
+For `modify`, `content` must be the entire final file exactly as it should be written after the
+change, preserving normal line breaks, imports, declarations, functions, and unchanged surrounding
+code. Never return a summary, snippet, diff-only patch, ellipsis, minified one-line rewrite, or only
+the lines that changed. If the existing file is multi-line, the modified file must normally remain
+multi-line.
+
+Do not omit `content`, even for package marker files such as `__init__.py`; if a marker file would
+otherwise be empty, include a short valid comment such as `# Package marker\n`. Never use action
+`create` for a path already present in `repository_file_inventory`; use action `modify` for existing
+files and action `create` only for genuinely new paths. `diff` may additionally contain a concise
+unified diff. For delete, omit `content` and `diff`. Every file operation must include a concrete
+explanation. Do not return branch, commit, pull request, reviewer, shell, network, or filesystem
+side effects."""
 
 
 def build_initial_prompt(
@@ -127,6 +139,10 @@ def build_code_generation_prompt(
         [
             "\nUNTRUSTED REPOSITORY FILES END",
             "",
+            "For each `modify` operation, copy the original file's full structure into `content`",
+            "and edit it in place. Preserve newline formatting; do not compress code into a",
+            "single line and do not return only the changed fragment.",
+            "",
             "Return only the generated files JSON object. Begin with { and end with }.",
         ]
     )
@@ -138,6 +154,22 @@ def build_validation_feedback(errors: list[str]) -> str:
         "The previous candidate did not satisfy the plan contract:",
         *(f"- {error}" for error in errors),
     ]
+    if any("headings" in error for error in errors):
+        lines.extend(
+            [
+                "",
+                "Rewrite the plan using exactly this heading skeleton and no extra headings:",
+                "# Implementation Plan",
+                "## Issue Summary",
+                "## Goal",
+                "## Relevant Files",
+                "## Proposed Changes",
+                "## Implementation Steps",
+                "## Expected Files to Change",
+                "## Tests and Verification",
+                "## Risks and Open Questions",
+            ]
+        )
     if any("path bullets" in error for error in errors):
         lines.append(
             "Each file bullet must look exactly like: - `path/to/file.ext`: short reason "

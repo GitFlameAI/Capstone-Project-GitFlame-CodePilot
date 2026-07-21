@@ -114,7 +114,11 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
 	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
 	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
+	mux.HandleFunc("POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
 	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
+	mux.HandleFunc("GET /repositories/recommendations/status", s.recommendationStatus)
+	mux.HandleFunc("GET /repositories/recommendations/summary", s.recommendationSummary)
+	mux.HandleFunc("GET /repositories/recommendations", s.recommendations)
 	mux.HandleFunc("GET /repositories/{id}/recommendations/status", s.recommendationStatus)
 	mux.HandleFunc("GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
 	mux.HandleFunc("GET /repositories/{id}/recommendations", s.recommendations)
@@ -393,7 +397,8 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 400, "invalid_json", err.Error())
 		return
 	}
-	if req.Repository.ID != r.PathValue("id") {
+	repositoryID := repositoryIDFromRequest(r)
+	if repositoryID != "" && req.Repository.ID != repositoryID {
 		problem(w, 422, "validation_error", "path repository id must match payload repository id")
 		return
 	}
@@ -476,7 +481,7 @@ func recommendationReportResponse(report *domain.RecommendationReport) map[strin
 	return map[string]any{"repository_id": report.RepositoryID, "status": report.Status, "summary": report.Summary, "recommendations": recommendations}
 }
 func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
@@ -490,7 +495,7 @@ func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "status": v.Status, "total": len(v.Recommendations), "open": len(v.Recommendations) - closed, "closed": closed})
 }
 func (s *Server) recommendationSummary(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
@@ -498,12 +503,19 @@ func (s *Server) recommendationSummary(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]string{"repository_id": v.RepositoryID, "summary": v.Summary})
 }
 func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
 	}
 	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "recommendations": v.Recommendations})
+}
+
+func repositoryIDFromRequest(r *http.Request) string {
+	if id := strings.TrimSpace(r.PathValue("id")); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.URL.Query().Get("repository_id"))
 }
 func (s *Server) closeRecommendation(w http.ResponseWriter, r *http.Request) {
 	v, err := s.store.CloseRecommendation(r.PathValue("id"))

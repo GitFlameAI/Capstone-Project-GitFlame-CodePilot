@@ -35,7 +35,7 @@ func ParseAIConfig(raw string) (domain.AIConfig, error) {
 		Raw:                      raw,
 		Version:                  scalar(doc, "version", "1"),
 		DefaultBranch:            scalar(doc, "repository.default_branch", "main"),
-		TargetBranchPrefix:       scalar(doc, "repository.target_branch_prefix", "ai/"),
+		TargetBranchPrefix:       scalar(doc, "repository.target_branch_prefix", "ai-"),
 		AnalysisEnabled:          boolean(doc, "analysis.enabled", true),
 		RequireApproval:          boolean(doc, "code_generation.require_user_approval", true),
 		RecommendationsEnabled:   boolean(doc, "recommendations.enabled", true),

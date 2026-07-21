@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -184,9 +185,11 @@ func (c *GitFlameClient) ResolveRepository(ctx context.Context, rawURL string) (
 }
 
 func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) error {
-	payload := map[string]string{"branch_name": branchName, "name": branchName, "ref": ref}
-	var response map[string]any
-	err := c.postJSON(ctx, fmt.Sprintf("/api/v1/repositories/%s/branches", url.PathEscape(repositoryID)), payload, &response)
+	payload := map[string]string{
+		"new_branch_name": branchName,
+		"old_ref_name":    ref,
+	}
+	err := c.postFirstAvailable(ctx, applyPOSTCandidates(repositoryID, "branches", "branches", payload), nil)
 	var integration *IntegrationError
 	if errors.As(err, &integration) && integration.Status == http.StatusConflict {
 		return nil
@@ -208,10 +211,169 @@ func (c *GitFlameClient) commitGeneratedFiles(ctx context.Context, repositoryID 
 		"files":          actions,
 	}
 	var response map[string]any
-	if err := c.postJSON(ctx, fmt.Sprintf("/api/v1/repositories/%s/commits", url.PathEscape(repositoryID)), payload, &response); err != nil {
-		return "", err
+	if err := c.postFirstAvailable(ctx, applyPOSTCandidates(repositoryID, "commits", "commits", payload), &response); err != nil {
+		var integration *IntegrationError
+		if !errors.As(err, &integration) || (integration.Status != http.StatusNotFound && integration.Status != http.StatusMethodNotAllowed) {
+			return "", err
+		}
+		return c.commitGeneratedFilesViaContents(ctx, repositoryID, contract)
 	}
 	return firstString(response, "sha", "commit_sha", "id", "commit.id", "commit.sha"), nil
+}
+
+func (c *GitFlameClient) commitGeneratedFilesViaContents(ctx context.Context, repositoryID string, contract domain.GeneratedFilesContract) (string, error) {
+	repositoryEndpoint, ok := giteaRepositoryEndpoint(repositoryID)
+	if !ok {
+		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repository_id", Detail: "repository id must use owner/repository format"}
+	}
+	commitSHA := ""
+	for index, file := range contract.Files {
+		message := contract.CommitMessage
+		if len(contract.Files) > 1 {
+			message = fmt.Sprintf("%s (%d/%d: %s)", contract.CommitMessage, index+1, len(contract.Files), file.Path)
+		}
+		sha, err := c.applyGeneratedFileViaContents(ctx, repositoryEndpoint, contract.BranchName, message, file)
+		if err != nil {
+			return "", err
+		}
+		if sha != "" {
+			commitSHA = sha
+		}
+	}
+	return commitSHA, nil
+}
+
+func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repositoryEndpoint, branch, message string, file domain.GeneratedFileOperation) (string, error) {
+	endpoint := repositoryEndpoint + "/contents/" + escapeRepositoryPath(file.Path)
+	var response map[string]any
+	switch file.Action {
+	case "create":
+		payload := map[string]any{
+			"branch":         branch,
+			"message":        message,
+			"commit_message": message,
+			"content":        base64.StdEncoding.EncodeToString([]byte(file.Content)),
+		}
+		if err := c.postJSON(ctx, endpoint, payload, &response); err != nil {
+			return "", generatedFileApplyError(file.Path, err)
+		}
+	case "modify":
+		shas, err := c.fetchFileSHACandidates(ctx, endpoint, branch)
+		if err != nil {
+			return "", generatedFileApplyError(file.Path, err)
+		}
+		var lastErr error
+		for _, sha := range shas {
+			payload := map[string]any{
+				"branch":         branch,
+				"message":        message,
+				"commit_message": message,
+				"content":        base64.StdEncoding.EncodeToString([]byte(file.Content)),
+				"sha":            sha,
+			}
+			if err := c.requestJSON(ctx, http.MethodPut, endpoint, payload, &response); err != nil {
+				lastErr = err
+				if integrationStatus(err) == http.StatusConflict {
+					continue
+				}
+				return "", generatedFileApplyError(file.Path, err)
+			}
+			lastErr = nil
+			break
+		}
+		if lastErr != nil {
+			return "", generatedFileApplyError(file.Path, lastErr)
+		}
+	case "delete":
+		shas, err := c.fetchFileSHACandidates(ctx, endpoint, branch)
+		if err != nil {
+			return "", generatedFileApplyError(file.Path, err)
+		}
+		var lastErr error
+		for _, sha := range shas {
+			payload := map[string]any{
+				"branch":         branch,
+				"message":        message,
+				"commit_message": message,
+				"sha":            sha,
+			}
+			if err := c.requestJSON(ctx, http.MethodDelete, endpoint, payload, &response); err != nil {
+				lastErr = err
+				if integrationStatus(err) == http.StatusConflict {
+					continue
+				}
+				return "", generatedFileApplyError(file.Path, err)
+			}
+			lastErr = nil
+			break
+		}
+		if lastErr != nil {
+			return "", generatedFileApplyError(file.Path, lastErr)
+		}
+	default:
+		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_file_action", Detail: "generated file action is not supported by GitFlame apply"}
+	}
+	return firstString(response, "commit.sha", "commit.id", "sha", "commit_sha", "id"), nil
+}
+
+func generatedFileApplyError(filePath string, err error) error {
+	var integration *IntegrationError
+	if !errors.As(err, &integration) {
+		return fmt.Errorf("%s: %w", filePath, err)
+	}
+	clone := *integration
+	if clone.Detail == "" {
+		clone.Detail = filePath
+	} else if !strings.Contains(clone.Detail, filePath) {
+		clone.Detail = filePath + ": " + clone.Detail
+	}
+	return &clone
+}
+
+func integrationStatus(err error) int {
+	var integration *IntegrationError
+	if errors.As(err, &integration) {
+		return integration.Status
+	}
+	return 0
+}
+
+func (c *GitFlameClient) fetchFileSHACandidates(ctx context.Context, endpoint, ref string) ([]string, error) {
+	var response map[string]any
+	if err := c.getJSON(ctx, endpoint, ref, &response); err != nil {
+		return nil, err
+	}
+	shas := uniqueNonEmptyStrings(
+		firstString(response, "sha"),
+		firstString(response, "content.sha"),
+		firstString(response, "file.sha"),
+		firstString(response, "data.sha"),
+		firstString(response, "data.content.sha"),
+		firstString(response, "data.file.sha"),
+		firstString(response, "last_commit_sha"),
+		firstString(response, "commit.sha"),
+	)
+	if len(shas) == 0 {
+		return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API did not return file sha"}
+	}
+	return shas, nil
+}
+
+func uniqueNonEmptyStrings(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID string, contract domain.GeneratedFilesContract, baseBranch string) (string, string, error) {
@@ -226,12 +388,27 @@ func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID str
 		"reviewer":      contract.Reviewer,
 	}
 	var response map[string]any
-	if err := c.postJSON(ctx, fmt.Sprintf("/api/v1/repositories/%s/pull-requests", url.PathEscape(repositoryID)), payload, &response); err != nil {
+	if err := c.postFirstAvailable(ctx, applyPOSTCandidates(repositoryID, "pulls", "pull-requests", payload), &response); err != nil {
 		return "", "", err
 	}
 	id := firstString(response, "id", "number", "iid", "pull_request.id")
 	prURL := firstString(response, "pull_request_url", "html_url", "web_url", "url", "pull_request.url", "pull_request.html_url")
 	return id, prURL, nil
+}
+
+func applyPOSTCandidates(repositoryID, giteaResource, fallbackResource string, payload any) []gitFlamePOSTCandidate {
+	candidates := make([]gitFlamePOSTCandidate, 0, 3)
+	if endpoint, ok := giteaRepositoryEndpoint(repositoryID); ok {
+		candidates = append(candidates, gitFlamePOSTCandidate{Endpoint: endpoint + "/" + giteaResource, Payload: payload})
+		if fallbackResource != giteaResource {
+			candidates = append(candidates, gitFlamePOSTCandidate{Endpoint: endpoint + "/" + fallbackResource, Payload: payload})
+		}
+	}
+	candidates = append(candidates, gitFlamePOSTCandidate{
+		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/%s", url.PathEscape(repositoryID), fallbackResource),
+		Payload:  payload,
+	})
+	return candidates
 }
 
 func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
@@ -427,6 +604,11 @@ type gitFlameGETCandidate struct {
 	Ref      string
 }
 
+type gitFlamePOSTCandidate struct {
+	Endpoint string
+	Payload  any
+}
+
 func (c *GitFlameClient) getFirstAvailable(ctx context.Context, candidates []gitFlameGETCandidate) ([]byte, error) {
 	var lastErr error
 	for _, candidate := range candidates {
@@ -441,6 +623,22 @@ func (c *GitFlameClient) getFirstAvailable(ctx context.Context, candidates []git
 		}
 	}
 	return nil, lastErr
+}
+
+func (c *GitFlameClient) postFirstAvailable(ctx context.Context, candidates []gitFlamePOSTCandidate, target any) error {
+	var lastErr error
+	for _, candidate := range candidates {
+		err := c.postJSON(ctx, candidate.Endpoint, candidate.Payload, target)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		var integration *IntegrationError
+		if !errors.As(err, &integration) || (integration.Status != http.StatusNotFound && integration.Status != http.StatusMethodNotAllowed) {
+			return err
+		}
+	}
+	return lastErr
 }
 
 func giteaRepositoryEndpoint(repositoryID string) (string, bool) {
@@ -551,12 +749,16 @@ func (c *GitFlameClient) getJSON(ctx context.Context, endpoint, ref string, targ
 }
 
 func (c *GitFlameClient) postJSON(ctx context.Context, endpoint string, payload, target any) error {
+	return c.requestJSON(ctx, http.MethodPost, endpoint, payload, target)
+}
+
+func (c *GitFlameClient) requestJSON(ctx context.Context, method, endpoint string, payload, target any) error {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(payload); err != nil {
 		return err
 	}
 	requestURL := c.baseURL + endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, &body)
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, &body)
 	if err != nil {
 		return err
 	}
@@ -566,11 +768,11 @@ func (c *GitFlameClient) postJSON(ctx context.Context, endpoint string, payload,
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("gitflame_http method=POST path=%s error=%q", req.URL.EscapedPath(), err)
+		log.Printf("gitflame_http method=%s path=%s error=%q", method, req.URL.EscapedPath(), err)
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=POST path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
+	log.Printf("gitflame_http method=%s path=%s status=%d", method, req.URL.EscapedPath(), resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gitFlameHTTPError(resp)
 	}
@@ -622,15 +824,29 @@ func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byt
 }
 
 func gitFlameHTTPError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 200_000))
 	var problem struct {
-		Detail  string `json:"detail"`
-		Message string `json:"message"`
+		Detail  any    `json:"detail"`
+		Message any    `json:"message"`
+		Error   any    `json:"error"`
 		Code    string `json:"code"`
 	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 200_000)).Decode(&problem)
-	detail := problem.Detail
+	_ = json.Unmarshal(body, &problem)
+	detail := gitFlameProblemText(problem.Detail)
 	if detail == "" {
-		detail = problem.Message
+		detail = gitFlameProblemText(problem.Message)
+	}
+	if detail == "" {
+		detail = gitFlameProblemText(problem.Error)
+	}
+	if detail == "" {
+		var raw any
+		if json.Unmarshal(body, &raw) == nil {
+			detail = gitFlameProblemText(raw)
+		}
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(string(body))
 	}
 	if detail == "" {
 		detail = fmt.Sprintf("GitFlame API returned status %d", resp.StatusCode)
@@ -640,6 +856,29 @@ func gitFlameHTTPError(resp *http.Response) error {
 		code = "gitflame_api_error"
 	}
 	return &IntegrationError{Status: normalizeIntegrationStatus(resp.StatusCode), Code: code, Detail: detail}
+}
+
+func gitFlameProblemText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := gitFlameProblemText(item)
+			if text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		for _, key := range []string{"detail", "message", "error", "path"} {
+			if text := gitFlameProblemText(typed[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func firstString(document map[string]any, keys ...string) string {
@@ -808,7 +1047,7 @@ func matchRepositoryPattern(pattern, value string) bool {
 
 func normalizeIntegrationStatus(status int) int {
 	switch status {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return status
 	default:
 		if status >= 500 {
