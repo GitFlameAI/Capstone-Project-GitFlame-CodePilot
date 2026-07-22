@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 
 from pydantic import ValidationError
@@ -150,20 +151,68 @@ class AgentEngineService:
                 contract = _parse_generated_files_contract(repair_completion.content)
                 self._validate_generated_files_contract(contract, source, configuration)
             except (InvalidGeneratedFilesError, ValidationError, ValueError) as repair_exc:
-                context = (
-                    _invalid_generated_files_context(repair_completion.content)
-                    or first_context
+                target_paths = _partial_modify_paths_from_error(repair_exc) or (
+                    _partial_modify_paths_from_error(exc)
                 )
-                if context:
-                    logger.warning(
-                        "model returned invalid generated files contract after repair: %s",
-                        context,
+                if target_paths:
+                    targeted_completion = await self.model_client.complete(
+                        messages=[
+                            {"role": "system", "content": CODE_GENERATION_SYSTEM_PROMPT},
+                            {
+                                "role": "user",
+                                "content": compressor.compress_text(
+                                    _build_generated_files_targeted_repair_prompt(
+                                        request,
+                                        source,
+                                        schema,
+                                        repair_completion.content,
+                                        str(repair_exc),
+                                        target_paths,
+                                    ),
+                                    compressor.max_context_chars,
+                                ),
+                            },
+                        ],
+                        tools=[],
+                        response_schema=schema,
                     )
-                raise InvalidGeneratedFilesError(
-                    f"model returned invalid generated files contract: {repair_exc}"
-                    + (f"; {context}" if context else "")
-                ) from repair_exc
-            completion = repair_completion
+                    generation_time = time.perf_counter() - started
+                    try:
+                        contract = _parse_generated_files_contract(targeted_completion.content)
+                        self._validate_generated_files_contract(contract, source, configuration)
+                    except (InvalidGeneratedFilesError, ValidationError, ValueError) as targeted_exc:
+                        context = (
+                            _invalid_generated_files_context(targeted_completion.content)
+                            or _invalid_generated_files_context(repair_completion.content)
+                            or first_context
+                        )
+                        if context:
+                            logger.warning(
+                                "model returned invalid generated files contract after targeted "
+                                "repair: %s",
+                                context,
+                            )
+                        raise InvalidGeneratedFilesError(
+                            f"model returned invalid generated files contract: {targeted_exc}"
+                            + (f"; {context}" if context else "")
+                        ) from targeted_exc
+                    completion = targeted_completion
+                else:
+                    context = (
+                        _invalid_generated_files_context(repair_completion.content)
+                        or first_context
+                    )
+                    if context:
+                        logger.warning(
+                            "model returned invalid generated files contract after repair: %s",
+                            context,
+                        )
+                    raise InvalidGeneratedFilesError(
+                        f"model returned invalid generated files contract: {repair_exc}"
+                        + (f"; {context}" if context else "")
+                    ) from repair_exc
+            else:
+                completion = repair_completion
 
         return GenerateFilesResponse(
             request_id=request.request_id,
@@ -392,6 +441,72 @@ def _build_generated_files_repair_prompt(
             "- Return JSON only.",
         ]
     )
+
+
+def _partial_modify_paths_from_error(error: Exception) -> list[str]:
+    message = str(error)
+    paths = re.findall(
+        r"modify content for ([^\s]+) (?:appears compressed or partial|is too short|has too few lines)",
+        message,
+    )
+    return list(dict.fromkeys(paths))
+
+
+def _build_generated_files_targeted_repair_prompt(
+    request: GenerateFilesRequest,
+    source: ProvidedFilesRepositorySource,
+    response_schema: dict,
+    invalid_candidate: str,
+    validation_error: str,
+    target_paths: list[str],
+) -> str:
+    payload = {
+        "request_id": request.request_id,
+        "issue": request.issue.model_dump(mode="json"),
+        "repository": request.repository.model_dump(mode="json"),
+        "approved_plan_markdown": request.approved_plan_markdown,
+        "repository_file_inventory": source.paths(),
+        "target_partial_modify_paths": target_paths,
+        "response_json_schema": response_schema,
+    }
+    sections = [
+        "Repair the generated files JSON. The previous repair still returned partial or",
+        "compressed `modify.content` for one or more existing files.",
+        "",
+        "For each target path, you are given the complete original file below. Build the final",
+        "replacement by copying that complete file and editing it in place. The returned",
+        "`content` for a modify operation must be a complete multi-line file, not a snippet,",
+        "summary, pseudo-code, ellipsis, one-line compression, or diff.",
+        "",
+        "<repair_request>",
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        "</repair_request>",
+        "",
+        "FULL ORIGINAL TARGET FILES START",
+    ]
+    for path in target_paths:
+        if path in source.paths():
+            sections.append(f"\n<original_file path={json.dumps(path, ensure_ascii=False)}>")
+            sections.append(source.read(path))
+            sections.append("</original_file>")
+    sections.extend(
+        [
+            "\nFULL ORIGINAL TARGET FILES END",
+            "",
+            "Validation error:",
+            validation_error,
+            "",
+            "<invalid_generated_files_candidate>",
+            _truncate(invalid_candidate, 20_000),
+            "</invalid_generated_files_candidate>",
+            "",
+            "Return exactly one JSON object conforming to the schema. Preserve valid operations",
+            "from the invalid candidate when they are still needed, but every `modify.content`",
+            "must contain the complete final file content with normal line breaks.",
+            "Return JSON only.",
+        ]
+    )
+    return "\n".join(sections)
 
 
 def _format_invalid_file_context(index: int, action: str, path: str, explanation: str) -> str:

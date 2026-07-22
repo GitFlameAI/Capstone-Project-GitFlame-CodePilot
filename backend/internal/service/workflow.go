@@ -223,7 +223,10 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	result.Files = DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles)
+	result.Files = DropUnsafePartialModifyFiles(
+		DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles),
+		request.RepositoryFiles,
+	)
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -531,6 +534,71 @@ func DropNoopGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFil
 		filtered = append(filtered, file)
 	}
 	return filtered
+}
+
+func DropUnsafePartialModifyFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = file.Content
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" {
+			original, exists := contentByPath[normalizePlanPath(file.Path)]
+			if exists && looksLikePartialModifyContent(file.Content, original) {
+				continue
+			}
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func looksLikePartialModifyContent(generated, original string) bool {
+	generated = strings.TrimSpace(normalizeGeneratedFileContent(generated))
+	original = strings.TrimSpace(normalizeGeneratedFileContent(original))
+	if generated == "" || original == "" {
+		return false
+	}
+	generatedLines := meaningfulLines(generated)
+	originalLines := meaningfulLines(original)
+	if len(originalLines) < 3 && len(original) < 120 {
+		return false
+	}
+	if len(originalLines) >= 3 && len(generatedLines) <= 1 {
+		return true
+	}
+	if len(original) >= 120 {
+		minChars := len(original) * 35 / 100
+		if minChars < 80 {
+			minChars = 80
+		}
+		if len(generated) < minChars {
+			return true
+		}
+	}
+	if len(originalLines) >= 8 {
+		minLines := len(originalLines) * 35 / 100
+		if minLines < 3 {
+			minLines = 3
+		}
+		if len(generatedLines) < minLines {
+			return true
+		}
+	}
+	return false
+}
+
+func meaningfulLines(value string) []string {
+	rawLines := strings.Split(value, "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func normalizeGeneratedFileContent(value string) string {
