@@ -399,8 +399,9 @@ func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) 
 				t.Fatal(err)
 			}
 			if payload["last_commit_id"] == "readme-sha" {
-				if payload["content"] != "# Updated" {
-					t.Fatalf("expected raw content payload, got %+v", payload)
+				decoded, err := base64.StdEncoding.DecodeString(payload["content"])
+				if err != nil || string(decoded) != "# Updated" {
+					t.Fatalf("expected base64 content payload, got %+v", payload)
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
 			}
@@ -424,7 +425,7 @@ func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if putAttempts != 3 || result.CommitSHA != "commit-123" {
+	if putAttempts != 2 || result.CommitSHA != "commit-123" {
 		t.Fatalf("expected last_commit_id fallback, attempts=%d result=%+v", putAttempts, result)
 	}
 }

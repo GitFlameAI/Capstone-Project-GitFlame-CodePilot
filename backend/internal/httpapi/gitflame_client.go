@@ -400,33 +400,37 @@ func contentsUpdatePayloads(branch, message, content, sha string) []namedContent
 	}
 	standardEncoded := clonePayload(standard)
 	standardEncoded["content"] = base64.StdEncoding.EncodeToString([]byte(content))
-	standardRaw := clonePayload(standard)
-	standardRaw["content"] = content
 
 	lastCommit := map[string]any{
 		"branch":         branch,
 		"commit_message": message,
 		"last_commit_id": sha,
-		"content":        content,
+		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
+	}
+	lastCommitSHA := map[string]any{
+		"branch":          branch,
+		"commit_message":  message,
+		"last_commit_sha": sha,
+		"content":         base64.StdEncoding.EncodeToString([]byte(content)),
 	}
 	branchName := map[string]any{
 		"branch_name":    branch,
 		"commit_message": message,
 		"sha":            sha,
-		"content":        content,
+		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
 	}
 	branchNameLastCommit := map[string]any{
 		"branch_name":    branch,
 		"commit_message": message,
 		"last_commit_id": sha,
-		"content":        content,
+		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
 	}
 	return []namedContentsPayload{
 		{Name: "gitea-base64-sha", Payload: standardEncoded},
-		{Name: "gitea-raw-sha", Payload: standardRaw},
-		{Name: "raw-last-commit-id", Payload: lastCommit},
-		{Name: "branch-name-raw-sha", Payload: branchName},
-		{Name: "branch-name-last-commit-id", Payload: branchNameLastCommit},
+		{Name: "base64-last-commit-id", Payload: lastCommit},
+		{Name: "base64-last-commit-sha", Payload: lastCommitSHA},
+		{Name: "branch-name-base64-sha", Payload: branchName},
+		{Name: "branch-name-base64-last-commit-id", Payload: branchNameLastCommit},
 	}
 }
 
