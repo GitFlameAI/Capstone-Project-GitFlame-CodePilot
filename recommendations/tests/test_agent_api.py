@@ -686,6 +686,52 @@ async def test_generate_files_focused_fallback_fixes_compressed_modify_content(
 
 
 @pytest.mark.asyncio
+async def test_generate_files_focused_fallback_recovers_from_truncated_json(
+    generated_files_request,
+):
+    generated_files_request["approved_plan_markdown"] = valid_plan("src/auth.py")
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    truncated = '{"summary":"Consolidate auth","files":[{"action":"modify","path":"src/auth.py"'
+    repaired = {
+        "summary": "Validated token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging\n\n"
+                    "def validate(token):\n"
+                    "    logging.info('validating token')\n"
+                    "    return token.valid and not token.expired\n"
+                ),
+                "explanation": "Rejects expired tokens before accepting valid tokens.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(contracts=[truncated, truncated, truncated, repaired])
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"][0]["path"] == "src/auth.py"
+    assert len(model.messages) == 4
+    assert "Generate a focused generated-files JSON contract" in model.messages[3][1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_generate_files_drops_partial_modify_after_targeted_repair(
     generated_files_request,
 ):
