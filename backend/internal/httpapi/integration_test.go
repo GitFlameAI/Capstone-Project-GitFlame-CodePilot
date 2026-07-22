@@ -465,6 +465,50 @@ func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
 	}
 }
 
+func TestApplyGeneratedFilesPersistsGitFlameContentsConflict(t *testing.T) {
+	generator := &fakeGenerator{}
+	source := &fakeGitFlameSource{applyErr: &IntegrationError{
+		Status: http.StatusConflict,
+		Code:   "AlreadyExistNameError",
+		Detail: "README.md",
+	}}
+	server := NewWithDependenciesAndIntegrations(
+		repository.NewMemoryStore(), generator, source, nil,
+	)
+	body := `{"repository":{"id":"repo-conflict","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"45-conflict","title":"Apply files","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(
+		t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body,
+	)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(
+		t, server.Router(), http.MethodPost, "/ai/issues/45-conflict/approve", "",
+	)
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := request(
+		t, server.Router(), http.MethodPost, "/ai/issues/45-conflict/gitflame/apply", "",
+	)
+	if applied.Code != http.StatusConflict ||
+		!strings.Contains(applied.Body.String(), `"code":"AlreadyExistNameError"`) {
+		t.Fatalf("unexpected apply conflict = %d: %s", applied.Code, applied.Body.String())
+	}
+	status := request(
+		t, server.Router(), http.MethodGet, "/ai/issues/45-conflict/code-generation", "",
+	)
+	if !strings.Contains(status.Body.String(), `"apply_status":"failed"`) ||
+		!strings.Contains(status.Body.String(), `"apply_error":"README.md"`) {
+		t.Fatalf("stored apply conflict was incomplete: %s", status.Body.String())
+	}
+}
+
 func TestApplyGeneratedFilesRejectsAllNoopFallbackWithoutGitFlameApply(t *testing.T) {
 	generator := &fakeGenerator{files: []domain.GeneratedFileOperation{{
 		Action:      "modify",

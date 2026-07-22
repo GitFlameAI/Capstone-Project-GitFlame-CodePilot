@@ -299,7 +299,12 @@ func TestGitFlameClientFallsBackToContentsWhenCommitEndpointRejectsPost(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			if payload["branch"] != "ai-45-apply-files" || payload["branch_name"] != "" || payload["sha"] != "readme-sha" || string(decoded) != "# Updated" {
+			if payload["branch"] != "ai-45-apply-files" ||
+				payload["from_path"] != "README.md" ||
+				payload["message"] != "Implement apply files" ||
+				payload["sha"] != "readme-sha" ||
+				string(decoded) != "# Updated" ||
+				len(payload) != 5 {
 				t.Fatalf("unexpected contents payload: %+v decoded=%q", payload, string(decoded))
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
@@ -332,6 +337,7 @@ func TestGitFlameClientFallsBackToContentsWhenCommitEndpointRejectsPost(t *testi
 
 func TestGitFlameClientRetriesContentsUpdateWithAlternateSHA(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	getAttempts := 0
 	putAttempts := 0
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
@@ -340,7 +346,12 @@ func TestGitFlameClientRetriesContentsUpdateWithAlternateSHA(t *testing.T) {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
 			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"commit-sha","content":{"sha":"readme-sha"}}`)), Header: make(http.Header)}, nil
+			getAttempts++
+			sha := "commit-sha"
+			if getAttempts > 1 {
+				sha = "readme-sha"
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"` + sha + `"}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
 			putAttempts++
 			var payload map[string]string
@@ -376,12 +387,12 @@ func TestGitFlameClientRetriesContentsUpdateWithAlternateSHA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if putAttempts != 2 || result.CommitSHA != "commit-123" {
-		t.Fatalf("expected retry with alternate sha, attempts=%d result=%+v", putAttempts, result)
+	if getAttempts != 2 || putAttempts != 2 || result.CommitSHA != "commit-123" {
+		t.Fatalf("expected refreshed sha, gets=%d puts=%d result=%+v", getAttempts, putAttempts, result)
 	}
 }
 
-func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) {
+func TestGitFlameClientUsesSwaggerUpdateContractForExistingFile(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	putAttempts := 0
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -398,14 +409,18 @@ func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) 
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatal(err)
 			}
-			if payload["last_commit_id"] == "readme-sha" {
-				decoded, err := base64.StdEncoding.DecodeString(payload["content"])
-				if err != nil || string(decoded) != "# Updated" {
-					t.Fatalf("expected base64 content payload, got %+v", payload)
-				}
-				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
+			decoded, err := base64.StdEncoding.DecodeString(payload["content"])
+			if err != nil || string(decoded) != "# Updated" {
+				t.Fatalf("expected base64 content payload, got %+v", payload)
 			}
-			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"code":"AlreadyExistNameError","detail":["README.md"]}`)), Header: make(http.Header)}, nil
+			if payload["branch"] != "ai-45-apply-files" ||
+				payload["from_path"] != "README.md" ||
+				payload["message"] != "Implement apply files" ||
+				payload["sha"] != "readme-sha" ||
+				len(payload) != 5 {
+				t.Fatalf("unexpected Swagger update payload: %+v", payload)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
 		default:
@@ -425,8 +440,8 @@ func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if putAttempts != 2 || result.CommitSHA != "commit-123" {
-		t.Fatalf("expected last_commit_id fallback, attempts=%d result=%+v", putAttempts, result)
+	if putAttempts != 1 || result.CommitSHA != "commit-123" {
+		t.Fatalf("expected one Swagger update request, attempts=%d result=%+v", putAttempts, result)
 	}
 }
 
@@ -481,7 +496,7 @@ func TestGitFlameClientRefreshesFileSHABeforeFinalConflict(t *testing.T) {
 	}
 }
 
-func TestGitFlameClientRetriesContentsCreateWithRawContentPayload(t *testing.T) {
+func TestGitFlameClientUsesSwaggerCreateContract(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	createAttempts := 0
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -496,16 +511,15 @@ func TestGitFlameClientRetriesContentsCreateWithRawContentPayload(t *testing.T) 
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatal(err)
 			}
-			if createAttempts == 1 {
-				if _, err := base64.StdEncoding.DecodeString(payload["content"]); err != nil {
-					t.Fatalf("expected first create payload to use base64 content: %+v", payload)
-				}
-				return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"message":"Invalid JSON payload: data structure is incorrect or contains invalid fields"}`)), Header: make(http.Header)}, nil
+			decoded, err := base64.StdEncoding.DecodeString(payload["content"])
+			if err != nil || string(decoded) != "export const discount = 10\n" {
+				t.Fatalf("expected base64 create content: %+v", payload)
 			}
-			if payload["content"] != "export const discount = 10\n" || payload["branch"] != "ai-45-apply-files" {
-				t.Fatalf("unexpected raw create payload: %+v", payload)
+			if payload["branch"] != "ai-45-apply-files" ||
+				payload["message"] != "Implement apply files" || len(payload) != 3 {
+				t.Fatalf("unexpected Swagger create payload: %+v", payload)
 			}
-			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-raw"}}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-create"}}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
 		default:
@@ -525,8 +539,55 @@ func TestGitFlameClientRetriesContentsCreateWithRawContentPayload(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if createAttempts != 2 || result.CommitSHA != "commit-raw" {
-		t.Fatalf("expected raw create retry, attempts=%d result=%+v", createAttempts, result)
+	if createAttempts != 1 || result.CommitSHA != "commit-create" {
+		t.Fatalf("expected one Swagger create request, attempts=%d result=%+v", createAttempts, result)
+	}
+}
+
+func TestGitFlameClientUsesSwaggerDeleteContract(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	deleteAttempts := 0
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`"ai-45-apply-files"`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
+			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"readme-sha"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			deleteAttempts++
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["branch"] != "ai-45-apply-files" ||
+				payload["message"] != "Implement apply files" ||
+				payload["sha"] != "readme-sha" || len(payload) != 3 {
+				t.Fatalf("unexpected Swagger delete payload: %+v", payload)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-delete"}}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected GitFlame apply request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	result, err := client.ApplyGeneratedFiles(context.Background(), domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"}, domain.GeneratedFilesContract{
+		BranchName:    "ai-45-apply-files",
+		CommitMessage: "Implement apply files",
+		PRTitle:       "Apply files",
+		Files: []domain.GeneratedFileOperation{{
+			Action: "delete", Path: "README.md", Explanation: "Removes obsolete docs.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteAttempts != 1 || result.CommitSHA != "commit-delete" {
+		t.Fatalf("expected one Swagger delete request, attempts=%d result=%+v", deleteAttempts, result)
 	}
 }
 
@@ -539,7 +600,7 @@ func TestGitFlameClientAnnotatesContentsApplyErrorsWithPath(t *testing.T) {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
 			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"content":{"sha":"readme-sha"}}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"readme-sha"}`)), Header: make(http.Header)}, nil
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
 			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"message":["reference update conflict"]}`)), Header: make(http.Header)}, nil
 		default:

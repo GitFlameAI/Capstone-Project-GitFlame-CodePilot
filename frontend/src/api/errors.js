@@ -106,7 +106,11 @@ export function describeError(err) {
   }
 
   // 3. GitFlame API unreachable / apply failure (writing branch/commit/PR).
-  if (code === 'gitflame_apply_error' || code === 'gitflame_apply_failed') {
+  if (
+    code === 'gitflame_apply_error' ||
+    code === 'gitflame_apply_failed' ||
+    code === 'AlreadyExistNameError'
+  ) {
     return {
       title: 'Couldn’t apply the changes to GitFlame',
       message:

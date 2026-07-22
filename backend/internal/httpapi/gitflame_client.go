@@ -32,6 +32,30 @@ type gitFlameCommitAction struct {
 	Content  string `json:"content,omitempty"`
 }
 
+type gitFlameCreateFileRequest struct {
+	Branch  string `json:"branch"`
+	Content string `json:"content"`
+	Message string `json:"message"`
+}
+
+type gitFlameUpdateFileRequest struct {
+	Branch   string `json:"branch"`
+	Content  string `json:"content"`
+	FromPath string `json:"from_path"`
+	Message  string `json:"message"`
+	SHA      string `json:"sha"`
+}
+
+type gitFlameDeleteFileRequest struct {
+	Branch  string `json:"branch"`
+	Message string `json:"message"`
+	SHA     string `json:"sha"`
+}
+
+type gitFlameContentsResponse struct {
+	SHA string `json:"sha"`
+}
+
 type GitFlameUserProfile struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
@@ -248,7 +272,10 @@ func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repo
 	var response map[string]any
 	switch file.Action {
 	case "create":
-		if err := c.createGeneratedFileViaContents(ctx, endpoint, branch, message, file.Content, &response); err != nil {
+		payload := gitFlameCreateFileRequest{
+			Branch: branch, Content: encodeFileContent(file.Content), Message: message,
+		}
+		if err := c.postJSON(ctx, endpoint, payload, &response); err != nil {
 			return "", generatedFileApplyError(file.Path, err)
 		}
 	case "modify":
@@ -262,30 +289,14 @@ func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repo
 			return sha, nil
 		}
 	case "delete":
-		shas, err := c.fetchFileSHACandidates(ctx, endpoint, branch)
+		sha, err := c.deleteGeneratedFileViaContents(
+			ctx, endpoint, branch, message, file.Path, &response,
+		)
 		if err != nil {
 			return "", generatedFileApplyError(file.Path, err)
 		}
-		var lastErr error
-		for _, sha := range shas {
-			payload := map[string]any{
-				"branch":         branch,
-				"message":        message,
-				"commit_message": message,
-				"sha":            sha,
-			}
-			if err := c.requestJSON(ctx, http.MethodDelete, endpoint, payload, &response); err != nil {
-				lastErr = err
-				if integrationStatus(err) == http.StatusConflict {
-					continue
-				}
-				return "", generatedFileApplyError(file.Path, err)
-			}
-			lastErr = nil
-			break
-		}
-		if lastErr != nil {
-			return "", generatedFileApplyError(file.Path, lastErr)
+		if sha != "" {
+			return sha, nil
 		}
 	default:
 		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_file_action", Detail: "generated file action is not supported by GitFlame apply"}
@@ -299,160 +310,68 @@ func (c *GitFlameClient) updateGeneratedFileViaContents(
 	response *map[string]any,
 ) (string, error) {
 	var lastErr error
-	for refresh := 0; refresh < 2; refresh++ {
-		shas, err := c.fetchFileSHACandidates(ctx, endpoint, branch)
+	for attempt := 0; attempt < 2; attempt++ {
+		sha, err := c.fetchFileSHA(ctx, endpoint, branch)
 		if err != nil {
 			return "", err
 		}
-		for _, sha := range shas {
-			for _, candidate := range contentsUpdatePayloads(branch, message, content, sha) {
-				err := c.requestJSON(
-					ctx, http.MethodPut, endpoint, candidate.Payload, response,
-				)
-				if err == nil {
-					return firstString(
-						*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
-					), nil
-				}
-				lastErr = err
-				log.Printf(
-					"gitflame_contents_update path=%s branch=%s payload=%s sha=%s status=%d code=%s detail=%q",
-					filePath,
-					branch,
-					candidate.Name,
-					shortSHA(sha),
-					integrationStatus(err),
-					integrationCode(err),
-					err.Error(),
-				)
-				if retryContentsUpdatePayload(err) {
-					continue
-				}
-				if integrationStatus(err) == http.StatusConflict {
-					break
-				}
-				return "", err
-			}
+		payload := gitFlameUpdateFileRequest{
+			Branch:   branch,
+			Content:  encodeFileContent(content),
+			FromPath: filePath,
+			Message:  message,
+			SHA:      sha,
 		}
-		if integrationStatus(lastErr) != http.StatusConflict {
-			break
+		lastErr = c.requestJSON(ctx, http.MethodPut, endpoint, payload, response)
+		if lastErr == nil {
+			return firstString(
+				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
+			), nil
+		}
+		log.Printf(
+			"gitflame_contents_update path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
+			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
+			integrationCode(lastErr), lastErr.Error(),
+		)
+		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
+			return "", lastErr
 		}
 	}
 	return "", lastErr
 }
 
-func (c *GitFlameClient) createGeneratedFileViaContents(ctx context.Context, endpoint, branch, message, content string, response *map[string]any) error {
+func (c *GitFlameClient) deleteGeneratedFileViaContents(
+	ctx context.Context,
+	endpoint, branch, message, filePath string,
+	response *map[string]any,
+) (string, error) {
 	var lastErr error
-	for _, payload := range contentsWritePayloads(branch, message, content, "") {
-		if err := c.postJSON(ctx, endpoint, payload, response); err != nil {
-			lastErr = err
-			if !retryContentsPayload(err) {
-				return err
-			}
-			continue
+	for attempt := 0; attempt < 2; attempt++ {
+		sha, err := c.fetchFileSHA(ctx, endpoint, branch)
+		if err != nil {
+			return "", err
 		}
-		return nil
-	}
-	for _, payload := range contentsWritePayloads(branch, message, content, "") {
-		if err := c.requestJSON(ctx, http.MethodPut, endpoint, payload, response); err != nil {
-			lastErr = err
-			if !retryContentsPayload(err) {
-				return err
-			}
-			continue
+		payload := gitFlameDeleteFileRequest{Branch: branch, Message: message, SHA: sha}
+		lastErr = c.requestJSON(ctx, http.MethodDelete, endpoint, payload, response)
+		if lastErr == nil {
+			return firstString(
+				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
+			), nil
 		}
-		return nil
+		log.Printf(
+			"gitflame_contents_delete path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
+			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
+			integrationCode(lastErr), lastErr.Error(),
+		)
+		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
+			return "", lastErr
+		}
 	}
-	return lastErr
+	return "", lastErr
 }
 
-func contentsWritePayloads(branch, message, content, sha string) []map[string]any {
-	base := map[string]any{
-		"branch":         branch,
-		"message":        message,
-		"commit_message": message,
-	}
-	if sha != "" {
-		base["sha"] = sha
-	}
-	encoded := clonePayload(base)
-	encoded["content"] = base64.StdEncoding.EncodeToString([]byte(content))
-	raw := clonePayload(base)
-	raw["content"] = content
-	encodedWithBranchName := clonePayload(encoded)
-	encodedWithBranchName["branch_name"] = branch
-	rawWithBranchName := clonePayload(raw)
-	rawWithBranchName["branch_name"] = branch
-	return []map[string]any{encoded, raw, encodedWithBranchName, rawWithBranchName}
-}
-
-type namedContentsPayload struct {
-	Name    string
-	Payload map[string]any
-}
-
-func contentsUpdatePayloads(branch, message, content, sha string) []namedContentsPayload {
-	standard := map[string]any{
-		"branch":         branch,
-		"message":        message,
-		"commit_message": message,
-		"sha":            sha,
-	}
-	standardEncoded := clonePayload(standard)
-	standardEncoded["content"] = base64.StdEncoding.EncodeToString([]byte(content))
-
-	lastCommit := map[string]any{
-		"branch":         branch,
-		"commit_message": message,
-		"last_commit_id": sha,
-		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
-	}
-	lastCommitSHA := map[string]any{
-		"branch":          branch,
-		"commit_message":  message,
-		"last_commit_sha": sha,
-		"content":         base64.StdEncoding.EncodeToString([]byte(content)),
-	}
-	branchName := map[string]any{
-		"branch_name":    branch,
-		"commit_message": message,
-		"sha":            sha,
-		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
-	}
-	branchNameLastCommit := map[string]any{
-		"branch_name":    branch,
-		"commit_message": message,
-		"last_commit_id": sha,
-		"content":        base64.StdEncoding.EncodeToString([]byte(content)),
-	}
-	return []namedContentsPayload{
-		{Name: "gitea-base64-sha", Payload: standardEncoded},
-		{Name: "base64-last-commit-id", Payload: lastCommit},
-		{Name: "base64-last-commit-sha", Payload: lastCommitSHA},
-		{Name: "branch-name-base64-sha", Payload: branchName},
-		{Name: "branch-name-base64-last-commit-id", Payload: branchNameLastCommit},
-	}
-}
-
-func clonePayload(payload map[string]any) map[string]any {
-	cloned := make(map[string]any, len(payload)+1)
-	for key, value := range payload {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func retryContentsPayload(err error) bool {
-	status := integrationStatus(err)
-	return status == http.StatusBadRequest || status == http.StatusUnprocessableEntity
-}
-
-func retryContentsUpdatePayload(err error) bool {
-	if retryContentsPayload(err) {
-		return true
-	}
-	return integrationStatus(err) == http.StatusConflict &&
-		strings.EqualFold(integrationCode(err), "AlreadyExistNameError")
+func encodeFileContent(content string) string {
+	return base64.StdEncoding.EncodeToString([]byte(content))
 }
 
 func integrationCode(err error) string {
@@ -493,42 +412,16 @@ func integrationStatus(err error) int {
 	return 0
 }
 
-func (c *GitFlameClient) fetchFileSHACandidates(ctx context.Context, endpoint, ref string) ([]string, error) {
-	var response map[string]any
+func (c *GitFlameClient) fetchFileSHA(ctx context.Context, endpoint, ref string) (string, error) {
+	var response gitFlameContentsResponse
 	if err := c.getJSON(ctx, endpoint, ref, &response); err != nil {
-		return nil, err
+		return "", err
 	}
-	shas := uniqueNonEmptyStrings(
-		firstString(response, "sha"),
-		firstString(response, "content.sha"),
-		firstString(response, "file.sha"),
-		firstString(response, "data.sha"),
-		firstString(response, "data.content.sha"),
-		firstString(response, "data.file.sha"),
-		firstString(response, "last_commit_sha"),
-		firstString(response, "commit.sha"),
-	)
-	if len(shas) == 0 {
-		return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API did not return file sha"}
+	response.SHA = strings.TrimSpace(response.SHA)
+	if response.SHA == "" {
+		return "", &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API did not return file sha"}
 	}
-	return shas, nil
-}
-
-func uniqueNonEmptyStrings(values ...string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	return result
+	return response.SHA, nil
 }
 
 func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID string, contract domain.GeneratedFilesContract, baseBranch string) (string, string, error) {
