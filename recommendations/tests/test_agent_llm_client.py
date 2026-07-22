@@ -56,6 +56,34 @@ async def test_openai_client_parses_streamed_content_reasoning_tools_and_usage()
 
 
 @pytest.mark.asyncio
+async def test_openai_client_uses_per_request_max_tokens_override():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        body = (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": "# Implementation Plan"}}]})
+            + "\n\n"
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://model/v1"
+    )
+    client = OpenAICompatibleClient(AgentSettings(), client=http_client)
+    await client.complete(
+        messages=[{"role": "user", "content": "plan"}],
+        tools=[],
+        max_tokens=1234,
+    )
+
+    assert captured["max_tokens"] == 1234
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_openai_client_ready_checks_exact_model():
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"id": AgentSettings.model}]})

@@ -53,18 +53,16 @@ class FakeChatClient:
         self.is_ready = ready
         self.error = error
         self.messages = []
+        self.tools_by_call = []
+        self.max_tokens_by_call = []
 
     async def ready(self) -> bool:
         return self.is_ready
 
-    async def complete(self, *, messages, tools):
+    async def complete(self, *, messages, tools, response_schema=None, max_tokens=None):
         self.messages.append(messages)
-        assert {item["function"]["name"] for item in tools} == {
-            "read_file",
-            "list_dir",
-            "grep",
-            "search_repository",
-        }
+        self.tools_by_call.append([item["function"]["name"] for item in tools])
+        self.max_tokens_by_call.append(max_tokens)
         if self.error:
             raise self.error
         return self.completions.pop(0)
@@ -92,10 +90,11 @@ class FakeGeneratedFilesClient:
     async def ready(self) -> bool:
         return self.is_ready
 
-    async def complete(self, *, messages, tools, response_schema=None):
+    async def complete(self, *, messages, tools, response_schema=None, max_tokens=None):
         self.messages.append(messages)
         self.tools = tools
         self.response_schema = response_schema
+        self.max_tokens = max_tokens
         if self.error:
             raise self.error
         contract = self.contracts.pop(0) if self.contracts else self.contract
@@ -183,6 +182,13 @@ async def test_agent_health_ready_and_generate(agent_request):
     initial_prompt = model.messages[0][1]["content"]
     assert "src/auth.py" in initial_prompt
     assert "vendor/ignored.py" not in initial_prompt
+    assert set(model.tools_by_call[0]) == {
+        "read_file",
+        "list_dir",
+        "grep",
+        "search_repository",
+    }
+    assert model.max_tokens_by_call == [AgentSettings.plan_max_completion_tokens]
 
 
 @pytest.mark.asyncio
@@ -207,6 +213,64 @@ async def test_agent_executes_read_only_tool_before_plan(agent_request):
     tool_message = model.messages[1][-1]
     assert tool_message["role"] == "tool"
     assert "def validate(token)" in tool_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_reserves_final_steps_for_plan_synthesis(agent_request):
+    model = FakeChatClient(
+        [
+            ChatCompletion(
+                "",
+                "",
+                [ToolCall("call-1", "read_file", {"path": "src/auth.py"})],
+            ),
+            ChatCompletion(valid_plan(), ""),
+        ]
+    )
+    settings = AgentSettings(max_steps=2, synthesis_reserved_steps=1)
+    app = create_app(settings=settings, model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/plans/generate", json=agent_request)
+
+    assert response.status_code == 200
+    assert model.tools_by_call[0]
+    assert model.tools_by_call[1] == []
+    assert "Tool use is now disabled" in model.messages[1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_forces_synthesis_after_repeated_tool_call(agent_request):
+    repeated = ToolCall("call-2", "read_file", {"path": "src/auth.py"})
+    model = FakeChatClient(
+        [
+            ChatCompletion(
+                "",
+                "",
+                [ToolCall("call-1", "read_file", {"path": "src/auth.py"})],
+            ),
+            ChatCompletion("", "", [repeated]),
+            ChatCompletion(valid_plan(), ""),
+        ]
+    )
+    settings = AgentSettings(max_steps=5, synthesis_reserved_steps=1)
+    app = create_app(settings=settings, model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/plans/generate", json=agent_request)
+
+    assert response.status_code == 200
+    assert response.json()["usage"]["tool_calls"] == 1
+    assert model.tools_by_call == [
+        ["read_file", "list_dir", "grep", "search_repository"],
+        ["read_file", "list_dir", "grep", "search_repository"],
+        [],
+    ]
+    assert any(
+        "repeated an identical tool call" in str(message.get("content"))
+        for snapshot in model.messages
+        for message in snapshot
+    )
 
 
 @pytest.mark.asyncio

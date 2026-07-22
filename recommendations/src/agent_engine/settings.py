@@ -24,6 +24,9 @@ class AgentSettings:
     max_tool_output_chars: int = 8_192
     context_limit_tokens: int = 32_768
     max_completion_tokens: int = 12_000
+    plan_max_completion_tokens: int = 6_000
+    code_max_completion_tokens: int = 12_000
+    synthesis_reserved_steps: int = 3
     max_retries: int = 2
     retry_backoff_seconds: float = 0.25
     rag_base_url: str | None = None
@@ -53,10 +56,22 @@ class AgentSettings:
                 os.getenv("MODEL_CONTEXT_LIMIT", str(cls.context_limit_tokens))
             ),
             max_completion_tokens=int(
+                os.getenv("MODEL_MAX_COMPLETION_TOKENS", str(cls.max_completion_tokens))
+            ),
+            plan_max_completion_tokens=int(
                 os.getenv(
-                    "MODEL_MAX_COMPLETION_TOKENS",
-                    str(cls.max_completion_tokens),
+                    "PLAN_MAX_COMPLETION_TOKENS",
+                    os.getenv("MODEL_MAX_COMPLETION_TOKENS", str(cls.plan_max_completion_tokens)),
                 )
+            ),
+            code_max_completion_tokens=int(
+                os.getenv(
+                    "CODE_MAX_COMPLETION_TOKENS",
+                    os.getenv("MODEL_MAX_COMPLETION_TOKENS", str(cls.code_max_completion_tokens)),
+                )
+            ),
+            synthesis_reserved_steps=int(
+                os.getenv("AGENT_SYNTHESIS_RESERVED_STEPS", str(cls.synthesis_reserved_steps))
             ),
             max_retries=int(os.getenv("MODEL_MAX_RETRIES", str(cls.max_retries))),
             retry_backoff_seconds=float(

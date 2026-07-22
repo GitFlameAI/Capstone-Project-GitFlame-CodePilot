@@ -54,7 +54,7 @@ class AgentEngineService:
             context_limit_tokens=max(
                 8_000,
                 self.settings.context_limit_tokens
-                - self.settings.max_completion_tokens
+                - self.settings.plan_max_completion_tokens
                 - 2_048,
             ),
             max_tool_output_chars=self.settings.max_tool_output_chars,
@@ -104,7 +104,7 @@ class AgentEngineService:
             context_limit_tokens=max(
                 8_000,
                 self.settings.context_limit_tokens
-                - self.settings.max_completion_tokens
+                - self.settings.code_max_completion_tokens
                 - 2_048,
             ),
             max_tool_output_chars=self.settings.max_tool_output_chars,
@@ -128,6 +128,7 @@ class AgentEngineService:
             ],
             tools=[],
             response_schema=schema,
+            max_tokens=self.settings.code_max_completion_tokens,
         )
         generation_time = time.perf_counter() - started
         try:
@@ -155,6 +156,7 @@ class AgentEngineService:
                 ],
                 tools=[],
                 response_schema=schema,
+                max_tokens=self.settings.code_max_completion_tokens,
             )
             generation_time = time.perf_counter() - started
             try:
@@ -187,6 +189,7 @@ class AgentEngineService:
                         ],
                         tools=[],
                         response_schema=schema,
+                        max_tokens=self.settings.code_max_completion_tokens,
                     )
                     generation_time = time.perf_counter() - started
                     try:
@@ -328,6 +331,7 @@ class AgentEngineService:
                 ],
                 tools=[],
                 response_schema=schema,
+                max_tokens=self.settings.code_max_completion_tokens,
             )
             last_completion = completion
             try:
