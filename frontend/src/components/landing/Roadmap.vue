@@ -41,8 +41,12 @@ const trackKeys = ['autogen', 'recommendations']
 
 const track = ref('autogen')
 const active = ref(0)
-const autoOn = ref(true) // manual play/pause
-const hovering = ref(false)
+const autoOn = ref(true) // manual play/pause intent (default: on)
+const hovering = ref(false) // cursor is over the block
+// One-shot override: set when the user presses Resume WHILE hovering, so auto-
+// advance keeps running even with the cursor on the block. It is cleared the
+// moment the cursor leaves, so re-entering pauses again by default.
+const hoverOverride = ref(false)
 
 const steps = computed(() => tracks[track.value].steps)
 const current = computed(() => steps.value[active.value])
@@ -52,8 +56,13 @@ const reduceMotion =
   window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// Effective running state: auto-advance is on AND the cursor isn't hovering.
-const running = computed(() => autoOn.value && !hovering.value && !reduceMotion)
+// Effective running state. Auto-advance is on, motion is allowed, and either the
+// cursor isn't hovering OR the user has explicitly resumed while hovering. The
+// play/pause icon, the dim styling and the CSS progress bar all follow this, so
+// hovering visibly shows the paused state on the control in the top-left corner.
+const running = computed(
+  () => autoOn.value && !reduceMotion && (!hovering.value || hoverOverride.value),
+)
 
 let timer = null
 let startTs = 0
@@ -97,8 +106,25 @@ watch(running, (on) => {
   else holdTimer()
 })
 
+// The control reflects and drives the EFFECTIVE running state:
+//   - running now -> pause (turn auto-advance off, drop any hover override);
+//   - paused now  -> resume; if the cursor is on the block, override the hover-
+//                    pause so it runs anyway (until the cursor leaves and returns).
 function toggleAuto() {
-  autoOn.value = !autoOn.value
+  if (running.value) {
+    autoOn.value = false
+    hoverOverride.value = false
+  } else {
+    autoOn.value = true
+    if (hovering.value) hoverOverride.value = true
+  }
+}
+function onEnter() {
+  hovering.value = true
+}
+function onLeave() {
+  hovering.value = false
+  hoverOverride.value = false // re-entering pauses again by default
 }
 function selectTrack(t) {
   if (track.value !== t) {
@@ -121,17 +147,17 @@ onBeforeUnmount(clearTimer)
 </script>
 
 <template>
-  <div class="rm" :class="{ rm_paused: !running }" @mouseenter="hovering = true" @mouseleave="hovering = false">
+  <div class="rm" :class="{ rm_paused: !running }" @mouseenter="onEnter" @mouseleave="onLeave">
     <!-- top bar: play/pause + sliding track toggle -->
     <div class="rm__top">
       <button
         class="rm__pp"
-        :class="{ rm__pp_off: !autoOn }"
-        :aria-label="autoOn ? 'Pause auto-advance' : 'Resume auto-advance'"
-        :title="autoOn ? 'Pause auto-advance' : 'Resume auto-advance'"
+        :class="{ rm__pp_off: !running }"
+        :aria-label="running ? 'Pause auto-advance' : 'Resume auto-advance'"
+        :title="running ? 'Pause auto-advance' : 'Resume auto-advance'"
         @click="toggleAuto"
       >
-        <GfIcon :name="autoOn ? 'pause' : 'play'" :size="13" />
+        <GfIcon :name="running ? 'pause' : 'play'" :size="13" />
       </button>
 
       <div class="rm__tabs" role="tablist" aria-label="Capabilities">

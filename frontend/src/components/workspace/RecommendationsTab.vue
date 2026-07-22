@@ -273,8 +273,7 @@ onMounted(load)
     <template v-else>
       <div v-if="stale" class="stalebar">
         <GfIcon name="alert" :size="15" />
-        <span>The repository changed since this analysis. Re-run to refresh the recommendations.</span>
-        <GfButton variant="secondary" size="s" @click="runAnalysis({ auto: true })"><GfIcon name="refresh" :size="14" /> Re-run now</GfButton>
+        <span>The repository changed since this analysis. Use <strong>Re-run</strong> below to refresh the recommendations.</span>
       </div>
       <section class="summary gf-card">
         <p class="summary__text"><span class="summary__kw">Summary: </span>{{ summary }}</p>

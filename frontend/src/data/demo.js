@@ -137,19 +137,9 @@ export function pushedIssue() {
   }
 }
 
-// Glob patterns offered in the Config "exclude paths" picker (also accepts custom).
-export const excludePathOptions = [
-  'node_modules/**',
-  'dist/**',
-  'build/**',
-  '.git/**',
-  'vendor/**',
-  'coverage/**',
-  'target/**',
-  '.next/**',
-  '*.min.js',
-  '*.lock',
-]
+// NOTE: the Config "exclude paths" picker no longer uses a hard-coded list. Its
+// suggestions are derived from the real connected repository tree — see
+// excludePathOptionsFromTree() in src/utils/excludePaths.js.
 
 export const RECOMMENDATION_CATEGORIES = [
   { id: 'code_duplication', label: 'Code duplication' },
