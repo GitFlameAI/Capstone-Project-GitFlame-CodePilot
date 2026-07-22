@@ -112,6 +112,18 @@ func TestDropNoopGeneratedFilesSkipsUnchangedModifies(t *testing.T) {
 	}
 }
 
+func TestDropNoopGeneratedFilesKeepsAllNoopFallback(t *testing.T) {
+	files := DropNoopGeneratedFiles([]domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "app/main.py",
+		Content:     "package app\n",
+		Explanation: "Safe fallback with complete original content.",
+	}}, []domain.RepositoryFile{{Path: "app/main.py", Content: "package app\n"}})
+	if len(files) != 1 || files[0].Path != "app/main.py" {
+		t.Fatalf("expected all-noop fallback to remain, got %+v", files)
+	}
+}
+
 func TestDropUnsafePartialModifyFilesSkipsCompressedModifyContent(t *testing.T) {
 	originalAuth := strings.Join([]string{
 		"from fastapi import Depends, HTTPException",

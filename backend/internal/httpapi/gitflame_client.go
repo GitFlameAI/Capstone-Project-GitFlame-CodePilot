@@ -248,13 +248,7 @@ func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repo
 	var response map[string]any
 	switch file.Action {
 	case "create":
-		payload := map[string]any{
-			"branch":         branch,
-			"message":        message,
-			"commit_message": message,
-			"content":        base64.StdEncoding.EncodeToString([]byte(file.Content)),
-		}
-		if err := c.postJSON(ctx, endpoint, payload, &response); err != nil {
+		if err := c.createGeneratedFileViaContents(ctx, endpoint, branch, message, file.Content, &response); err != nil {
 			return "", generatedFileApplyError(file.Path, err)
 		}
 	case "modify":
@@ -264,22 +258,23 @@ func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repo
 		}
 		var lastErr error
 		for _, sha := range shas {
-			payload := map[string]any{
-				"branch":         branch,
-				"message":        message,
-				"commit_message": message,
-				"content":        base64.StdEncoding.EncodeToString([]byte(file.Content)),
-				"sha":            sha,
-			}
-			if err := c.requestJSON(ctx, http.MethodPut, endpoint, payload, &response); err != nil {
-				lastErr = err
-				if integrationStatus(err) == http.StatusConflict {
-					continue
+			for _, payload := range contentsWritePayloads(branch, message, file.Content, sha) {
+				if err := c.requestJSON(ctx, http.MethodPut, endpoint, payload, &response); err != nil {
+					lastErr = err
+					if integrationStatus(err) == http.StatusConflict {
+						break
+					}
+					if retryContentsPayload(err) {
+						continue
+					}
+					return "", generatedFileApplyError(file.Path, err)
 				}
-				return "", generatedFileApplyError(file.Path, err)
+				lastErr = nil
+				break
 			}
-			lastErr = nil
-			break
+			if lastErr == nil {
+				break
+			}
 		}
 		if lastErr != nil {
 			return "", generatedFileApplyError(file.Path, lastErr)
@@ -314,6 +309,64 @@ func (c *GitFlameClient) applyGeneratedFileViaContents(ctx context.Context, repo
 		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_file_action", Detail: "generated file action is not supported by GitFlame apply"}
 	}
 	return firstString(response, "commit.sha", "commit.id", "sha", "commit_sha", "id"), nil
+}
+
+func (c *GitFlameClient) createGeneratedFileViaContents(ctx context.Context, endpoint, branch, message, content string, response *map[string]any) error {
+	var lastErr error
+	for _, payload := range contentsWritePayloads(branch, message, content, "") {
+		if err := c.postJSON(ctx, endpoint, payload, response); err != nil {
+			lastErr = err
+			if !retryContentsPayload(err) {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+	for _, payload := range contentsWritePayloads(branch, message, content, "") {
+		if err := c.requestJSON(ctx, http.MethodPut, endpoint, payload, response); err != nil {
+			lastErr = err
+			if !retryContentsPayload(err) {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func contentsWritePayloads(branch, message, content, sha string) []map[string]any {
+	base := map[string]any{
+		"branch":         branch,
+		"message":        message,
+		"commit_message": message,
+	}
+	if sha != "" {
+		base["sha"] = sha
+	}
+	encoded := clonePayload(base)
+	encoded["content"] = base64.StdEncoding.EncodeToString([]byte(content))
+	raw := clonePayload(base)
+	raw["content"] = content
+	encodedWithBranchName := clonePayload(encoded)
+	encodedWithBranchName["branch_name"] = branch
+	rawWithBranchName := clonePayload(raw)
+	rawWithBranchName["branch_name"] = branch
+	return []map[string]any{encoded, raw, encodedWithBranchName, rawWithBranchName}
+}
+
+func clonePayload(payload map[string]any) map[string]any {
+	cloned := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func retryContentsPayload(err error) bool {
+	status := integrationStatus(err)
+	return status == http.StatusBadRequest || status == http.StatusUnprocessableEntity
 }
 
 func generatedFileApplyError(filePath string, err error) error {
