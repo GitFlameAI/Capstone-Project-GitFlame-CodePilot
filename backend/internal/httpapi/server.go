@@ -390,6 +390,7 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Repository        domain.RepositoryMetadata `json:"repository"`
 		YAMLConfig        string                    `json:"yaml_config"`
+		Categories        []string                  `json:"categories"`
 		RepositoryFiles   []domain.RepositoryFile   `json:"repository_files"`
 		RepositoryContext []string                  `json:"repository_context"`
 	}

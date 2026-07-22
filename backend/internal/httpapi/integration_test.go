@@ -457,7 +457,7 @@ func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
 func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	recommender := &fakeRecommender{}
 	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
-	body := `{"repository":{"id":"repo-rec","default_branch":"main"},"yaml_config":"version: 1","repository_files":[{"path":"src/app.go","content":"package app"}]}`
+	body := `{"repository":{"id":"repo-rec","default_branch":"main"},"yaml_config":"version: 1","categories":["security"],"repository_files":[{"path":"src/app.go","content":"package app"}]}`
 	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/repositories/repo-rec/recommendations/analyze", body)
 	if response.Code != http.StatusOK {
 		t.Fatalf("recommendations status = %d: %s", response.Code, response.Body.String())
