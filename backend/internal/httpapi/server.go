@@ -328,8 +328,8 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 	applyContract.Files = service.DropNoopGeneratedFilesForApply(session.GeneratedFiles.Files, session.Request.RepositoryFiles)
 	now := time.Now().UTC()
 	if len(applyContract.Files) == 0 {
-		session.GeneratedFiles.ApplyStatus = "applied"
-		session.GeneratedFiles.ApplyError = ""
+		session.GeneratedFiles.ApplyStatus = "failed"
+		session.GeneratedFiles.ApplyError = "generated files contain no effective changes to apply"
 		session.GeneratedFiles.AppliedAt = &now
 		for index := range session.GeneratedFiles.Files {
 			session.GeneratedFiles.Files[index].Status = "skipped"
@@ -338,7 +338,7 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 			problem(w, http.StatusInternalServerError, "storage_error", err.Error())
 			return
 		}
-		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files contained no effective changes to apply.", GeneratedFiles: session.GeneratedFiles})
+		problem(w, http.StatusConflict, "no_effective_generated_changes", "generated files contain no effective changes to apply")
 		return
 	}
 	gitflame, connection, err := s.gitFlameSourceForRepository(r, session.Request.Repository.ID)

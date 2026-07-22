@@ -332,16 +332,7 @@ class AgentEngineService:
                 files.append(item)
                 seen_paths.add(item.path)
         if not files or last_completion is None:
-            if not _is_partial_modify_validation_error(validation_error):
-                return None
-            fallback = _safe_original_file_fallback_contract(
-                candidate_paths,
-                source,
-                validation_error,
-            )
-            if fallback is None:
-                return None
-            return fallback, last_completion
+            return None
         return (
             GeneratedFilesContract(
                 summary="Generated focused file operations for the approved plan.",
@@ -574,18 +565,6 @@ def _partial_modify_paths_from_error(error: Exception) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _is_partial_modify_validation_error(message: str) -> bool:
-    return any(
-        marker in message
-        for marker in (
-            "partial modify content",
-            "appears compressed or partial",
-            "too short for a full replacement file",
-            "has too few lines for a full replacement file",
-        )
-    )
-
-
 def _drop_unsafe_partial_modify_files(
     contract: GeneratedFilesContract,
     source: ProvidedFilesRepositorySource,
@@ -618,46 +597,6 @@ def _drop_unsafe_partial_modify_files(
         "; ".join(dropped_errors),
     )
     return GeneratedFilesContract(summary=contract.summary, files=kept)
-
-
-def _safe_original_file_fallback_contract(
-    target_paths: list[str],
-    source: ProvidedFilesRepositorySource,
-    validation_error: str,
-) -> GeneratedFilesContract | None:
-    files = []
-    seen_paths = set()
-    available = set(source.paths())
-    for path in target_paths:
-        if path not in available or path in seen_paths:
-            continue
-        original = source.read(path)
-        if not original.strip():
-            continue
-        files.append(
-            {
-                "action": "modify",
-                "path": path,
-                "content": original,
-                "explanation": (
-                    "Kept the complete original file because the model repeatedly "
-                    "returned partial replacement content. Validation error: "
-                    f"{_truncate(validation_error, 240)}"
-                ),
-            }
-        )
-        seen_paths.add(path)
-    if not files:
-        return None
-    return GeneratedFilesContract.model_validate(
-        {
-            "summary": (
-                "Returned safe original file replacements after repeated partial "
-                "modify outputs."
-            ),
-            "files": files,
-        }
-    )
 
 
 def _focused_generation_paths(

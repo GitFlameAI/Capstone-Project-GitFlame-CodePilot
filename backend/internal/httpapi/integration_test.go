@@ -465,7 +465,7 @@ func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
 	}
 }
 
-func TestApplyGeneratedFilesSkipsAllNoopFallbackWithoutGitFlameApply(t *testing.T) {
+func TestApplyGeneratedFilesRejectsAllNoopFallbackWithoutGitFlameApply(t *testing.T) {
 	generator := &fakeGenerator{files: []domain.GeneratedFileOperation{{
 		Action:      "modify",
 		Path:        "README.md",
@@ -489,14 +489,14 @@ func TestApplyGeneratedFilesSkipsAllNoopFallbackWithoutGitFlameApply(t *testing.
 	waitTask(t, server.Router(), approved.TaskID)
 
 	applied := request(t, server.Router(), http.MethodPost, "/ai/issues/45-noop/gitflame/apply", "")
-	if applied.Code != http.StatusOK {
+	if applied.Code != http.StatusConflict {
 		t.Fatalf("apply status = %d: %s", applied.Code, applied.Body.String())
 	}
 	if source.applyRepository.ID != "" || len(source.applyContract.Files) != 0 {
 		t.Fatalf("GitFlame apply should not be called for all-noop fallback: repo=%+v contract=%+v", source.applyRepository, source.applyContract)
 	}
-	if !strings.Contains(applied.Body.String(), `"apply_status":"applied"`) || !strings.Contains(applied.Body.String(), `"status":"skipped"`) {
-		t.Fatalf("noop apply response should be marked applied/skipped: %s", applied.Body.String())
+	if !strings.Contains(applied.Body.String(), `"code":"generated_files_not_ready"`) {
+		t.Fatalf("noop apply response should say generated files are not ready: %s", applied.Body.String())
 	}
 }
 
