@@ -151,8 +151,10 @@ class AgentEngineService:
                 contract = _parse_generated_files_contract(repair_completion.content)
                 self._validate_generated_files_contract(contract, source, configuration)
             except (InvalidGeneratedFilesError, ValidationError, ValueError) as repair_exc:
-                target_paths = _partial_modify_paths_from_error(repair_exc) or (
-                    _partial_modify_paths_from_error(exc)
+                target_paths = (
+                    _partial_modify_paths_from_error(repair_exc)
+                    or _partial_modify_paths_from_error(exc)
+                    or _paths_from_plan_markdown(request.approved_plan_markdown)
                 )
                 if target_paths:
                     targeted_completion = await self.model_client.complete(
@@ -235,19 +237,31 @@ class AgentEngineService:
                         else:
                             completion = targeted_completion
                 else:
-                    context = (
-                        _invalid_generated_files_context(repair_completion.content)
-                        or first_context
+                    focused = await self._generate_focused_file_contract(
+                        request,
+                        source,
+                        configuration,
+                        schema,
+                        compressor,
+                        _paths_from_plan_markdown(request.approved_plan_markdown),
+                        str(repair_exc),
                     )
-                    if context:
-                        logger.warning(
-                            "model returned invalid generated files contract after repair: %s",
-                            context,
+                    if focused is not None:
+                        contract, completion = focused
+                    else:
+                        context = (
+                            _invalid_generated_files_context(repair_completion.content)
+                            or first_context
                         )
-                    raise InvalidGeneratedFilesError(
-                        f"model returned invalid generated files contract: {repair_exc}"
-                        + (f"; {context}" if context else "")
-                    ) from repair_exc
+                        if context:
+                            logger.warning(
+                                "model returned invalid generated files contract after repair: %s",
+                                context,
+                            )
+                        raise InvalidGeneratedFilesError(
+                            f"model returned invalid generated files contract: {repair_exc}"
+                            + (f"; {context}" if context else "")
+                        ) from repair_exc
             else:
                 completion = repair_completion
 
