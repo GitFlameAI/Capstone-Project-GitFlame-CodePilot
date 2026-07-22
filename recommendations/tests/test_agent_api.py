@@ -551,7 +551,9 @@ async def test_generate_files_rejects_compressed_modify_after_repair(generated_f
             }
         ],
     }
-    model = FakeGeneratedFilesClient(contracts=[compressed, compressed, compressed])
+    model = FakeGeneratedFilesClient(
+        contracts=[compressed, compressed, compressed, compressed]
+    )
     app = create_app(settings=AgentSettings(), model_client=model)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -560,8 +562,9 @@ async def test_generate_files_rejects_compressed_modify_after_repair(generated_f
     assert response.status_code == 502
     assert response.json()["code"] == "invalid_generated_files"
     assert "compressed or partial" in response.json()["detail"]
-    assert len(model.messages) == 3
+    assert len(model.messages) == 4
     assert "FULL ORIGINAL TARGET FILES START" in model.messages[2][1]["content"]
+    assert "Generate a focused generated-files JSON contract" in model.messages[3][1]["content"]
 
 
 @pytest.mark.asyncio
@@ -620,6 +623,115 @@ async def test_generate_files_targeted_repair_fixes_compressed_modify_content(
     assert body["files"][0]["content"].strip().endswith("not token.expired")
     assert len(model.messages) == 3
     assert "FULL ORIGINAL TARGET FILES START" in model.messages[2][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_focused_fallback_fixes_compressed_modify_content(
+    generated_files_request,
+):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    compressed = {
+        "summary": "Bad compressed output.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging def validate(token): "
+                    "return token.valid and not token.expired"
+                ),
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    repaired = {
+        "summary": "Validated token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging\n\n"
+                    "def validate(token):\n"
+                    "    logging.info('validating token')\n"
+                    "    return token.valid and not token.expired\n"
+                ),
+                "explanation": "Rejects expired tokens before accepting valid tokens.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(
+        contracts=[compressed, compressed, compressed, repaired]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"][0]["content"].strip().endswith("not token.expired")
+    assert len(model.messages) == 4
+    assert "Generate a focused generated-files JSON contract" in model.messages[3][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_drops_partial_modify_after_targeted_repair(
+    generated_files_request,
+):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        },
+        {
+            "path": "src/config.py",
+            "content": "TIMEOUT = 10\n",
+        },
+    ]
+    compressed_auth = {
+        "action": "modify",
+        "path": "src/auth.py",
+        "content": "import logging def validate(token): return token.valid and not token.expired",
+        "explanation": "Adds token expiration validation.",
+    }
+    valid_config = {
+        "action": "modify",
+        "path": "src/config.py",
+        "content": "TIMEOUT = 15\n",
+        "explanation": "Raises timeout for slower integrations.",
+    }
+    partial_contract = {
+        "summary": "Mixed generated output.",
+        "files": [compressed_auth, valid_config],
+    }
+    model = FakeGeneratedFilesClient(
+        contracts=[partial_contract, partial_contract, partial_contract]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [file["path"] for file in body["files"]] == ["src/config.py"]
+    assert len(model.messages) == 3
 
 
 def test_code_generation_prompt_distinguishes_create_and_modify_actions():
