@@ -184,19 +184,22 @@ func TestGitFlameClientContinuesWhenApplyBranchAlreadyExists(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	var paths []string
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		paths = append(paths, r.URL.Path)
-		if r.Method != http.MethodPost {
-			t.Fatalf("unexpected method: %s", r.Method)
-		}
-		switch r.URL.Path {
-		case "/api/v1/repos/owner/repo/branches":
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
 			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"message":"reference update: reference already exists"}`)), Header: make(http.Header)}, nil
-		case "/api/v1/repos/owner/repo/commits":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/branches/ai-45-apply-files":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"name":"ai-45-apply-files"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/commits":
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"commit-123"}`)), Header: make(http.Header)}, nil
-		case "/api/v1/repos/owner/repo/pulls":
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7,"html_url":"https://gitflame.test/repo/pulls/7"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			if r.URL.Query().Get("state") != "open" || r.URL.Query().Get("branch_by") != "main" {
+				t.Fatalf("unexpected pull request lookup: %s", r.URL.String())
+			}
+			body := `[{"open_pr_count":1,"closed_pr_count":0,"list":[{"id":7,"html_url":"https://gitflame.test/repo/pulls/7","head":{"ref":"ai-45-apply-files"},"base":{"ref":"main"}}]}]`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		default:
-			t.Fatalf("unexpected GitFlame apply path: %s", r.URL.Path)
+			t.Fatalf("unexpected GitFlame apply request: %s %s", r.Method, r.URL.Path)
 		}
 		return nil, nil
 	})
@@ -213,15 +216,123 @@ func TestGitFlameClientContinuesWhenApplyBranchAlreadyExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := []string{
-		"/api/v1/repos/owner/repo/branches",
-		"/api/v1/repos/owner/repo/commits",
-		"/api/v1/repos/owner/repo/pulls",
+		"POST /api/v1/repos/owner/repo/branches",
+		"GET /api/v1/repos/owner/repo/branches/ai-45-apply-files",
+		"POST /api/v1/repos/owner/repo/commits",
+		"GET /api/v1/repos/owner/repo/pulls",
 	}
 	if strings.Join(paths, ",") != strings.Join(expected, ",") {
 		t.Fatalf("unexpected apply sequence: %v", paths)
 	}
 	if result.CommitSHA != "commit-123" || result.PullRequestID != "7" {
 		t.Fatalf("unexpected apply result: %+v", result)
+	}
+}
+
+func TestGitFlameClientUsesSwaggerPullRequestContract(t *testing.T) {
+	tests := []struct {
+		name             string
+		reviewer         string
+		expectedReviewer bool
+	}{
+		{name: "with reviewer", reviewer: "am1rv", expectedReviewer: true},
+		{name: "without reviewer", reviewer: "   "},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+			client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/repos/owner/repo/pulls" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				expectedKeys := 3
+				if test.expectedReviewer {
+					expectedKeys++
+				}
+				if len(payload) != expectedKeys || payload["title"] != "Apply files" || payload["from"] != "ai-45-apply-files" || payload["to"] != "main" {
+					t.Fatalf("unexpected Swagger pull request payload: %+v", payload)
+				}
+				reviewers, hasReviewers := payload["reviewers"]
+				if hasReviewers != test.expectedReviewer {
+					t.Fatalf("unexpected reviewers presence: %+v", payload)
+				}
+				if test.expectedReviewer {
+					values, ok := reviewers.([]any)
+					if !ok || len(values) != 1 || values[0] != "am1rv" {
+						t.Fatalf("reviewers must be a string array: %+v", reviewers)
+					}
+				}
+				return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"id":7,"number":9,"html_url":"https://gitflame.test/repo/pulls/7"}`)), Header: make(http.Header)}, nil
+			})
+
+			id, prURL, err := client.createPullRequest(context.Background(), "owner/repo", domain.GeneratedFilesContract{
+				BranchName: "ai-45-apply-files",
+				PRTitle:    "Apply files",
+				Reviewer:   test.reviewer,
+				Summary:    "This must not be sent as a plain body string.",
+			}, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id != "7" || prURL != "https://gitflame.test/repo/pulls/7" {
+				t.Fatalf("unexpected pull request result: id=%q url=%q", id, prURL)
+			}
+		})
+	}
+}
+
+func TestGitFlameClientVerifiesConflictingBranch(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
+			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"message":"conflict"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/branches/ai-45-apply-files":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"name":"another-branch"}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	_, err := client.createBranch(context.Background(), "owner/repo", "ai-45-apply-files", "main")
+	if err == nil || !strings.Contains(err.Error(), "unexpected branch") {
+		t.Fatalf("expected verified branch conflict, got %v", err)
+	}
+}
+
+func TestGitFlameClientRecoversExistingPullRequestAfterConflict(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"code":"AlreadyExists","message":"pull request already exists"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			if r.URL.Query().Get("state") != "open" || r.URL.Query().Get("form") != "short" ||
+				r.URL.Query().Get("branch_by") != "main" || r.URL.Query().Get("page") != "1" || r.URL.Query().Get("limit") != "100" {
+				t.Fatalf("unexpected pull request lookup: %s", r.URL.String())
+			}
+			body := `[{"open_pr_count":1,"list":[{"number":11,"url":"https://gitflame.test/repo/pulls/11","head":{"ref":"ai-45-apply-files"},"base":{"ref":"main"}}]}]`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	id, prURL, err := client.createPullRequest(context.Background(), "owner/repo", domain.GeneratedFilesContract{
+		BranchName: "ai-45-apply-files",
+		PRTitle:    "Apply files",
+	}, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "11" || prURL != "https://gitflame.test/repo/pulls/11" {
+		t.Fatalf("unexpected recovered pull request: id=%q url=%q", id, prURL)
 	}
 }
 

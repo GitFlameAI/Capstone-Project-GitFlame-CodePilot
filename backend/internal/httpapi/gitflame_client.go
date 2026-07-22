@@ -52,6 +52,22 @@ type gitFlameDeleteFileRequest struct {
 	SHA     string `json:"sha"`
 }
 
+// gitFlameCreatePullRequestRequest follows the GitFlame Swagger contract for
+// POST /repos/{owner}/{repo}/pulls. In particular, GitFlame calls the source
+// and target branches "from" and "to"; its optional body is a structured
+// array, not a plain string.
+type gitFlameCreatePullRequestRequest struct {
+	From      string   `json:"from"`
+	Reviewers []string `json:"reviewers,omitempty"`
+	Title     string   `json:"title"`
+	To        string   `json:"to"`
+}
+
+type gitFlamePullRequestList struct {
+	List        []map[string]any `json:"list"`
+	OpenPRCount int              `json:"open_pr_count"`
+}
+
 type gitFlameContentsResponse struct {
 	SHA string `json:"sha"`
 }
@@ -115,12 +131,22 @@ func (c *GitFlameClient) ApplyGeneratedFiles(ctx context.Context, repository dom
 	if strings.TrimSpace(baseBranch) == "" {
 		baseBranch = "main"
 	}
-	if err := c.createBranch(ctx, repository.ID, contract.BranchName, baseBranch); err != nil {
+	branchExisted, err := c.createBranch(ctx, repository.ID, contract.BranchName, baseBranch)
+	if err != nil {
 		return domain.GitFlameApplyResult{}, err
 	}
 	commitSHA, err := c.commitGeneratedFiles(ctx, repository.ID, contract)
 	if err != nil {
 		return domain.GitFlameApplyResult{}, err
+	}
+	if branchExisted {
+		prID, prURL, found, lookupErr := c.findOpenPullRequest(ctx, repository.ID, contract.BranchName, baseBranch)
+		if lookupErr != nil {
+			return domain.GitFlameApplyResult{}, lookupErr
+		}
+		if found {
+			return domain.GitFlameApplyResult{BranchName: contract.BranchName, CommitSHA: commitSHA, PullRequestID: prID, PullRequestURL: prURL}, nil
+		}
 	}
 	prID, prURL, err := c.createPullRequest(ctx, repository.ID, contract, baseBranch)
 	if err != nil {
@@ -208,17 +234,31 @@ func (c *GitFlameClient) ResolveRepository(ctx context.Context, rawURL string) (
 	return resolvedGitFlameRepository{}, &IntegrationError{Status: http.StatusNotFound, Code: "gitflame_repository_not_found", Detail: "GitFlame repository was not found"}
 }
 
-func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) error {
+func (c *GitFlameClient) createBranch(ctx context.Context, repositoryID, branchName, ref string) (bool, error) {
 	payload := map[string]string{
 		"new_branch_name": branchName,
 		"old_ref_name":    ref,
 	}
 	err := c.postFirstAvailable(ctx, applyPOSTCandidates(repositoryID, "branches", "branches", payload), nil)
+	if err == nil {
+		return false, nil
+	}
 	var integration *IntegrationError
 	if errors.As(err, &integration) && integration.Status == http.StatusConflict {
-		return nil
+		endpoint, ok := giteaRepositoryEndpoint(repositoryID)
+		if !ok {
+			return false, err
+		}
+		var branch map[string]any
+		if getErr := c.getJSON(ctx, endpoint+"/branches/"+url.PathEscape(branchName), "", &branch); getErr != nil {
+			return false, getErr
+		}
+		if actual := strings.TrimSpace(firstString(branch, "name")); actual != branchName {
+			return false, &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame branch lookup returned an unexpected branch"}
+		}
+		return true, nil
 	}
-	return err
+	return false, err
 }
 
 func (c *GitFlameClient) commitGeneratedFiles(ctx context.Context, repositoryID string, contract domain.GeneratedFilesContract) (string, error) {
@@ -425,23 +465,65 @@ func (c *GitFlameClient) fetchFileSHA(ctx context.Context, endpoint, ref string)
 }
 
 func (c *GitFlameClient) createPullRequest(ctx context.Context, repositoryID string, contract domain.GeneratedFilesContract, baseBranch string) (string, string, error) {
-	payload := map[string]any{
-		"title":         contract.PRTitle,
-		"body":          contract.Summary,
-		"description":   contract.Summary,
-		"source_branch": contract.BranchName,
-		"head":          contract.BranchName,
-		"target_branch": baseBranch,
-		"base":          baseBranch,
-		"reviewer":      contract.Reviewer,
+	payload := gitFlameCreatePullRequestRequest{
+		From:  contract.BranchName,
+		Title: contract.PRTitle,
+		To:    baseBranch,
+	}
+	if reviewer := strings.TrimSpace(contract.Reviewer); reviewer != "" {
+		payload.Reviewers = []string{reviewer}
 	}
 	var response map[string]any
 	if err := c.postFirstAvailable(ctx, applyPOSTCandidates(repositoryID, "pulls", "pull-requests", payload), &response); err != nil {
+		var integration *IntegrationError
+		if errors.As(err, &integration) && integration.Status == http.StatusConflict {
+			id, prURL, found, lookupErr := c.findOpenPullRequest(ctx, repositoryID, contract.BranchName, baseBranch)
+			if lookupErr != nil {
+				return "", "", lookupErr
+			}
+			if found {
+				return id, prURL, nil
+			}
+		}
 		return "", "", err
 	}
 	id := firstString(response, "id", "number", "iid", "pull_request.id")
 	prURL := firstString(response, "pull_request_url", "html_url", "web_url", "url", "pull_request.url", "pull_request.html_url")
 	return id, prURL, nil
+}
+
+func (c *GitFlameClient) findOpenPullRequest(ctx context.Context, repositoryID, sourceBranch, baseBranch string) (string, string, bool, error) {
+	endpoint, ok := giteaRepositoryEndpoint(repositoryID)
+	if !ok {
+		return "", "", false, nil
+	}
+	const pageSize = 100
+	for pageNumber := 1; ; pageNumber++ {
+		query := url.Values{}
+		query.Set("branch_by", baseBranch)
+		query.Set("form", "short")
+		query.Set("limit", fmt.Sprint(pageSize))
+		query.Set("page", fmt.Sprint(pageNumber))
+		query.Set("state", "open")
+		var response []gitFlamePullRequestList
+		if err := c.getJSON(ctx, endpoint+"/pulls?"+query.Encode(), "", &response); err != nil {
+			return "", "", false, err
+		}
+		if len(response) == 0 {
+			return "", "", false, nil
+		}
+		for _, pullRequest := range response[0].List {
+			if firstString(pullRequest, "head.ref") != sourceBranch || firstString(pullRequest, "base.ref") != baseBranch {
+				continue
+			}
+			id := firstString(pullRequest, "id", "number")
+			prURL := firstString(pullRequest, "html_url", "url")
+			return id, prURL, true, nil
+		}
+		if len(response[0].List) < pageSize || pageNumber*pageSize >= response[0].OpenPRCount {
+			return "", "", false, nil
+		}
+	}
 }
 
 func applyPOSTCandidates(repositoryID, giteaResource, fallbackResource string, payload any) []gitFlamePOSTCandidate {
