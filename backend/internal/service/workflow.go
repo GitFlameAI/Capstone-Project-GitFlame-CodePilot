@@ -527,16 +527,26 @@ func DropNoopGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFil
 		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
 	}
 	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
-	noop := make([]domain.GeneratedFileOperation, 0, len(files))
 	for _, file := range files {
 		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
-			noop = append(noop, file)
 			continue
 		}
 		filtered = append(filtered, file)
 	}
-	if len(filtered) == 0 && len(noop) > 0 {
-		return noop
+	return filtered
+}
+
+func DropNoopGeneratedFilesForApply(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
+			continue
+		}
+		filtered = append(filtered, file)
 	}
 	return filtered
 }

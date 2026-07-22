@@ -525,9 +525,7 @@ async def test_generate_files_repairs_compressed_modify_content(generated_files_
 
 
 @pytest.mark.asyncio
-async def test_generate_files_returns_safe_original_fallback_after_repeated_partial_modify(
-    generated_files_request,
-):
+async def test_generate_files_rejects_repeated_partial_modify(generated_files_request):
     generated_files_request["repository_files"] = [
         {
             "path": "src/auth.py",
@@ -561,14 +559,9 @@ async def test_generate_files_returns_safe_original_fallback_after_repeated_part
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/v1/files/generate", json=generated_files_request)
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["files"][0]["path"] == "src/auth.py"
-    assert (
-        payload["files"][0]["content"]
-        == generated_files_request["repository_files"][0]["content"]
-    )
-    assert "model repeatedly returned partial" in payload["files"][0]["explanation"]
+    assert response.status_code == 502
+    assert response.json()["code"] == "invalid_generated_files"
+    assert "compressed or partial" in response.json()["detail"]
     assert len(model.messages) == 4
     assert "FULL ORIGINAL TARGET FILES START" in model.messages[2][1]["content"]
     assert "Generate a focused generated-files JSON contract" in model.messages[3][1]["content"]

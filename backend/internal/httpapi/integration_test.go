@@ -25,6 +25,7 @@ type fakeGenerator struct {
 	fileRequests []domain.AgentCodeGenerationRequest
 	err          error
 	fileErr      error
+	files        []domain.GeneratedFileOperation
 }
 
 func (f *fakeGenerator) GeneratePlan(_ context.Context, req domain.AgentPlanRequest) (domain.AgentPlanResponse, error) {
@@ -73,6 +74,16 @@ func (f *fakeGenerator) GenerateFiles(_ context.Context, req domain.AgentCodeGen
 	f.mu.Unlock()
 	if f.fileErr != nil {
 		return domain.AgentGeneratedFilesResponse{}, f.fileErr
+	}
+	if len(f.files) > 0 {
+		return domain.AgentGeneratedFilesResponse{
+			RequestID: req.RequestID,
+			Status:    domain.TaskCompleted,
+			Summary:   "Generated test file operations.",
+			Files:     append([]domain.GeneratedFileOperation(nil), f.files...),
+			Model:     "test-codegen-model",
+			Usage:     domain.AgentUsage{TotalTokens: 42},
+		}, nil
 	}
 	return domain.AgentGeneratedFilesResponse{
 		RequestID: req.RequestID,
@@ -451,6 +462,41 @@ func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
 	status := request(t, server.Router(), http.MethodGet, "/ai/issues/45/code-generation", "")
 	if !strings.Contains(status.Body.String(), `"pull_request_url":"https://gitflame.test/pulls/7"`) {
 		t.Fatalf("stored code generation contract missed PR URL: %s", status.Body.String())
+	}
+}
+
+func TestApplyGeneratedFilesRejectsAllNoopFallbackWithoutGitFlameApply(t *testing.T) {
+	generator := &fakeGenerator{files: []domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "README.md",
+		Content:     "# Backend",
+		Explanation: "Kept the complete original file after partial model output.",
+	}}}
+	source := &fakeGitFlameSource{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), generator, source, nil)
+	body := `{"repository":{"id":"repo-noop","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"45-noop","title":"No-op fallback","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(t, server.Router(), http.MethodPost, "/ai/issues/45-noop/approve", "")
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := request(t, server.Router(), http.MethodPost, "/ai/issues/45-noop/gitflame/apply", "")
+	if applied.Code != http.StatusConflict {
+		t.Fatalf("apply status = %d: %s", applied.Code, applied.Body.String())
+	}
+	if source.applyRepository.ID != "" || len(source.applyContract.Files) != 0 {
+		t.Fatalf("GitFlame apply should not be called for all-noop fallback: repo=%+v contract=%+v", source.applyRepository, source.applyContract)
+	}
+	if !strings.Contains(applied.Body.String(), `"code":"generated_files_not_ready"`) {
+		t.Fatalf("noop apply response should say generated files are not ready: %s", applied.Body.String())
 	}
 }
 

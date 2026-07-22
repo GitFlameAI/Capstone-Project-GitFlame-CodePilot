@@ -112,15 +112,27 @@ func TestDropNoopGeneratedFilesSkipsUnchangedModifies(t *testing.T) {
 	}
 }
 
-func TestDropNoopGeneratedFilesKeepsAllNoopFallback(t *testing.T) {
+func TestDropNoopGeneratedFilesDropsAllNoops(t *testing.T) {
 	files := DropNoopGeneratedFiles([]domain.GeneratedFileOperation{{
 		Action:      "modify",
 		Path:        "app/main.py",
 		Content:     "package app\n",
 		Explanation: "Safe fallback with complete original content.",
 	}}, []domain.RepositoryFile{{Path: "app/main.py", Content: "package app\n"}})
-	if len(files) != 1 || files[0].Path != "app/main.py" {
-		t.Fatalf("expected all-noop fallback to remain, got %+v", files)
+	if len(files) != 0 {
+		t.Fatalf("expected all-noop files to be dropped, got %+v", files)
+	}
+}
+
+func TestDropNoopGeneratedFilesForApplyDropsAllNoops(t *testing.T) {
+	files := DropNoopGeneratedFilesForApply([]domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "app/main.py",
+		Content:     "package app\n",
+		Explanation: "Safe fallback with complete original content.",
+	}}, []domain.RepositoryFile{{Path: "app/main.py", Content: "package app\n"}})
+	if len(files) != 0 {
+		t.Fatalf("expected apply filter to drop all no-op files, got %+v", files)
 	}
 }
 
