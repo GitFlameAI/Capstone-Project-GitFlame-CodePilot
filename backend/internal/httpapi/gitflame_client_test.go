@@ -381,6 +381,105 @@ func TestGitFlameClientRetriesContentsUpdateWithAlternateSHA(t *testing.T) {
 	}
 }
 
+func TestGitFlameClientRetriesAlreadyExistingFileWithLastCommitID(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	putAttempts := 0
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`"ai-45-apply-files"`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
+			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"readme-sha"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			putAttempts++
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["last_commit_id"] == "readme-sha" {
+				if payload["content"] != "# Updated" {
+					t.Fatalf("expected raw content payload, got %+v", payload)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
+			}
+			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"code":"AlreadyExistNameError","detail":["README.md"]}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected GitFlame apply request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	result, err := client.ApplyGeneratedFiles(context.Background(), domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"}, domain.GeneratedFilesContract{
+		BranchName:    "ai-45-apply-files",
+		CommitMessage: "Implement apply files",
+		PRTitle:       "Apply files",
+		Files: []domain.GeneratedFileOperation{{
+			Action: "modify", Path: "README.md", Content: "# Updated", Explanation: "Updates docs.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if putAttempts != 3 || result.CommitSHA != "commit-123" {
+		t.Fatalf("expected last_commit_id fallback, attempts=%d result=%+v", putAttempts, result)
+	}
+}
+
+func TestGitFlameClientRefreshesFileSHABeforeFinalConflict(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	getAttempts := 0
+	putAttempts := 0
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`"ai-45-apply-files"`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
+			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			getAttempts++
+			sha := "old-sha"
+			if getAttempts > 1 {
+				sha = "fresh-sha"
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"sha":"` + sha + `"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/repos/owner/repo/contents/README.md":
+			putAttempts++
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["sha"] == "fresh-sha" {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-123"}}`)), Header: make(http.Header)}, nil
+			}
+			return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"message":"sha conflict"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected GitFlame apply request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	result, err := client.ApplyGeneratedFiles(context.Background(), domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"}, domain.GeneratedFilesContract{
+		BranchName:    "ai-45-apply-files",
+		CommitMessage: "Implement apply files",
+		PRTitle:       "Apply files",
+		Files: []domain.GeneratedFileOperation{{
+			Action: "modify", Path: "README.md", Content: "# Updated", Explanation: "Updates docs.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if getAttempts != 2 || putAttempts != 2 || result.CommitSHA != "commit-123" {
+		t.Fatalf("expected refreshed sha retry, gets=%d puts=%d result=%+v", getAttempts, putAttempts, result)
+	}
+}
+
 func TestGitFlameClientRetriesContentsCreateWithRawContentPayload(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	createAttempts := 0
