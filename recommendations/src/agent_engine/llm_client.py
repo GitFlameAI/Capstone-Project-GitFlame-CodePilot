@@ -100,6 +100,7 @@ class OpenAICompatibleClient:
             "model": endpoint.model,
             "messages": messages,
             "temperature": 0,
+            "max_tokens": self.settings.max_completion_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }

@@ -51,7 +51,12 @@ class AgentEngineService:
         configuration = parse_configuration(request.configuration_yaml)
         source = ProvidedFilesRepositorySource(request.repository_files, configuration)
         compressor = ContextCompressor(
-            context_limit_tokens=self.settings.context_limit_tokens,
+            context_limit_tokens=max(
+                8_000,
+                self.settings.context_limit_tokens
+                - self.settings.max_completion_tokens
+                - 2_048,
+            ),
             max_tool_output_chars=self.settings.max_tool_output_chars,
         )
         sandbox = ToolSandbox(
@@ -96,7 +101,12 @@ class AgentEngineService:
         configuration = parse_configuration(request.configuration_yaml)
         source = ProvidedFilesRepositorySource(request.repository_files, configuration)
         compressor = ContextCompressor(
-            context_limit_tokens=self.settings.context_limit_tokens,
+            context_limit_tokens=max(
+                8_000,
+                self.settings.context_limit_tokens
+                - self.settings.max_completion_tokens
+                - 2_048,
+            ),
             max_tool_output_chars=self.settings.max_tool_output_chars,
         )
         schema = GeneratedFilesContract.model_json_schema()

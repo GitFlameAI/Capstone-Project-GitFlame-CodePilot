@@ -48,6 +48,7 @@ async def test_openai_client_parses_streamed_content_reasoning_tools_and_usage()
     result = await client.complete(messages=[{"role": "user", "content": "plan"}], tools=[])
 
     assert captured["stream"] is True
+    assert captured["max_tokens"] == AgentSettings.max_completion_tokens
     assert result.reasoning == "inspect "
     assert result.tool_calls[0].arguments == {"path": "src/auth.py"}
     assert result.usage.total_tokens == 14

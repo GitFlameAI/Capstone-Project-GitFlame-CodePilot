@@ -23,6 +23,7 @@ class AgentSettings:
     max_tool_calls: int = 20
     max_tool_output_chars: int = 8_192
     context_limit_tokens: int = 32_768
+    max_completion_tokens: int = 12_000
     max_retries: int = 2
     retry_backoff_seconds: float = 0.25
     rag_base_url: str | None = None
@@ -50,6 +51,12 @@ class AgentSettings:
             ),
             context_limit_tokens=int(
                 os.getenv("MODEL_CONTEXT_LIMIT", str(cls.context_limit_tokens))
+            ),
+            max_completion_tokens=int(
+                os.getenv(
+                    "MODEL_MAX_COMPLETION_TOKENS",
+                    str(cls.max_completion_tokens),
+                )
             ),
             max_retries=int(os.getenv("MODEL_MAX_RETRIES", str(cls.max_retries))),
             retry_backoff_seconds=float(
