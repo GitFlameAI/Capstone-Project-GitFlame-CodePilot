@@ -72,6 +72,7 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         response_schema: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatCompletion:
         last_error: Exception | None = None
         for endpoint in self.endpoints:
@@ -81,6 +82,7 @@ class OpenAICompatibleClient:
                     messages=messages,
                     tools=tools,
                     response_schema=response_schema,
+                    max_tokens=max_tokens,
                 )
                 return replace(response, model=response.model or endpoint.model)
             except (ModelUnavailableError, InferenceTimeoutError) as exc:
@@ -95,12 +97,13 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         response_schema: dict[str, Any] | None,
+        max_tokens: int | None,
     ) -> ChatCompletion:
         payload = {
             "model": endpoint.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": self.settings.max_completion_tokens,
+            "max_tokens": max_tokens or self.settings.max_completion_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
