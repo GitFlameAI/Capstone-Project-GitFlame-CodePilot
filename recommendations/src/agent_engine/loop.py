@@ -31,6 +31,7 @@ class ChatClient(Protocol):
         tools: list[dict[str, Any]],
         response_schema: dict[str, Any] | None = None,
         max_tokens: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> ChatCompletion: ...
 
 

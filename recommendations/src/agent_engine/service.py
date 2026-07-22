@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import re
@@ -7,9 +8,11 @@ from pydantic import ValidationError
 
 from agent_engine.context import ContextCompressor
 from agent_engine.errors import InvalidGeneratedFilesError
-from agent_engine.llm_client import OpenAICompatibleClient
+from agent_engine.llm_client import CompletionUsage, OpenAICompatibleClient
 from agent_engine.loop import AgentLoop, ChatClient
 from agent_engine.models import (
+    GeneratedFile,
+    GeneratedFileOperationsContract,
     GeneratedFilesContract,
     GenerateFilesRequest,
     GenerateFilesResponse,
@@ -21,8 +24,11 @@ from agent_engine.models import (
 from agent_engine.plan_validator import PlanValidator
 from agent_engine.prompt import (
     CODE_GENERATION_SYSTEM_PROMPT,
+    FILE_GENERATION_SYSTEM_PROMPT,
     build_code_generation_prompt,
+    build_file_operations_prompt,
     build_initial_prompt,
+    build_single_file_generation_prompt,
 )
 from agent_engine.rag import DisabledRagClient, HttpRagClient, RagSearch
 from agent_engine.repository import ProvidedFilesRepositorySource, path_is_allowed
@@ -98,6 +104,203 @@ class AgentEngineService:
         )
 
     async def generate_files(self, request: GenerateFilesRequest) -> GenerateFilesResponse:
+        """Generate code as plain text, then assemble the public JSON contract locally."""
+        configuration = parse_configuration(request.configuration_yaml)
+        source = ProvidedFilesRepositorySource(request.repository_files, configuration)
+        compressor = ContextCompressor(
+            context_limit_tokens=max(
+                8_000,
+                self.settings.context_limit_tokens
+                - self.settings.code_max_completion_tokens
+                - 2_048,
+            ),
+            max_tool_output_chars=self.settings.max_tool_output_chars,
+        )
+        operations_schema = GeneratedFileOperationsContract.model_json_schema()
+        operations_prompt = build_file_operations_prompt(
+            request,
+            configuration,
+            source,
+            operations_schema,
+        )
+        started = time.perf_counter()
+        operations_completion = await self.model_client.complete(
+            messages=[
+                {"role": "system", "content": CODE_GENERATION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": compressor.compress_text(
+                        operations_prompt,
+                        compressor.max_context_chars,
+                    ),
+                },
+            ],
+            tools=[],
+            response_schema=operations_schema,
+            max_tokens=self.settings.code_max_completion_tokens,
+            enable_thinking=False,
+        )
+        try:
+            operations = GeneratedFileOperationsContract.model_validate_json(
+                operations_completion.content
+            )
+            self._validate_file_operations(operations, source, configuration)
+        except (ValidationError, ValueError, InvalidGeneratedFilesError) as exc:
+            raise InvalidGeneratedFilesError(
+                f"model returned invalid file operations: {exc}"
+            ) from exc
+
+        total_usage = operations_completion.usage
+        reasoning_chars = len(operations_completion.reasoning)
+        model = operations_completion.model or self.settings.model
+        generated_files: list[GeneratedFile] = []
+
+        for operation in operations.files:
+            if operation.action == "delete":
+                generated_files.append(
+                    GeneratedFile(
+                        action="delete",
+                        path=operation.path,
+                        explanation=operation.explanation,
+                    )
+                )
+                continue
+
+            generated_file, usage, generated_reasoning, generated_model = (
+                await self._generate_plain_file(
+                    request,
+                    source,
+                    compressor,
+                    operation.action,
+                    operation.path,
+                    operation.explanation,
+                )
+            )
+            generated_files.append(generated_file)
+            total_usage += usage
+            reasoning_chars += generated_reasoning
+            model = generated_model or model
+
+        contract = GeneratedFilesContract(
+            summary=operations.summary,
+            files=generated_files,
+        )
+        self._validate_generated_files_contract(contract, source, configuration)
+        return GenerateFilesResponse(
+            request_id=request.request_id,
+            summary=contract.summary,
+            files=contract.files,
+            model=model,
+            usage=Usage(
+                prompt_tokens=total_usage.prompt_tokens,
+                completion_tokens=total_usage.completion_tokens,
+                total_tokens=total_usage.total_tokens,
+                tool_calls=0,
+                reasoning_chars=reasoning_chars,
+                generation_time_seconds=time.perf_counter() - started,
+            ),
+        )
+
+    async def _generate_plain_file(
+        self,
+        request: GenerateFilesRequest,
+        source: ProvidedFilesRepositorySource,
+        compressor: ContextCompressor,
+        action: str,
+        path: str,
+        explanation: str,
+    ) -> tuple[GeneratedFile, CompletionUsage, int, str]:
+        original = source.read(path) if action == "modify" else None
+        validation_error = None
+        invalid_candidate = None
+        total_usage = CompletionUsage()
+        reasoning_chars = 0
+        model = self.settings.model
+
+        for attempt in range(2):
+            prompt = build_single_file_generation_prompt(
+                request,
+                action=action,
+                path=path,
+                explanation=explanation,
+                original_content=original,
+                validation_error=validation_error,
+                invalid_candidate=invalid_candidate,
+            )
+            completion = await self.model_client.complete(
+                messages=[
+                    {"role": "system", "content": FILE_GENERATION_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": compressor.compress_text(
+                            prompt,
+                            compressor.max_context_chars,
+                        ),
+                    },
+                ],
+                tools=[],
+                response_schema=None,
+                max_tokens=self.settings.code_max_completion_tokens,
+                enable_thinking=False,
+            )
+            total_usage += completion.usage
+            reasoning_chars += len(completion.reasoning)
+            model = completion.model or model
+            try:
+                content = _normalize_plain_file_content(completion.content)
+                if action == "modify":
+                    _validate_modify_content_shape(path, content, original or "")
+                _validate_plain_source_syntax(path, content)
+            except (InvalidGeneratedFilesError, SyntaxError, ValueError) as exc:
+                validation_error = str(exc)
+                invalid_candidate = completion.content
+                logger.warning(
+                    "plain-text file generation attempt %d failed for %s: %s",
+                    attempt + 1,
+                    path,
+                    exc,
+                )
+                continue
+            return (
+                GeneratedFile(
+                    action=action,
+                    path=path,
+                    content=content,
+                    explanation=explanation,
+                ),
+                total_usage,
+                reasoning_chars,
+                model,
+            )
+
+        raise InvalidGeneratedFilesError(
+            f"model did not return a valid complete file for {path}: {validation_error}"
+        )
+
+    @staticmethod
+    def _validate_file_operations(
+        operations: GeneratedFileOperationsContract,
+        source: ProvidedFilesRepositorySource,
+        configuration,
+    ) -> None:
+        existing_paths = set(source.paths())
+        for item in operations.files:
+            if not path_is_allowed(item.path, configuration):
+                raise InvalidGeneratedFilesError(
+                    f"generated file path is excluded by configuration: {item.path}"
+                )
+            if item.action == "create" and item.path in existing_paths:
+                raise InvalidGeneratedFilesError(
+                    f"create action targets an existing supplied file: {item.path}"
+                )
+            if item.action in {"modify", "delete"} and item.path not in existing_paths:
+                raise InvalidGeneratedFilesError(
+                    f"{item.action} action targets an unknown supplied file: {item.path}"
+                )
+
+    async def _generate_files_legacy(
+        self, request: GenerateFilesRequest
+    ) -> GenerateFilesResponse:
         configuration = parse_configuration(request.configuration_yaml)
         source = ProvidedFilesRepositorySource(request.repository_files, configuration)
         compressor = ContextCompressor(
@@ -523,6 +726,35 @@ def _validate_modify_content_shape(path: str, generated: str, original: str) -> 
         raise InvalidGeneratedFilesError(
             f"modify content for {path} has too few lines for a full replacement file"
         )
+
+
+def _normalize_plain_file_content(value: str) -> str:
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip():
+        raise InvalidGeneratedFilesError("model returned empty file content")
+    if "```" in normalized:
+        raise InvalidGeneratedFilesError(
+            "model returned Markdown fences instead of plain file content"
+        )
+    return normalized.rstrip() + "\n"
+
+
+def _validate_plain_source_syntax(path: str, content: str) -> None:
+    if path.lower().endswith(".py"):
+        try:
+            ast.parse(content, filename=path)
+        except SyntaxError as exc:
+            location = f"line {exc.lineno}" if exc.lineno else "unknown line"
+            raise InvalidGeneratedFilesError(
+                f"generated Python for {path} is invalid at {location}: {exc.msg}"
+            ) from exc
+    if path.lower().endswith(".json"):
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise InvalidGeneratedFilesError(
+                f"generated JSON for {path} is invalid at line {exc.lineno}: {exc.msg}"
+            ) from exc
 
 
 def _normalize_content(value: str) -> str:

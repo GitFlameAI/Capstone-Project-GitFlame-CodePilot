@@ -77,9 +77,12 @@ async def test_openai_client_uses_per_request_max_tokens_override():
         messages=[{"role": "user", "content": "plan"}],
         tools=[],
         max_tokens=1234,
+        enable_thinking=False,
     )
 
     assert captured["max_tokens"] == 1234
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "response_format" not in captured
     await http_client.aclose()
 
 
