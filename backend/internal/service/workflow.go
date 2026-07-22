@@ -541,6 +541,21 @@ func DropNoopGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFil
 	return filtered
 }
 
+func DropNoopGeneratedFilesForApply(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
 func DropUnsafePartialModifyFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
 	contentByPath := make(map[string]string, len(repositoryFiles))
 	for _, file := range repositoryFiles {

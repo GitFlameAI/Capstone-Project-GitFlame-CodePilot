@@ -320,21 +320,37 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusConflict, "generated_files_not_ready", "code generation has not produced files to apply")
 		return
 	}
+	if session.GeneratedFiles.ApplyStatus == "applied" {
+		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
+		return
+	}
+	applyContract := *session.GeneratedFiles
+	applyContract.Files = service.DropNoopGeneratedFilesForApply(session.GeneratedFiles.Files, session.Request.RepositoryFiles)
+	now := time.Now().UTC()
+	if len(applyContract.Files) == 0 {
+		session.GeneratedFiles.ApplyStatus = "applied"
+		session.GeneratedFiles.ApplyError = ""
+		session.GeneratedFiles.AppliedAt = &now
+		for index := range session.GeneratedFiles.Files {
+			session.GeneratedFiles.Files[index].Status = "skipped"
+		}
+		if err := s.store.UpdateSession(session); err != nil {
+			problem(w, http.StatusInternalServerError, "storage_error", err.Error())
+			return
+		}
+		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files contained no effective changes to apply.", GeneratedFiles: session.GeneratedFiles})
+		return
+	}
 	gitflame, connection, err := s.gitFlameSourceForRepository(r, session.Request.Repository.ID)
 	if err != nil {
 		integrationError(w, err, "gitflame_client_unavailable")
-		return
-	}
-	if session.GeneratedFiles.ApplyStatus == "applied" && session.GeneratedFiles.PullRequestURL != "" {
-		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
 		return
 	}
 	if gitflame == nil {
 		problem(w, http.StatusServiceUnavailable, "gitflame_client_unavailable", "GitFlame API client is not configured")
 		return
 	}
-	result, err := gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, *session.GeneratedFiles)
-	now := time.Now().UTC()
+	result, err := gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, applyContract)
 	if err != nil {
 		session.GeneratedFiles.ApplyStatus = "failed"
 		session.GeneratedFiles.ApplyError = err.Error()
