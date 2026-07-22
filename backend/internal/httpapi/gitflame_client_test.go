@@ -381,6 +381,55 @@ func TestGitFlameClientRetriesContentsUpdateWithAlternateSHA(t *testing.T) {
 	}
 }
 
+func TestGitFlameClientRetriesContentsCreateWithRawContentPayload(t *testing.T) {
+	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
+	createAttempts := 0
+	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/branches":
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`"ai-45-apply-files"`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/commits"):
+			return &http.Response{StatusCode: http.StatusMethodNotAllowed, Body: io.NopCloser(strings.NewReader(`{"message":"method not allowed"}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/contents/shared/discount.ts":
+			createAttempts++
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if createAttempts == 1 {
+				if _, err := base64.StdEncoding.DecodeString(payload["content"]); err != nil {
+					t.Fatalf("expected first create payload to use base64 content: %+v", payload)
+				}
+				return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"message":"Invalid JSON payload: data structure is incorrect or contains invalid fields"}`)), Header: make(http.Header)}, nil
+			}
+			if payload["content"] != "export const discount = 10\n" || payload["branch"] != "ai-45-apply-files" {
+				t.Fatalf("unexpected raw create payload: %+v", payload)
+			}
+			return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"commit":{"sha":"commit-raw"}}`)), Header: make(http.Header)}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/owner/repo/pulls":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":7}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected GitFlame apply request: %s %s", r.Method, r.URL.Path)
+		}
+		return nil, nil
+	})
+
+	result, err := client.ApplyGeneratedFiles(context.Background(), domain.RepositoryMetadata{ID: "owner/repo", DefaultBranch: "main"}, domain.GeneratedFilesContract{
+		BranchName:    "ai-45-apply-files",
+		CommitMessage: "Implement apply files",
+		PRTitle:       "Apply files",
+		Files: []domain.GeneratedFileOperation{{
+			Action: "create", Path: "shared/discount.ts", Content: "export const discount = 10\n", Explanation: "Creates shared discount helper.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createAttempts != 2 || result.CommitSHA != "commit-raw" {
+		t.Fatalf("expected raw create retry, attempts=%d result=%+v", createAttempts, result)
+	}
+}
+
 func TestGitFlameClientAnnotatesContentsApplyErrorsWithPath(t *testing.T) {
 	client := NewGitFlameClient("http://gitflame.test", "token", time.Second)
 	client.httpClient.Transport = gitFlameRoundTripFunc(func(r *http.Request) (*http.Response, error) {
