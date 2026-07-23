@@ -21,6 +21,10 @@ export AGENT_MODEL=laguna
 export OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
 export OPENAI_API_KEY=<runtime secret>
 export MODEL_CONTEXT_LIMIT=32768
+export MODEL_MAX_COMPLETION_TOKENS=12000
+export PLAN_MAX_COMPLETION_TOKENS=6000
+export CODE_MAX_COMPLETION_TOKENS=12000
+export AGENT_SYNTHESIS_RESERVED_STEPS=3
 ```
 
 The university vLLM endpoint was verified on July 5, 2026: `/v1/models` listed `laguna`
@@ -70,6 +74,9 @@ export AGENT_MODEL=laguna
 export OPENAI_BASE_URL=https://gpu-1.devops-playground.innopolis.university/v1
 export OPENAI_API_KEY=<runtime secret>
 export MODEL_CONTEXT_LIMIT=32768
+export PLAN_MAX_COMPLETION_TOKENS=6000
+export CODE_MAX_COMPLETION_TOKENS=12000
+export AGENT_SYNTHESIS_RESERVED_STEPS=3
 # Optional model fallback, used only when the primary endpoint is unavailable or times out.
 export AGENT_FALLBACK_MODEL=Qwen/Qwen2.5-Coder-7B-Instruct
 export FALLBACK_OPENAI_BASE_URL=http://127.0.0.1:8002/v1

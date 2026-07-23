@@ -147,7 +147,10 @@ class ToolSandbox:
             bounded_results.append(result)
         results = bounded_results
         self.evidence_paths.update(result.path for result in results)
-        return {"results": [result.model_dump(mode="json") for result in results]}
+        return {
+            "status": "completed" if results else "empty",
+            "results": [result.model_dump(mode="json") for result in results],
+        }
 
 
 def _bounded_int(value: Any, *, minimum: int, maximum: int) -> int:
@@ -216,7 +219,10 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_repository",
-            "description": "Search the external RAG index for semantically relevant snippets.",
+            "description": (
+                "Search the external RAG index for semantically relevant snippets. "
+                "Returns status='completed' with snippets or status='empty' with no snippets."
+            ),
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,

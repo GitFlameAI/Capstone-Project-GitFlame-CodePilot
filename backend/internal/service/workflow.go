@@ -223,7 +223,10 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	result.Files = NormalizeGeneratedFiles(result.Files)
+	result.Files = DropUnsafePartialModifyFiles(
+		DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles),
+		request.RepositoryFiles,
+	)
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -399,7 +402,9 @@ func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract
 	if slug == "" {
 		slug = "issue"
 	}
-	branch := session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug
+	branch := normalizeGitFlameBranchName(
+		session.Config.TargetBranchPrefix + session.Request.Issue.ID + "-" + slug,
+	)
 	return domain.GeneratedFilesContract{
 		BranchName:    branch,
 		BaseBranch:    session.Request.Repository.DefaultBranch,
@@ -408,6 +413,15 @@ func branchPRPayload(session *domain.IssueSession) domain.GeneratedFilesContract
 		PRTitle:       session.Request.Issue.Title,
 		Reviewer:      session.Request.Issue.Author,
 	}
+}
+
+func normalizeGitFlameBranchName(value string) string {
+	normalized := regexp.MustCompile(`[^a-zA-Z0-9._-]+`).ReplaceAllString(strings.TrimSpace(value), "-")
+	normalized = strings.Trim(normalized, "-.")
+	if normalized == "" {
+		return "ai-issue"
+	}
+	return normalized
 }
 
 func queuedStatusForTask(taskType string) string {
@@ -505,6 +519,105 @@ func NormalizeGeneratedFiles(files []domain.GeneratedFileOperation) []domain.Gen
 		merged[index] = file
 	}
 	return merged
+}
+
+func DropNoopGeneratedFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func DropNoopGeneratedFilesForApply(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = normalizeGeneratedFileContent(file.Content)
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" && normalizeGeneratedFileContent(file.Content) == contentByPath[normalizePlanPath(file.Path)] {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func DropUnsafePartialModifyFiles(files []domain.GeneratedFileOperation, repositoryFiles []domain.RepositoryFile) []domain.GeneratedFileOperation {
+	contentByPath := make(map[string]string, len(repositoryFiles))
+	for _, file := range repositoryFiles {
+		contentByPath[normalizePlanPath(file.Path)] = file.Content
+	}
+	filtered := make([]domain.GeneratedFileOperation, 0, len(files))
+	for _, file := range files {
+		if file.Action == "modify" {
+			original, exists := contentByPath[normalizePlanPath(file.Path)]
+			if exists && looksLikePartialModifyContent(file.Content, original) {
+				continue
+			}
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func looksLikePartialModifyContent(generated, original string) bool {
+	generated = strings.TrimSpace(normalizeGeneratedFileContent(generated))
+	original = strings.TrimSpace(normalizeGeneratedFileContent(original))
+	if generated == "" || original == "" {
+		return false
+	}
+	generatedLines := meaningfulLines(generated)
+	originalLines := meaningfulLines(original)
+	if len(originalLines) < 3 && len(original) < 120 {
+		return false
+	}
+	if len(originalLines) >= 3 && len(generatedLines) <= 1 {
+		return true
+	}
+	if len(original) >= 120 {
+		minChars := len(original) * 35 / 100
+		if minChars < 80 {
+			minChars = 80
+		}
+		if len(generated) < minChars {
+			return true
+		}
+	}
+	if len(originalLines) >= 8 {
+		minLines := len(originalLines) * 35 / 100
+		if minLines < 3 {
+			minLines = 3
+		}
+		if len(generatedLines) < minLines {
+			return true
+		}
+	}
+	return false
+}
+
+func meaningfulLines(value string) []string {
+	rawLines := strings.Split(value, "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func normalizeGeneratedFileContent(value string) string {
+	return strings.ReplaceAll(value, "\r\n", "\n")
 }
 
 func mergeExplanation(previous, next string) string {

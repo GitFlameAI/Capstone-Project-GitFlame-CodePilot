@@ -13,6 +13,11 @@ from agent_engine.errors import (
     ToolLimitExceededError,
 )
 from agent_engine.llm_client import ChatCompletion, CompletionUsage, ToolCall
+from agent_engine.prompt import (
+    CODE_GENERATION_SYSTEM_PROMPT,
+    FILE_GENERATION_SYSTEM_PROMPT,
+    build_validation_feedback,
+)
 from agent_engine.settings import AgentSettings
 
 
@@ -52,49 +57,112 @@ class FakeChatClient:
         self.is_ready = ready
         self.error = error
         self.messages = []
+        self.tools_by_call = []
+        self.max_tokens_by_call = []
 
     async def ready(self) -> bool:
         return self.is_ready
 
-    async def complete(self, *, messages, tools):
+    async def complete(
+        self,
+        *,
+        messages,
+        tools,
+        response_schema=None,
+        max_tokens=None,
+        enable_thinking=None,
+    ):
         self.messages.append(messages)
-        assert {item["function"]["name"] for item in tools} == {
-            "read_file",
-            "list_dir",
-            "grep",
-            "search_repository",
-        }
+        self.tools_by_call.append([item["function"]["name"] for item in tools])
+        self.max_tokens_by_call.append(max_tokens)
         if self.error:
             raise self.error
         return self.completions.pop(0)
 
 
 class FakeGeneratedFilesClient:
-    def __init__(self, contract, *, ready=True, error=None, model="test-codegen-model"):
+    def __init__(
+        self,
+        contract=None,
+        *,
+        contracts=None,
+        ready=True,
+        error=None,
+        model="test-codegen-model",
+    ):
         self.contract = contract
+        self.contracts = list(contracts or [])
         self.is_ready = ready
         self.error = error
         self.model = model
         self.messages = []
         self.tools = None
         self.response_schema = None
+        self.response_schemas = []
+        self.enable_thinking_by_call = []
+        self._manifest_contract = None
 
     async def ready(self) -> bool:
         return self.is_ready
 
-    async def complete(self, *, messages, tools, response_schema=None):
+    async def complete(
+        self,
+        *,
+        messages,
+        tools,
+        response_schema=None,
+        max_tokens=None,
+        enable_thinking=None,
+    ):
         self.messages.append(messages)
         self.tools = tools
         self.response_schema = response_schema
+        self.response_schemas.append(response_schema)
+        self.enable_thinking_by_call.append(enable_thinking)
+        self.max_tokens = max_tokens
         if self.error:
             raise self.error
-        content = self.contract if isinstance(self.contract, str) else json.dumps(self.contract)
+        if response_schema is not None:
+            contract = self.contracts.pop(0) if self.contracts else self.contract
+            self._manifest_contract = contract
+            if isinstance(contract, dict):
+                contract = {
+                    **contract,
+                    "files": [
+                        {
+                            key: value
+                            for key, value in item.items()
+                            if key in {"action", "path", "explanation"}
+                        }
+                        for item in contract.get("files", [])
+                    ],
+                }
+            content = contract if isinstance(contract, str) else json.dumps(contract)
+        else:
+            contract = self.contracts.pop(0) if self.contracts else self._manifest_contract
+            target_path = _target_path_from_messages(messages)
+            content = _file_content_from_contract(contract, target_path)
         return ChatCompletion(
             content,
             "hidden codegen reasoning",
             usage=CompletionUsage(120, 80, 200),
             model=self.model,
         )
+
+
+def _target_path_from_messages(messages) -> str:
+    marker = '"target_path": "'
+    prompt = messages[-1]["content"]
+    return prompt.split(marker, 1)[1].split('"', 1)[0]
+
+
+def _file_content_from_contract(contract, target_path: str) -> str:
+    if isinstance(contract, str):
+        return contract
+    for item in contract.get("files", []):
+        if item.get("path", "").removeprefix("./") == target_path:
+            return item.get("content") or ""
+    return ""
 
 
 @pytest.fixture
@@ -172,6 +240,13 @@ async def test_agent_health_ready_and_generate(agent_request):
     initial_prompt = model.messages[0][1]["content"]
     assert "src/auth.py" in initial_prompt
     assert "vendor/ignored.py" not in initial_prompt
+    assert set(model.tools_by_call[0]) == {
+        "read_file",
+        "list_dir",
+        "grep",
+        "search_repository",
+    }
+    assert model.max_tokens_by_call == [AgentSettings.plan_max_completion_tokens]
 
 
 @pytest.mark.asyncio
@@ -196,6 +271,64 @@ async def test_agent_executes_read_only_tool_before_plan(agent_request):
     tool_message = model.messages[1][-1]
     assert tool_message["role"] == "tool"
     assert "def validate(token)" in tool_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_reserves_final_steps_for_plan_synthesis(agent_request):
+    model = FakeChatClient(
+        [
+            ChatCompletion(
+                "",
+                "",
+                [ToolCall("call-1", "read_file", {"path": "src/auth.py"})],
+            ),
+            ChatCompletion(valid_plan(), ""),
+        ]
+    )
+    settings = AgentSettings(max_steps=2, synthesis_reserved_steps=1)
+    app = create_app(settings=settings, model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/plans/generate", json=agent_request)
+
+    assert response.status_code == 200
+    assert model.tools_by_call[0]
+    assert model.tools_by_call[1] == []
+    assert "Tool use is now disabled" in model.messages[1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_forces_synthesis_after_repeated_tool_call(agent_request):
+    repeated = ToolCall("call-2", "read_file", {"path": "src/auth.py"})
+    model = FakeChatClient(
+        [
+            ChatCompletion(
+                "",
+                "",
+                [ToolCall("call-1", "read_file", {"path": "src/auth.py"})],
+            ),
+            ChatCompletion("", "", [repeated]),
+            ChatCompletion(valid_plan(), ""),
+        ]
+    )
+    settings = AgentSettings(max_steps=5, synthesis_reserved_steps=1)
+    app = create_app(settings=settings, model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/plans/generate", json=agent_request)
+
+    assert response.status_code == 200
+    assert response.json()["usage"]["tool_calls"] == 1
+    assert model.tools_by_call == [
+        ["read_file", "list_dir", "grep", "search_repository"],
+        ["read_file", "list_dir", "grep", "search_repository"],
+        [],
+    ]
+    assert any(
+        "repeated an identical tool call" in str(message.get("content"))
+        for snapshot in model.messages
+        for message in snapshot
+    )
 
 
 @pytest.mark.asyncio
@@ -292,14 +425,49 @@ async def test_generate_files_returns_contract_without_writing_files(
     assert payload["request_id"] == "codegen-123"
     assert payload["status"] == "completed"
     assert payload["model"] == "test-codegen-model"
-    assert payload["usage"]["prompt_tokens"] == 120
-    assert payload["usage"]["reasoning_chars"] == len("hidden codegen reasoning")
+    assert payload["usage"]["prompt_tokens"] == 360
+    assert payload["usage"]["reasoning_chars"] == 3 * len("hidden codegen reasoning")
     assert payload["files"][0]["action"] == "modify"
     assert payload["files"][1]["path"] == "src/token_errors.py"
     assert model.tools == []
-    assert model.response_schema["additionalProperties"] is False
+    assert model.response_schemas[0]["additionalProperties"] is False
+    assert model.response_schemas[1:] == [None, None]
+    assert model.enable_thinking_by_call == [False, False, False]
     assert "hidden codegen reasoning" not in json.dumps(payload)
     assert not (tmp_path / "src" / "token_errors.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_generate_files_rejects_duplicate_operation_paths(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Implemented expiration validation.",
+            "files": [
+                {
+                    "action": "modify",
+                    "path": "src/auth.py",
+                    "content": "def validate(token):\n    return token.valid\n",
+                    "explanation": "Keeps the original validation flow.",
+                },
+                {
+                    "action": "modify",
+                    "path": "./src/auth.py",
+                    "content": (
+                        "def validate(token):\n"
+                        "    return token.valid and not token.expired\n"
+                    ),
+                    "explanation": "Adds token expiration validation.",
+                },
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert "duplicate paths" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -324,12 +492,6 @@ async def test_generate_files_returns_contract_without_writing_files(
             "content": "",
             "explanation": "Empty create content.",
         },
-        {
-            "action": "delete",
-            "path": "src/auth.py",
-            "content": "should not be here",
-            "explanation": "Delete with content.",
-        },
     ],
 )
 async def test_generate_files_rejects_invalid_model_contract(generated_files_request, bad_file):
@@ -346,6 +508,452 @@ async def test_generate_files_rejects_invalid_model_contract(generated_files_req
 
     assert response.status_code == 502
     assert response.json()["code"] == "invalid_generated_files"
+
+
+@pytest.mark.asyncio
+async def test_generate_files_error_identifies_invalid_file_candidate(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        {
+            "summary": "Bad output.",
+            "files": [
+                {
+                    "action": "create",
+                    "path": "backend-python/app/__init__.py",
+                    "explanation": "Adds a package initialization file.",
+                }
+            ],
+        }
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "excluded by configuration" in detail
+    assert "backend-python/app/__init__.py" in detail
+
+
+@pytest.mark.asyncio
+async def test_generate_files_repairs_missing_modify_content(generated_files_request):
+    model = FakeGeneratedFilesClient(
+        contracts=[
+            {
+                "summary": "Bad output.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "explanation": "Adds token expiration validation.",
+                    }
+                ],
+            },
+            {
+                "summary": "Validated token expiration.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "def validate(token):\n"
+                            "    return token.valid and not token.expired\n"
+                        ),
+                        "explanation": "Rejects expired tokens before accepting valid tokens.",
+                    }
+                ],
+            },
+        ]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"][0]["content"].strip().endswith("not token.expired")
+    assert len(model.messages) == 2
+    assert "Return the file content only" in model.messages[1][1]["content"]
+    assert model.response_schemas == [model.response_schemas[0], None]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_repairs_compressed_modify_content(generated_files_request):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    model = FakeGeneratedFilesClient(
+        contracts=[
+            {
+                "summary": "Select auth change.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "explanation": "Adds token expiration validation.",
+                    }
+                ],
+            },
+            {
+                "summary": "Bad compressed output.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "import logging def validate(token): "
+                            "return token.valid and not token.expired"
+                        ),
+                        "explanation": "Adds token expiration validation.",
+                    }
+                ],
+            },
+            {
+                "summary": "Validated token expiration.",
+                "files": [
+                    {
+                        "action": "modify",
+                        "path": "src/auth.py",
+                        "content": (
+                            "import logging\n\n"
+                            "def validate(token):\n"
+                            "    logging.info('validating token')\n"
+                            "    return token.valid and not token.expired\n"
+                        ),
+                        "explanation": "Rejects expired tokens before accepting valid tokens.",
+                    }
+                ],
+            },
+        ]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "\n" in body["files"][0]["content"]
+    assert len(model.messages) == 3
+    assert "compressed or partial" in model.messages[2][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_retries_invalid_python_as_plain_text(generated_files_request):
+    manifest = {
+        "summary": "Validate token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    invalid_python = {
+        **manifest,
+        "files": [
+            {
+                **manifest["files"][0],
+                "content": "def validate(token)\n    return not token.expired\n",
+            }
+        ],
+    }
+    valid_python = {
+        **manifest,
+        "files": [
+            {
+                **manifest["files"][0],
+                "content": "def validate(token):\n    return token.valid and not token.expired\n",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(contracts=[manifest, invalid_python, valid_python])
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    assert response.json()["files"][0]["content"].startswith("def validate(token):")
+    assert "generated Python" in model.messages[2][1]["content"]
+    assert model.response_schemas == [model.response_schemas[0], None, None]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_rejects_repeated_partial_modify(generated_files_request):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    compressed = {
+        "summary": "Bad compressed output.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging def validate(token): "
+                    "return token.valid and not token.expired"
+                ),
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(
+        contracts=[compressed, compressed, compressed, compressed]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "invalid_generated_files"
+    assert "compressed or partial" in response.json()["detail"]
+    assert len(model.messages) == 3
+    assert "The previous plain-text result was rejected" in model.messages[2][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_targeted_repair_fixes_compressed_modify_content(
+    generated_files_request,
+):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    compressed = {
+        "summary": "Bad compressed output.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging def validate(token): "
+                    "return token.valid and not token.expired"
+                ),
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    repaired = {
+        "summary": "Validated token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging\n\n"
+                    "def validate(token):\n"
+                    "    logging.info('validating token')\n"
+                    "    return token.valid and not token.expired\n"
+                ),
+                "explanation": "Rejects expired tokens before accepting valid tokens.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(contracts=[compressed, compressed, repaired])
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"][0]["content"].strip().endswith("not token.expired")
+    assert len(model.messages) == 3
+    assert "The previous plain-text result was rejected" in model.messages[2][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_files_focused_fallback_fixes_compressed_modify_content(
+    generated_files_request,
+):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    compressed = {
+        "summary": "Bad compressed output.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging def validate(token): "
+                    "return token.valid and not token.expired"
+                ),
+                "explanation": "Adds token expiration validation.",
+            }
+        ],
+    }
+    repaired = {
+        "summary": "Validated token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging\n\n"
+                    "def validate(token):\n"
+                    "    logging.info('validating token')\n"
+                    "    return token.valid and not token.expired\n"
+                ),
+                "explanation": "Rejects expired tokens before accepting valid tokens.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(
+        contracts=[compressed, compressed, compressed, repaired]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert "did not return a valid complete file" in response.json()["detail"]
+    assert len(model.messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_files_focused_fallback_recovers_from_truncated_json(
+    generated_files_request,
+):
+    generated_files_request["approved_plan_markdown"] = valid_plan("src/auth.py")
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        }
+    ]
+    truncated = '{"summary":"Consolidate auth","files":[{"action":"modify","path":"src/auth.py"'
+    repaired = {
+        "summary": "Validated token expiration.",
+        "files": [
+            {
+                "action": "modify",
+                "path": "src/auth.py",
+                "content": (
+                    "import logging\n\n"
+                    "def validate(token):\n"
+                    "    logging.info('validating token')\n"
+                    "    return token.valid and not token.expired\n"
+                ),
+                "explanation": "Rejects expired tokens before accepting valid tokens.",
+            }
+        ],
+    }
+    model = FakeGeneratedFilesClient(contracts=[truncated, truncated, truncated, repaired])
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert "invalid file operations" in response.json()["detail"]
+    assert len(model.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_files_drops_partial_modify_after_targeted_repair(
+    generated_files_request,
+):
+    generated_files_request["repository_files"] = [
+        {
+            "path": "src/auth.py",
+            "content": (
+                "import logging\n\n"
+                "def validate(token):\n"
+                "    logging.info('validating token')\n"
+                "    return token.valid\n"
+            ),
+        },
+        {
+            "path": "src/config.py",
+            "content": "TIMEOUT = 10\n",
+        },
+    ]
+    compressed_auth = {
+        "action": "modify",
+        "path": "src/auth.py",
+        "content": "import logging def validate(token): return token.valid and not token.expired",
+        "explanation": "Adds token expiration validation.",
+    }
+    valid_config = {
+        "action": "modify",
+        "path": "src/config.py",
+        "content": "TIMEOUT = 15\n",
+        "explanation": "Raises timeout for slower integrations.",
+    }
+    partial_contract = {
+        "summary": "Mixed generated output.",
+        "files": [compressed_auth, valid_config],
+    }
+    model = FakeGeneratedFilesClient(
+        contracts=[partial_contract, partial_contract, partial_contract]
+    )
+    app = create_app(settings=AgentSettings(), model_client=model)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/files/generate", json=generated_files_request)
+
+    assert response.status_code == 502
+    assert "did not return a valid complete file" in response.json()["detail"]
+    assert len(model.messages) == 3
+
+
+def test_code_generation_prompt_distinguishes_create_and_modify_actions():
+    assert "Never use create" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "`repository_file_inventory`" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "modify for existing files" in CODE_GENERATION_SYSTEM_PROMPT
+    assert "Do not return JSON" in FILE_GENERATION_SYSTEM_PROMPT
+    assert "complete final file" in FILE_GENERATION_SYSTEM_PROMPT
+
+
+def test_plan_validation_feedback_includes_heading_skeleton():
+    feedback = build_validation_feedback(["headings are missing, duplicated, or out of order"])
+
+    assert "# Implementation Plan" in feedback
+    assert "## Issue Summary" in feedback
+    assert "## Risks and Open Questions" in feedback
+    assert "no extra headings" in feedback
 
 
 @pytest.mark.asyncio

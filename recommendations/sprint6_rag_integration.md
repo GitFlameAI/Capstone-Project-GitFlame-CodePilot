@@ -33,6 +33,32 @@ RAG_MAX_CHUNKS_PER_FILE=3
 RAG_MAX_CONTEXT_TOKENS=12000
 ```
 
+## Docker Compose on VM
+
+Use the dedicated RAG override when CodeRAG should be started together with the main VM stack:
+
+```bash
+docker compose --env-file .env.vm-new \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  -f backend/deploy/docker-compose.rag.override.yml \
+  up -d --build
+```
+
+The override starts `coderag`, waits for `GET /health`, and points Agent Engine at
+`http://coderag:8004`. If the CodeRAG repository is not a sibling of this repository, set
+`CODERAG_CONTEXT` in `.env.vm-new` to its absolute path or to the correct relative path from the
+compose project directory.
+
+```dotenv
+CODERAG_CONTEXT=../GitFlame-CodeRAG
+CODERAG_DOCKERFILE=Dockerfile
+CODERAG_IMAGE=gitflame-coderag:local
+CODERAG_PORT=8004
+RAG_BASE_URL=http://coderag:8004
+RAG_API_KEY=<private-rag-service-key>
+```
+
 `MODEL_CONTEXT_LIMIT=32768` matches the context currently advertised by `laguna`. The repository
 revision must be indexed in CodeRAG before Agent Engine searches it. Search does not clone or index
 a repository on demand.

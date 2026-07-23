@@ -28,6 +28,14 @@ class FakeRag:
         ]
 
 
+class EmptyRag:
+    async def ready(self):
+        return True
+
+    async def search(self, *, query, top_k, filters=None):
+        return []
+
+
 @pytest.fixture
 def sandbox():
     source = ProvidedFilesRepositorySource(
@@ -67,6 +75,7 @@ async def test_search_repository_uses_external_rag_contract(sandbox):
         await sandbox.execute("search_repository", {"query": "authentication", "top_k": 2})
     )
 
+    assert result["status"] == "completed"
     assert result["results"][0] == {
         "path": "src/auth.py",
         "start_line": 1,
@@ -74,6 +83,14 @@ async def test_search_repository_uses_external_rag_contract(sandbox):
         "score": 0.9,
         "content": "def auth(): pass",
     }
+
+
+@pytest.mark.asyncio
+async def test_search_repository_marks_empty_rag_results(sandbox):
+    sandbox.rag = EmptyRag()
+    result = json.loads(await sandbox.execute("search_repository", {"query": "authentication"}))
+
+    assert result == {"status": "empty", "results": []}
 
 
 @pytest.mark.asyncio

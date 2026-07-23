@@ -58,6 +58,44 @@ export function isExcluded(filePath, patterns) {
   return (patterns || []).some((p) => matchPattern(filePath, p))
 }
 
+// Build the "Exclude paths" picker suggestions from the REAL repository tree, so
+// the Config dropdown never shows hard-coded placeholder patterns. It offers:
+//   - `folder/**` for every directory in the tree (top-level and nested);
+//   - a few basename globs (`*.min.js`, `*.lock`, `*.map`) ONLY when the repo
+//     actually contains such files;
+//   - top-level files as exact paths.
+// Returns [] for an empty tree — the picker still lets the user type a custom
+// pattern and press Enter, so nothing is lost before the tree has loaded.
+export function excludePathOptionsFromTree(tree) {
+  const dirs = []
+  const files = []
+  const walk = (nodes, base) => {
+    for (const node of nodes || []) {
+      const full = base ? `${base}/${node.name}` : node.name
+      if (isProtected(full)) continue // never suggest excluding .ai.yml
+      if (node.type === 'dir') {
+        dirs.push(`${full}/**`)
+        walk(node.children || [], full)
+      } else {
+        files.push(full)
+      }
+    }
+  }
+  walk(tree || [], '')
+
+  // Basename globs are suggested only when the repository really has matching files.
+  const basenames = files.map((f) => f.split('/').pop())
+  const globs = []
+  const hasBasename = (re) => basenames.some((b) => re.test(b))
+  if (hasBasename(/\.min\.js$/)) globs.push('*.min.js')
+  if (hasBasename(/\.lock$/) || basenames.includes('package-lock.json')) globs.push('*.lock')
+  if (hasBasename(/\.map$/)) globs.push('*.map')
+
+  const topLevelFiles = files.filter((f) => !f.includes('/'))
+  // De-duplicate while preserving order: folders, then derived globs, then files.
+  return [...new Set([...dirs, ...globs, ...topLevelFiles])]
+}
+
 // Flatten a nested file tree into a list of { path } for every file (dirs skipped).
 export function flattenFiles(nodes, base = '') {
   const out = []

@@ -158,6 +158,37 @@ class GenerateFilesRequest(BaseModel):
 GeneratedFileAction = Literal["create", "modify", "delete"]
 
 
+class GeneratedFileOperation(BaseModel):
+    """A code-generation operation without source code embedded in JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: GeneratedFileAction
+    path: str = Field(min_length=1, max_length=500)
+    explanation: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _safe_repo_path(value)
+
+
+class GeneratedFileOperationsContract(BaseModel):
+    """Small structured response used before plain-text file generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=1_000)
+    files: list[GeneratedFileOperation] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def paths_must_be_unique(self) -> "GeneratedFileOperationsContract":
+        paths = [item.path for item in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("generated file operations contain duplicate paths")
+        return self
+
+
 class GeneratedFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

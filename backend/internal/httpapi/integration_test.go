@@ -25,6 +25,7 @@ type fakeGenerator struct {
 	fileRequests []domain.AgentCodeGenerationRequest
 	err          error
 	fileErr      error
+	files        []domain.GeneratedFileOperation
 }
 
 func (f *fakeGenerator) GeneratePlan(_ context.Context, req domain.AgentPlanRequest) (domain.AgentPlanResponse, error) {
@@ -73,6 +74,16 @@ func (f *fakeGenerator) GenerateFiles(_ context.Context, req domain.AgentCodeGen
 	f.mu.Unlock()
 	if f.fileErr != nil {
 		return domain.AgentGeneratedFilesResponse{}, f.fileErr
+	}
+	if len(f.files) > 0 {
+		return domain.AgentGeneratedFilesResponse{
+			RequestID: req.RequestID,
+			Status:    domain.TaskCompleted,
+			Summary:   "Generated test file operations.",
+			Files:     append([]domain.GeneratedFileOperation(nil), f.files...),
+			Model:     "test-codegen-model",
+			Usage:     domain.AgentUsage{TotalTokens: 42},
+		}, nil
 	}
 	return domain.AgentGeneratedFilesResponse{
 		RequestID: req.RequestID,
@@ -454,10 +465,89 @@ func TestApplyGeneratedFilesCreatesGitFlamePullRequest(t *testing.T) {
 	}
 }
 
+func TestApplyGeneratedFilesPersistsGitFlameContentsConflict(t *testing.T) {
+	generator := &fakeGenerator{}
+	source := &fakeGitFlameSource{applyErr: &IntegrationError{
+		Status: http.StatusConflict,
+		Code:   "AlreadyExistNameError",
+		Detail: "README.md",
+	}}
+	server := NewWithDependenciesAndIntegrations(
+		repository.NewMemoryStore(), generator, source, nil,
+	)
+	body := `{"repository":{"id":"repo-conflict","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"45-conflict","title":"Apply files","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(
+		t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body,
+	)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(
+		t, server.Router(), http.MethodPost, "/ai/issues/45-conflict/approve", "",
+	)
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := request(
+		t, server.Router(), http.MethodPost, "/ai/issues/45-conflict/gitflame/apply", "",
+	)
+	if applied.Code != http.StatusConflict ||
+		!strings.Contains(applied.Body.String(), `"code":"AlreadyExistNameError"`) {
+		t.Fatalf("unexpected apply conflict = %d: %s", applied.Code, applied.Body.String())
+	}
+	status := request(
+		t, server.Router(), http.MethodGet, "/ai/issues/45-conflict/code-generation", "",
+	)
+	if !strings.Contains(status.Body.String(), `"apply_status":"failed"`) ||
+		!strings.Contains(status.Body.String(), `"apply_error":"README.md"`) {
+		t.Fatalf("stored apply conflict was incomplete: %s", status.Body.String())
+	}
+}
+
+func TestApplyGeneratedFilesRejectsAllNoopFallbackWithoutGitFlameApply(t *testing.T) {
+	generator := &fakeGenerator{files: []domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "README.md",
+		Content:     "# Backend",
+		Explanation: "Kept the complete original file after partial model output.",
+	}}}
+	source := &fakeGitFlameSource{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), generator, source, nil)
+	body := `{"repository":{"id":"repo-noop","default_branch":"main","commit_sha":"abc123"},"issue":{"id":"45-noop","title":"No-op fallback","body":"Create PR","author":"artur"},"yaml_config":"version: 1","repository_files":[{"path":"README.md","content":"# Backend"}]}`
+	analyze := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/issues/analyze", body)
+	var queued struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, analyze, &queued)
+	waitTask(t, server.Router(), queued.TaskID)
+	approve := request(t, server.Router(), http.MethodPost, "/ai/issues/45-noop/approve", "")
+	var approved struct {
+		TaskID string `json:"task_id"`
+	}
+	decodeResponse(t, approve, &approved)
+	waitTask(t, server.Router(), approved.TaskID)
+
+	applied := request(t, server.Router(), http.MethodPost, "/ai/issues/45-noop/gitflame/apply", "")
+	if applied.Code != http.StatusConflict {
+		t.Fatalf("apply status = %d: %s", applied.Code, applied.Body.String())
+	}
+	if source.applyRepository.ID != "" || len(source.applyContract.Files) != 0 {
+		t.Fatalf("GitFlame apply should not be called for all-noop fallback: repo=%+v contract=%+v", source.applyRepository, source.applyContract)
+	}
+	if !strings.Contains(applied.Body.String(), `"code":"generated_files_not_ready"`) {
+		t.Fatalf("noop apply response should say generated files are not ready: %s", applied.Body.String())
+	}
+}
+
 func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	recommender := &fakeRecommender{}
 	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
-	body := `{"repository":{"id":"repo-rec","default_branch":"main"},"yaml_config":"version: 1","repository_files":[{"path":"src/app.go","content":"package app"}]}`
+	body := `{"repository":{"id":"repo-rec","default_branch":"main"},"yaml_config":"version: 1","categories":["security"],"repository_files":[{"path":"src/app.go","content":"package app"}]}`
 	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/repositories/repo-rec/recommendations/analyze", body)
 	if response.Code != http.StatusOK {
 		t.Fatalf("recommendations status = %d: %s", response.Code, response.Body.String())
@@ -471,6 +561,24 @@ func TestRecommendationsUseExternalServiceAndPersistCards(t *testing.T) {
 	list := request(t, server.Router(), http.MethodGet, "/repositories/repo-rec/recommendations", "")
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"state":"open"`) {
 		t.Fatalf("persisted recommendations = %d: %s", list.Code, list.Body.String())
+	}
+}
+
+func TestRecommendationsSupportRepositoryIDWithSlash(t *testing.T) {
+	recommender := &fakeRecommender{}
+	server := NewWithDependenciesAndIntegrations(repository.NewMemoryStore(), &fakeGenerator{}, nil, recommender)
+	body := `{"repository":{"id":"owner/repo","default_branch":"main"},"yaml_config":"version: 1","repository_files":[{"path":"src/app.go","content":"package app"}]}`
+	response := request(t, server.Router(), http.MethodPost, "/integrations/gitflame/recommendations/analyze?repository_id=owner%2Frepo", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recommendations status = %d: %s", response.Code, response.Body.String())
+	}
+	list := request(t, server.Router(), http.MethodGet, "/repositories/recommendations?repository_id=owner%2Frepo", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"repository_id":"owner/repo"`) || !strings.Contains(list.Body.String(), `"state":"open"`) {
+		t.Fatalf("persisted slash-id recommendations = %d: %s", list.Code, list.Body.String())
+	}
+	summary := request(t, server.Router(), http.MethodGet, "/repositories/recommendations/summary?repository_id=owner%2Frepo", "")
+	if summary.Code != http.StatusOK || !strings.Contains(summary.Body.String(), `"repository_id":"owner/repo"`) {
+		t.Fatalf("slash-id summary = %d: %s", summary.Code, summary.Body.String())
 	}
 }
 

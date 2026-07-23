@@ -44,7 +44,7 @@ storage:
 	if !cfg.RecommendationsEnabled || len(cfg.RecommendationCategories) != 1 || cfg.RecommendationCategories[0] != "security" {
 		t.Fatalf("unexpected recommendation config: enabled=%v categories=%#v", cfg.RecommendationsEnabled, cfg.RecommendationCategories)
 	}
-	if cfg.TargetBranchPrefix != "ai/" || !cfg.RequireApproval {
+	if cfg.TargetBranchPrefix != "ai-" || !cfg.RequireApproval {
 		t.Fatalf("legacy code-generation defaults should not be required in frontend config: %+v", cfg)
 	}
 }

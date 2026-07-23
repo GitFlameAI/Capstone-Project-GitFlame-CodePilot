@@ -14,12 +14,13 @@
 // unlocks the Autogeneration and Recommendations tabs.
 import { computed, ref, watch } from 'vue'
 import { session, saveConfig, updateDraftExcludePaths, configDirty, persistDraft, resetDraft } from '../../store/session.js'
-import { buildYaml, RECOMMENDATION_CATEGORIES, excludePathOptions } from '../../data/demo.js'
+import { buildYaml, RECOMMENDATION_CATEGORIES } from '../../data/demo.js'
 import GfIcon from '../ui/GfIcon.vue'
 import GfButton from '../ui/GfButton.vue'
 import GfTooltip from '../ui/GfTooltip.vue'
 import ContextPicker from '../ContextPicker.vue'
 import { copyText } from '../../utils/clipboard.js'
+import { excludePathOptionsFromTree } from '../../utils/excludePaths.js'
 
 const emit = defineEmits(['go'])
 
@@ -36,6 +37,11 @@ const yamlPreview = computed(() => buildYaml(session.configDraft))
 const noCategories = computed(() => (session.configDraft.categories || []).length === 0)
 const allCategoriesOn = computed(() => session.configDraft.categories.length === RECOMMENDATION_CATEGORIES.length)
 const dirty = computed(() => configDirty())
+
+// "Exclude paths" suggestions come from the REAL connected repository tree (both
+// in live and demo mode) — no hard-coded placeholder patterns. Empty until the
+// repository files have loaded; the user can still type a custom pattern.
+const excludePathOptions = computed(() => excludePathOptionsFromTree(session.fileTree))
 
 function toggleCategory(id) {
   const cats = session.configDraft.categories

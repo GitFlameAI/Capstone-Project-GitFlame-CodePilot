@@ -1,4 +1,4 @@
-# GitFlame CodePilot — Frontend (Sprint 5 / Version 5, final)
+# GitFlame CodePilot — Frontend (Sprint 6 / Version 6, final)
 
 Vue 3 demo UI for the **GitFlame CodePilot** AI integration service.
 
@@ -31,6 +31,31 @@ Two AI capabilities, both under human approval:
 - No runtime dependencies beyond `vue` + `vue-router`.
 - Served in production by **nginx** (multi-stage `Dockerfile`), which also proxies
   `/api/` to the Go backend so the app and API are same-origin.
+
+## Sprint 6 (Version 6) — what changed
+
+Sprint 6 is the final polish pass on the workspace UI, driven by usability feedback.
+No new dependencies, routes, or contracts — only clearer, real-data behaviour:
+
+- **Real "Exclude paths" suggestions.** The Config → *Exclude paths* picker no longer
+  offers a hard-coded list of generic globs. Its suggestions are now derived from the
+  **actual connected repository tree** (`folder/**` for every real directory, `*.min.js`
+  / `*.lock` / `*.map` only when such files exist, and top-level files as exact paths).
+  This removes the last placeholder/mock data from the workspace; the demo GitFlame host
+  page at `/` is intentionally still a simulation. (`utils/excludePaths.js`,
+  `components/workspace/ConfigTab.vue`, `data/demo.js`.)
+- **Correct file-tree indentation.** In the Repository tab, files inside nested folders
+  are now indented to match their parent folder, so it is always clear which folder a
+  file belongs to. (`components/FileTree.vue`.)
+- **Clearer "How it works" auto-play control.** On `/codepilot`, the play/pause control
+  now reflects the *effective* state: hovering the block visibly pauses it (the icon
+  switches to ▶), pressing **Resume** keeps it advancing even while the cursor stays on
+  the block, and moving the cursor out and back pauses it again. (`components/landing/Roadmap.vue`.)
+- **De-duplicated Re-run.** The Recommendations "repository changed" banner no longer
+  carries its own *Re-run now* button; it points to the single **Re-run** already in the
+  Summary just below. (`components/workspace/RecommendationsTab.vue`.)
+
+Full write-up: `docs/frontend/sprint_6_frontend.md`.
 
 ## Sprint 5 (Version 5) — what changed
 
@@ -93,8 +118,10 @@ summary.
 
 ### Config tab
 Edits the repository `.ai.yml` (default branch, `analysis.exclude`,
-`recommendations.categories`, `storage.recommendation_ttl_days`). Edits are held in a
-**draft** that survives tab switches; **Save** commits them and unlocks the AI tabs.
+`recommendations.categories`, `storage.recommendation_ttl_days`). The *Exclude paths*
+picker suggests patterns built from the **real repository tree** (and still accepts any
+custom pattern you type). Edits are held in a **draft** that survives tab switches;
+**Save** commits them and unlocks the AI tabs.
 
 ### Autogeneration tab
 Pick an issue or create one → editable Markdown plan (**Edit / Preview**, **Request

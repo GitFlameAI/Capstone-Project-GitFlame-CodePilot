@@ -89,6 +89,111 @@ func TestNormalizeGeneratedFilesMergesDuplicatePaths(t *testing.T) {
 	}
 }
 
+func TestDropNoopGeneratedFilesSkipsUnchangedModifies(t *testing.T) {
+	files := DropNoopGeneratedFiles([]domain.GeneratedFileOperation{
+		{
+			Action:      "modify",
+			Path:        "./app/main.py",
+			Content:     "package main\n",
+			Explanation: "No effective change.",
+		},
+		{
+			Action:      "modify",
+			Path:        "app/routes.py",
+			Content:     "def route():\n    return 'ok'\n",
+			Explanation: "Adds a real change.",
+		},
+	}, []domain.RepositoryFile{
+		{Path: "app/main.py", Content: "package main\r\n"},
+		{Path: "app/routes.py", Content: "def route():\n    pass\n"},
+	})
+	if len(files) != 1 || files[0].Path != "app/routes.py" {
+		t.Fatalf("expected only changed file to remain, got %+v", files)
+	}
+}
+
+func TestDropNoopGeneratedFilesDropsAllNoops(t *testing.T) {
+	files := DropNoopGeneratedFiles([]domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "app/main.py",
+		Content:     "package app\n",
+		Explanation: "Safe fallback with complete original content.",
+	}}, []domain.RepositoryFile{{Path: "app/main.py", Content: "package app\n"}})
+	if len(files) != 0 {
+		t.Fatalf("expected all-noop files to be dropped, got %+v", files)
+	}
+}
+
+func TestDropNoopGeneratedFilesForApplyDropsAllNoops(t *testing.T) {
+	files := DropNoopGeneratedFilesForApply([]domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "app/main.py",
+		Content:     "package app\n",
+		Explanation: "Safe fallback with complete original content.",
+	}}, []domain.RepositoryFile{{Path: "app/main.py", Content: "package app\n"}})
+	if len(files) != 0 {
+		t.Fatalf("expected apply filter to drop all no-op files, got %+v", files)
+	}
+}
+
+func TestDropUnsafePartialModifyFilesSkipsCompressedModifyContent(t *testing.T) {
+	originalAuth := strings.Join([]string{
+		"from fastapi import Depends, HTTPException",
+		"from jose import jwt",
+		"",
+		"def current_user(token: str):",
+		"    payload = jwt.decode(token, 'secret')",
+		"    user_id = payload.get('sub')",
+		"    if not user_id:",
+		"        raise HTTPException(status_code=401)",
+		"    return {'id': user_id}",
+		"",
+		"def require_admin(user = Depends(current_user)):",
+		"    if user.get('role') != 'admin':",
+		"        raise HTTPException(status_code=403)",
+		"    return user",
+	}, "\n")
+	files := DropUnsafePartialModifyFiles([]domain.GeneratedFileOperation{
+		{
+			Action:      "modify",
+			Path:        "backend-python/app/auth.py",
+			Content:     "def current_user(...): validate token and return user",
+			Explanation: "Compressed partial change.",
+		},
+		{
+			Action:      "modify",
+			Path:        "backend-python/app/main.py",
+			Content:     "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/health')\ndef health():\n    return {'ok': True}\n",
+			Explanation: "Keeps a complete file update.",
+		},
+	}, []domain.RepositoryFile{
+		{Path: "backend-python/app/auth.py", Content: originalAuth},
+		{Path: "backend-python/app/main.py", Content: "from fastapi import FastAPI\n\napp = FastAPI()\n"},
+	})
+	if len(files) != 1 || files[0].Path != "backend-python/app/main.py" {
+		t.Fatalf("expected only complete modify content to remain, got %+v", files)
+	}
+}
+
+func TestDropUnsafePartialModifyFilesKeepsSmallFileChanges(t *testing.T) {
+	files := DropUnsafePartialModifyFiles([]domain.GeneratedFileOperation{{
+		Action:      "modify",
+		Path:        "README.md",
+		Content:     "# App\n\nUpdated.",
+		Explanation: "Updates a small readme.",
+	}}, []domain.RepositoryFile{{Path: "README.md", Content: "# App\n"}})
+	if len(files) != 1 {
+		t.Fatalf("expected small valid change to remain, got %+v", files)
+	}
+}
+
+func TestNormalizeGitFlameBranchNameRemovesSlashes(t *testing.T) {
+	branch := normalizeGitFlameBranchName("ai/ISSUE-170-improve-project")
+	if branch != "ai-ISSUE-170-improve-project" {
+		t.Fatalf("unexpected branch name: %s", branch)
+	}
+}
+
 func validPlan(path string) string {
 	return `# Implementation Plan
 

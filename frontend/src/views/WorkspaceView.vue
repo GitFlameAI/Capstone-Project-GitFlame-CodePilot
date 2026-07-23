@@ -189,9 +189,9 @@ function goTo(id) {
       <!-- Tab content -->
       <div class="content">
         <RepositoryTab v-if="active === 'repository'" @go="goTo" @reload-repository="loadRepositoryData" />
-        <ConfigTab v-else-if="active === 'config'" @go="goTo" />
-        <AutogenTab v-else-if="active === 'autogen'" />
-        <RecommendationsTab v-else-if="active === 'recommendations'" @go="goTo" />
+        <ConfigTab v-if="active === 'config'" @go="goTo" />
+        <AutogenTab v-show="active === 'autogen'" />
+        <RecommendationsTab v-if="active === 'recommendations'" @go="goTo" />
       </div>
     </div>
 

@@ -100,6 +100,7 @@ function emitToggle(type, path) {
         v-else
         class="tree__row tree__row_file"
         :class="{ tree__row_excluded: fileExcluded(fullPath(node)) }"
+        :style="{ paddingLeft: 8 + depth * 16 + 'px' }"
         :title="fullPath(node)"
       >
         <span class="tree__caret-spacer" />
@@ -189,7 +190,10 @@ function emitToggle(type, path) {
 .tree__caret-spacer {
   display: inline-block;
   width: 13px;
-  margin-left: 8px;
+  /* Left indentation is provided by the row's dynamic padding-left (depth-based),
+     so file rows line up under their parent folder. The spacer only reserves the
+     width of the folder caret so the file icon aligns with folder icons. */
+  margin-left: 0;
   flex: none;
 }
 .tree__ic_dir {

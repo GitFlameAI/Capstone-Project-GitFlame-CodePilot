@@ -114,7 +114,11 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
 	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
 	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
+	mux.HandleFunc("POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
 	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
+	mux.HandleFunc("GET /repositories/recommendations/status", s.recommendationStatus)
+	mux.HandleFunc("GET /repositories/recommendations/summary", s.recommendationSummary)
+	mux.HandleFunc("GET /repositories/recommendations", s.recommendations)
 	mux.HandleFunc("GET /repositories/{id}/recommendations/status", s.recommendationStatus)
 	mux.HandleFunc("GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
 	mux.HandleFunc("GET /repositories/{id}/recommendations", s.recommendations)
@@ -316,21 +320,37 @@ func (s *Server) applyGeneratedFiles(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusConflict, "generated_files_not_ready", "code generation has not produced files to apply")
 		return
 	}
+	if session.GeneratedFiles.ApplyStatus == "applied" {
+		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
+		return
+	}
+	applyContract := *session.GeneratedFiles
+	applyContract.Files = service.DropNoopGeneratedFilesForApply(session.GeneratedFiles.Files, session.Request.RepositoryFiles)
+	now := time.Now().UTC()
+	if len(applyContract.Files) == 0 {
+		session.GeneratedFiles.ApplyStatus = "failed"
+		session.GeneratedFiles.ApplyError = "generated files contain no effective changes to apply"
+		session.GeneratedFiles.AppliedAt = &now
+		for index := range session.GeneratedFiles.Files {
+			session.GeneratedFiles.Files[index].Status = "skipped"
+		}
+		if err := s.store.UpdateSession(session); err != nil {
+			problem(w, http.StatusInternalServerError, "storage_error", err.Error())
+			return
+		}
+		problem(w, http.StatusConflict, "no_effective_generated_changes", "generated files contain no effective changes to apply")
+		return
+	}
 	gitflame, connection, err := s.gitFlameSourceForRepository(r, session.Request.Repository.ID)
 	if err != nil {
 		integrationError(w, err, "gitflame_client_unavailable")
-		return
-	}
-	if session.GeneratedFiles.ApplyStatus == "applied" && session.GeneratedFiles.PullRequestURL != "" {
-		write(w, http.StatusOK, actionResponse{SessionID: session.ID, IssueID: session.Request.Issue.ID, Status: session.Status, Message: "Generated files already applied to GitFlame.", GeneratedFiles: session.GeneratedFiles})
 		return
 	}
 	if gitflame == nil {
 		problem(w, http.StatusServiceUnavailable, "gitflame_client_unavailable", "GitFlame API client is not configured")
 		return
 	}
-	result, err := gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, *session.GeneratedFiles)
-	now := time.Now().UTC()
+	result, err := gitflame.ApplyGeneratedFiles(r.Context(), session.Request.Repository, applyContract)
 	if err != nil {
 		session.GeneratedFiles.ApplyStatus = "failed"
 		session.GeneratedFiles.ApplyError = err.Error()
@@ -386,6 +406,7 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Repository        domain.RepositoryMetadata `json:"repository"`
 		YAMLConfig        string                    `json:"yaml_config"`
+		Categories        []string                  `json:"categories"`
 		RepositoryFiles   []domain.RepositoryFile   `json:"repository_files"`
 		RepositoryContext []string                  `json:"repository_context"`
 	}
@@ -393,7 +414,8 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 		problem(w, 400, "invalid_json", err.Error())
 		return
 	}
-	if req.Repository.ID != r.PathValue("id") {
+	repositoryID := repositoryIDFromRequest(r)
+	if repositoryID != "" && req.Repository.ID != repositoryID {
 		problem(w, 422, "validation_error", "path repository id must match payload repository id")
 		return
 	}
@@ -476,7 +498,7 @@ func recommendationReportResponse(report *domain.RecommendationReport) map[strin
 	return map[string]any{"repository_id": report.RepositoryID, "status": report.Status, "summary": report.Summary, "recommendations": recommendations}
 }
 func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
@@ -490,7 +512,7 @@ func (s *Server) recommendationStatus(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "status": v.Status, "total": len(v.Recommendations), "open": len(v.Recommendations) - closed, "closed": closed})
 }
 func (s *Server) recommendationSummary(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
@@ -498,12 +520,19 @@ func (s *Server) recommendationSummary(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]string{"repository_id": v.RepositoryID, "summary": v.Summary})
 }
 func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Recommendations(r.PathValue("id"))
+	v, err := s.store.Recommendations(repositoryIDFromRequest(r))
 	if err != nil {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
 	}
 	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "recommendations": v.Recommendations})
+}
+
+func repositoryIDFromRequest(r *http.Request) string {
+	if id := strings.TrimSpace(r.PathValue("id")); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.URL.Query().Get("repository_id"))
 }
 func (s *Server) closeRecommendation(w http.ResponseWriter, r *http.Request) {
 	v, err := s.store.CloseRecommendation(r.PathValue("id"))

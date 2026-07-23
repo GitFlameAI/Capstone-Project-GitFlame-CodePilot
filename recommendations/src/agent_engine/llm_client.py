@@ -72,6 +72,8 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         response_schema: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> ChatCompletion:
         last_error: Exception | None = None
         for endpoint in self.endpoints:
@@ -81,6 +83,8 @@ class OpenAICompatibleClient:
                     messages=messages,
                     tools=tools,
                     response_schema=response_schema,
+                    max_tokens=max_tokens,
+                    enable_thinking=enable_thinking,
                 )
                 return replace(response, model=response.model or endpoint.model)
             except (ModelUnavailableError, InferenceTimeoutError) as exc:
@@ -95,17 +99,22 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         response_schema: dict[str, Any] | None,
+        max_tokens: int | None,
+        enable_thinking: bool | None,
     ) -> ChatCompletion:
         payload = {
             "model": endpoint.model,
             "messages": messages,
             "temperature": 0,
+            "max_tokens": max_tokens or self.settings.max_completion_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if enable_thinking is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         if response_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",

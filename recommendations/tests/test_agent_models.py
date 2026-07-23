@@ -1,6 +1,7 @@
 import pytest
+from pydantic import ValidationError
 
-from agent_engine.models import GeneratedFilesContract, parse_configuration
+from agent_engine.models import GeneratedFilesContract, RagResult, parse_configuration
 
 
 def test_nested_gitflame_yaml_is_adapted_to_plan_configuration():
@@ -43,6 +44,43 @@ def test_generated_files_contract_accepts_valid_actions():
     )
 
     assert [item.action for item in contract.files] == ["create", "delete"]
+
+
+def test_rag_result_contract_matches_strict_v1_response():
+    result = RagResult.model_validate(
+        {
+            "path": "src/auth.py",
+            "start_line": 1,
+            "end_line": 12,
+            "score": 0.91,
+            "content": "def auth():\n    return True\n",
+        }
+    )
+
+    assert result.model_dump(mode="json") == {
+        "path": "src/auth.py",
+        "start_line": 1,
+        "end_line": 12,
+        "score": 0.91,
+        "content": "def auth():\n    return True\n",
+    }
+
+
+def test_rag_result_rejects_extended_response_without_schema_update():
+    with pytest.raises(ValidationError):
+        RagResult.model_validate(
+            {
+                "path": "src/auth.py",
+                "start_line": 1,
+                "end_line": 12,
+                "score": 0.91,
+                "content": "def auth():\n    return True\n",
+                "reason": "Extended v2 field is not accepted by current Agent Engine.",
+                "source": "reranker",
+                "repository_id": "repo-1",
+                "commit_sha": "abc123",
+            }
+        )
 
 
 @pytest.mark.parametrize(
