@@ -264,3 +264,20 @@ docker compose \
   down -v
 ```
 
+## Sprint 6 RAG Deployment
+
+Sprint 6 adds the CodeRAG HTTP service through a Git submodule and Docker Compose
+services for `rag-service` and `coderag-database`.
+
+The deployment and reproducibility instructions are documented in:
+
+```text
+infra/sprint6-rag-deployment-runbook.md
+```
+
+After cloning, initialize submodules before starting the stack:
+
+```bash
+git submodule update --init --recursive
+```
+

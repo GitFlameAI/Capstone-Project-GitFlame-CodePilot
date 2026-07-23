@@ -1,0 +1,4 @@
+[submodule "coderag"]
+	path = coderag
+	url = https://github.com/GitFlameAI/GitFlame-CodeRAG.git
+	branch = sprint-6/http-rag-service

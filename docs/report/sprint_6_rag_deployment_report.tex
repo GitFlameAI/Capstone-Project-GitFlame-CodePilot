@@ -1,0 +1,164 @@
+\subsection{Sprint 6 Deployment and CodeRAG Integration}
+
+During Sprint 6, the deployment configuration was extended to support the final
+service architecture with a separate CodeRAG service. The main infrastructure goal
+was to make the project reproducible from a clean Docker state while keeping the
+RAG implementation in its own repository.
+
+CodeRAG was connected to the CodePilot repository as a Git submodule:
+
+\begin{verbatim}
+coderag
+\end{verbatim}
+
+The submodule points to:
+
+\begin{verbatim}
+https://github.com/GitFlameAI/GitFlame-CodeRAG.git
+branch: sprint-6/http-rag-service
+\end{verbatim}
+
+This approach keeps the RAG source code outside the main repository history while
+still allowing the complete demo stack to be cloned and started with the correct
+CodeRAG version. A fresh clone should therefore use:
+
+\begin{verbatim}
+git clone --recurse-submodules https://github.com/GitFlameAI/Capstone-Project-GitFlame-CodePilot.git
+\end{verbatim}
+
+If the repository was already cloned, the submodule can be initialized with:
+
+\begin{verbatim}
+git submodule update --init --recursive
+\end{verbatim}
+
+The Docker Compose deployment was updated through:
+
+\begin{verbatim}
+backend/deploy/docker-compose.sprint2.override.yml
+\end{verbatim}
+
+The complete Sprint 6 stack includes:
+
+\begin{verbatim}
+frontend
+backend
+database
+redis
+ml-service
+agent-engine
+agent-worker
+recommendation-service
+coderag-database
+rag-service
+\end{verbatim}
+
+The new \texttt{coderag-database} service uses the \texttt{pgvector/pgvector:pg16}
+image and stores CodeRAG indexing data in a separate Docker volume. This avoids
+mixing CodeRAG vector storage with the main CodePilot PostgreSQL database. The
+new \texttt{rag-service} service is built from the \texttt{coderag} submodule and
+exposes the CodeRAG HTTP API.
+
+The Agent Engine receives the internal Docker Compose URL for CodeRAG through:
+
+\begin{verbatim}
+RAG_BASE_URL=http://rag-service:8004
+\end{verbatim}
+
+For local host-side checks, the service is available at:
+
+\begin{verbatim}
+http://localhost:8004
+\end{verbatim}
+
+The root \texttt{.env.example} file was updated with Sprint 6 RAG configuration:
+
+\begin{verbatim}
+RAG_PORT=8004
+CODERAG_DATABASE_PORT=5433
+RAG_BASE_URL=http://localhost:8004
+RAG_API_KEY=
+EMBEDDING_MODEL=jinaai/jina-embeddings-v2-base-code
+RAG_USE_DENSE=true
+RAG_CANDIDATE_TOP_K=50
+RAG_MAX_CONTEXT_FILES=20
+RAG_MAX_CHUNKS_PER_FILE=3
+RAG_MAX_CONTEXT_TOKENS=12000
+\end{verbatim}
+
+The complete stack is started with:
+
+\begin{verbatim}
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  up -d --build
+\end{verbatim}
+
+A clean reproducibility check was performed by removing containers and volumes,
+then starting the full stack again:
+
+\begin{verbatim}
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  down -v
+
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  up -d --build
+\end{verbatim}
+
+After startup, Docker Compose reported all services as healthy:
+
+\begin{verbatim}
+agent-engine              healthy
+agent-worker              healthy
+backend                   healthy
+coderag-database          healthy
+database                  healthy
+frontend                  healthy
+ml-service                healthy
+rag-service               healthy
+recommendation-service    healthy
+redis                     healthy
+\end{verbatim}
+
+The following health and readiness checks were verified:
+
+\begin{verbatim}
+GET http://localhost:8000/ready
+{"components":{"agent_engine":"ready","redis":"ready","storage":"ready"},"service":"backend","status":"ready"}
+
+GET http://localhost:8002/ready
+{"status":"ready","model":"Qwen/Qwen3-Coder-30B-A3B-Instruct","version":"3.0.0"}
+
+GET http://localhost:8004/health
+{"status":"ok","database":"ready","version":"1.0.0"}
+
+GET http://localhost:8001/health
+{"status":"ok","service":"ml_service"}
+
+GET http://localhost:8003/health
+{"status":"ok","model":"Qwen/Qwen3-Coder-30B-A3B-Instruct"}
+
+Redis check:
+PONG
+\end{verbatim}
+
+The CodeRAG search endpoint was also checked with a valid request body. Since the
+clean local database did not contain an indexed repository, the expected result was
+an empty list:
+
+\begin{verbatim}
+POST http://localhost:8004/search
+{"results":[]}
+\end{verbatim}
+
+The deployment notes, submodule instructions, environment variables, health checks,
+RAG smoke-test scenario, and reproducibility commands are documented in:
+
+\begin{verbatim}
+infra/sprint6-rag-deployment-runbook.md
+\end{verbatim}

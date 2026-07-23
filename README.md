@@ -26,17 +26,27 @@ Prerequisites:
 - Docker Compose
 - Git
 
-Clone the repository:
+Clone the repository with submodules:
 
 ```bash
-git clone https://github.com/kite121/Capstone-Project-GitFlame-CodePilot.git
+git clone --recurse-submodules https://github.com/GitFlameAI/Capstone-Project-GitFlame-CodePilot.git
 cd Capstone-Project-GitFlame-CodePilot
+```
+
+If the repository was already cloned, initialize the CodeRAG submodule before
+starting the full Sprint 6 stack:
+
+```bash
+git submodule update --init --recursive
 ```
 
 Start all services:
 
 ```bash
-docker compose up -d --build
+docker compose \
+  -f docker-compose.yml \
+  -f backend/deploy/docker-compose.sprint2.override.yml \
+  up -d --build
 ```
 
 Open the application:
@@ -46,6 +56,8 @@ Frontend:              http://localhost/
 Backend health:        http://localhost/api/health
 Backend direct health: http://localhost:8000/health
 ML service health:     http://localhost:8001/health
+Agent Engine ready:    http://localhost:8002/ready
+RAG service health:    http://localhost:8004/health
 ```
 
 On the virtual machine, replace `localhost` with the VM IP:
@@ -63,13 +75,26 @@ http://<VM_IP>/
 
 ## Services
 
-Docker Compose starts four services:
+The full Sprint 6 Docker Compose stack starts:
 
 ```text
-frontend    Vue app + nginx, exposed on port 80
-backend     Go API service, exposed on port 8000
-ml-service  Mock Python ML service, exposed on port 8001
-database    PostgreSQL, exposed on port 5432
+frontend              Vue app + nginx, exposed on port 80
+backend               Go API service, exposed on port 8000
+ml-service            Python ML service, exposed on port 8001
+agent-engine          Agent Engine service, exposed on port 8002
+recommendation-service Recommendation service, exposed on port 8003
+rag-service           CodeRAG HTTP service, exposed on port 8004
+agent-worker          Background worker for queued tasks
+database              PostgreSQL, exposed on port 5432
+coderag-database      pgvector PostgreSQL for CodeRAG, exposed on port 5433
+redis                 Redis broker, exposed on port 6379
+```
+
+Sprint 6 deployment details, submodule notes, health checks, and clean
+reproducibility commands are documented in:
+
+```text
+infra/sprint6-rag-deployment-runbook.md
 ```
 
 The backend receives:
