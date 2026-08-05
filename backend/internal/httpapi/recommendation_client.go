@@ -28,11 +28,12 @@ func NewRecommendationClient(baseURL string, timeout time.Duration) *Recommendat
 	return &RecommendationClient{baseURL: strings.TrimRight(baseURL, "/"), httpClient: &http.Client{Timeout: timeout}}
 }
 
-func (c *RecommendationClient) AnalyzeRecommendations(ctx context.Context, configYAML string, files []domain.RepositoryFile) (string, []domain.RecommendationCard, error) {
+func (c *RecommendationClient) AnalyzeRecommendations(ctx context.Context, repositoryMetadata domain.RepositoryMetadata, configYAML string, files []domain.RepositoryFile) (string, []domain.RecommendationCard, error) {
 	payload := struct {
-		ConfigYAML  string                  `json:"config_yaml"`
-		RepoContext []domain.RepositoryFile `json:"repo_context"`
-	}{ConfigYAML: configYAML, RepoContext: files}
+		Repository  domain.RepositoryMetadata `json:"repository"`
+		ConfigYAML  string                    `json:"config_yaml"`
+		RepoContext []domain.RepositoryFile   `json:"repo_context"`
+	}{Repository: repositoryMetadata, ConfigYAML: configYAML, RepoContext: files}
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(payload); err != nil {
 		return "", nil, err

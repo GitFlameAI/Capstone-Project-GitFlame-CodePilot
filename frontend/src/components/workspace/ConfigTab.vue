@@ -21,6 +21,8 @@ import GfTooltip from '../ui/GfTooltip.vue'
 import ContextPicker from '../ContextPicker.vue'
 import { copyText } from '../../utils/clipboard.js'
 import { excludePathOptionsFromTree } from '../../utils/excludePaths.js'
+import { api } from '../../api/index.js'
+import { describeError } from '../../api/errors.js'
 
 const emit = defineEmits(['go'])
 
@@ -28,6 +30,7 @@ const emit = defineEmits(['go'])
 // across tab switches and stay in sync with the Repository file-tree Exclude
 // toggles. The draft only becomes the saved .ai.yml when the user presses Save.
 const form = computed(() => session.configDraft)
+const saveError = ref('')
 
 const saving = ref(false)
 const justSaved = ref(false)
@@ -98,12 +101,19 @@ watch(dirty, (isDirty) => {
 })
 
 async function save() {
-  clampRetention()
-  saving.value = true
-  await new Promise((r) => setTimeout(r, 450))
-  saveConfig(session.configDraft)
-  saving.value = false
-  justSaved.value = true
+	clampRetention()
+	saving.value = true
+	saveError.value = ''
+	try {
+		const yaml = buildYaml(session.configDraft)
+		await api.saveRepositoryConfig(session.connectionId, yaml)
+		saveConfig(session.configDraft)
+		justSaved.value = true
+	} catch (e) {
+		saveError.value = describeError(e).message
+	} finally {
+		saving.value = false
+	}
 }
 
 // Discard every unsaved change: revert the working draft to the saved config.
@@ -223,12 +233,13 @@ async function copyYaml() {
           Save to unlock Autogeneration &amp; Recommendations.
         </template>
         <template v-else-if="dirty">
-          Save changes to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
+          Save changes to CodePilot for the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
         </template>
         <template v-else>
-          All changes are saved to the <span class="mono">{{ form.defaultBranch || 'main' }}</span> branch.
+          CodePilot will use this configuration for polling and webhook analysis on <span class="mono">{{ form.defaultBranch || 'main' }}</span>.
         </template>
       </p>
+      <p v-if="saveError" class="saveerror">{{ saveError }}</p>
 
       <transition name="okfade">
         <p v-if="justSaved && !dirty" class="okmsg">
@@ -429,6 +440,11 @@ async function copyYaml() {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.45;
+}
+.saveerror {
+  margin: 10px 0 0;
+  color: var(--gf-red);
+  font-size: 12px;
 }
 .okmsg {
   display: flex;

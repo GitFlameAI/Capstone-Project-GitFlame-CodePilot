@@ -2,8 +2,13 @@ services:
   frontend:
     build:
       context: ./frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-/api}
     ports:
       - "${FRONTEND_PORT:-80}:80"
+    environment:
+      BACKEND_HOST: ${BACKEND_HOST:-backend}
+      BACKEND_INTERNAL_PORT: ${BACKEND_INTERNAL_PORT:-8000}
     depends_on:
       backend:
         condition: service_started
@@ -12,11 +17,12 @@ services:
     build:
       context: ./backend
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-8000}:${BACKEND_INTERNAL_PORT:-8000}"
     environment:
-      ML_SERVICE_URL: http://ml-service:8001
-      DATABASE_URL: postgresql://gitflame:gitflame@database:5432/gitflame_codepilot
-      REDIS_URL: redis://redis:6379/0
+      BACKEND_PORT: ${BACKEND_INTERNAL_PORT:-8000}
+      ML_SERVICE_URL: http://${ML_SERVICE_HOST:-ml-service}:${ML_SERVICE_INTERNAL_PORT:-8001}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gitflame}:${POSTGRES_PASSWORD:-gitflame}@${DATABASE_HOST:-database}:${POSTGRES_INTERNAL_PORT:-5432}/${POSTGRES_DB:-gitflame_codepilot}
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_INTERNAL_PORT:-6379}/${REDIS_DB:-0}
     depends_on:
       ml-service:
         condition: service_started
@@ -29,39 +35,6 @@ services:
     build:
       context: ./ml_service
     ports:
-      - "${ML_SERVICE_PORT:-8001}:8001"
-
-  database:
-    image: postgres:16-alpine
+      - "${ML_SERVICE_PORT:-8001}:${ML_SERVICE_INTERNAL_PORT:-8001}"
     environment:
-      POSTGRES_USER: gitflame
-      POSTGRES_PASSWORD: gitflame
-      POSTGRES_DB: gitflame_codepilot
-    ports:
-      - "${DATABASE_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./backend/db/migrations/initial_schema.sql:/docker-entrypoint-initdb.d/initial_schema.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gitflame -d gitflame_codepilot"]
-      interval: 2s
-      timeout: 5s
-      retries: 20
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - redis_data:/data
-
-volumes:
-  postgres_data:
-  redis_data:
-
+      PORT: ${ML_SERVICE_INTERNAL_PORT:-8001}

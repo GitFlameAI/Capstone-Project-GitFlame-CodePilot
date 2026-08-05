@@ -7,7 +7,7 @@
 //   Recommendations — a short analysis summary, or a prompt to configure / analyse.
 import { reactive, ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { session, updateConnection, clearConnection, updateDraftExcludePaths, applyMockPush, configDirty } from '../../store/session.js'
+import { session, updateConnection, clearConnection, updateDraftExcludePaths, applyMockPush, configDirty, setWebhookRegistration } from '../../store/session.js'
 import { api, USING_MOCK } from '../../api/index.js'
 import { describeError } from '../../api/errors.js'
 import { copyText } from '../../utils/clipboard.js'
@@ -86,11 +86,46 @@ function simulateExpiry() {
 
 // --- webhook copy ---
 const copiedWebhook = ref(false)
+const copiedSecret = ref(false)
+const webhookBusy = ref(false)
+const webhookError = ref('')
 async function copyWebhook() {
-  const ok = await copyText(session.repo.webhookUrl)
+  const ok = await copyText(session.webhook.url)
   if (ok) {
     copiedWebhook.value = true
     setTimeout(() => (copiedWebhook.value = false), 1500)
+  }
+}
+
+async function copyWebhookSecret() {
+  const ok = await copyText(session.webhook.secret)
+  if (ok) {
+    copiedSecret.value = true
+    setTimeout(() => (copiedSecret.value = false), 1500)
+  }
+}
+
+async function enableWebhook() {
+  webhookBusy.value = true
+  webhookError.value = ''
+  try {
+    setWebhookRegistration(await api.enableWebhook(session.connectionId))
+  } catch (e) {
+    webhookError.value = describeError(e).message
+  } finally {
+    webhookBusy.value = false
+  }
+}
+
+async function disableWebhook() {
+  webhookBusy.value = true
+  webhookError.value = ''
+  try {
+    setWebhookRegistration(await api.disableWebhook(session.connectionId))
+  } catch (e) {
+    webhookError.value = describeError(e).message
+  } finally {
+    webhookBusy.value = false
   }
 }
 
@@ -146,9 +181,14 @@ onMounted(loadRecSummary)
     <section class="card gf-card">
       <div class="card__head">
         <h3 class="card__title"><GfIcon name="link" :size="16" /> Connection</h3>
-        <GfButton variant="secondary" size="s" @click="openEdit">
-          <GfIcon name="pencil" :size="14" /> Change
-        </GfButton>
+        <div class="card__actions">
+          <GfButton variant="secondary" size="s" @click="emit('reload-repository')">
+            <GfIcon name="refresh" :size="14" /> Refresh data
+          </GfButton>
+          <GfButton variant="secondary" size="s" @click="openEdit">
+            <GfIcon name="pencil" :size="14" /> Change
+          </GfButton>
+        </div>
       </div>
       <dl class="info">
         <div><dt>Repository</dt><dd>{{ session.repo.owner }}/{{ session.repo.name }}</dd></div>
@@ -166,10 +206,10 @@ onMounted(loadRecSummary)
             </span>
           </dd>
         </div>
-        <div v-if="session.repo.webhookUrl">
-          <dt>Webhook <GfTooltip text="A URL you register in GitFlame. GitFlame calls it when an issue or branch changes, so CodePilot is notified and pulls the updated repository data. It is inbound (GitFlame → CodePilot), separate from your access token." /></dt>
+        <div v-if="session.webhook.status === 'active'">
+          <dt>Webhook <GfTooltip text="Optional accelerator for push and issue events. Regular polling remains available through Refresh data and on each workspace visit." /></dt>
           <dd class="webhookrow">
-            <span class="mono webhook">{{ session.repo.webhookUrl }}</span>
+            <span class="mono webhook">{{ session.webhook.url }}</span>
             <button class="copybtn" :title="copiedWebhook ? 'Copied' : 'Copy webhook URL'" @click="copyWebhook">
               <GfIcon :name="copiedWebhook ? 'check' : 'copy'" :size="14" />
             </button>
@@ -177,11 +217,34 @@ onMounted(loadRecSummary)
         </div>
       </dl>
 
+      <div class="webhook-setup">
+        <template v-if="session.webhook.status === 'active'">
+          <p>Subscribe this webhook in GitFlame to <strong>push</strong> and <strong>issue</strong> events.</p>
+          <div v-if="session.webhook.secret" class="webhook-secret">
+            <span class="mono">{{ session.webhook.secret }}</span>
+            <button class="copybtn" :title="copiedSecret ? 'Copied' : 'Copy webhook secret'" @click="copyWebhookSecret">
+              <GfIcon :name="copiedSecret ? 'check' : 'copy'" :size="14" />
+            </button>
+          </div>
+          <p v-if="session.webhook.secret" class="webhook-warning">Copy this secret now. It is stored only as a hash and will not be shown again after reload.</p>
+          <p v-else class="webhook-warning">The secret was shown once when the webhook was enabled. Rotate it if you need a new value.</p>
+          <div class="webhook-actions">
+            <GfButton variant="secondary" size="s" :loading="webhookBusy" @click="enableWebhook">Rotate secret</GfButton>
+            <GfButton variant="secondary" size="s" :disabled="webhookBusy" @click="disableWebhook">Disable webhook</GfButton>
+          </div>
+        </template>
+        <template v-else>
+          <p>Polling is active. Optionally enable a webhook for faster file and issue updates.</p>
+          <GfButton variant="secondary" size="s" :loading="webhookBusy" @click="enableWebhook">Enable webhook</GfButton>
+        </template>
+        <p v-if="webhookError" class="webhook-error">{{ webhookError }}</p>
+      </div>
+
       <!-- live webhook indicator + demo trigger -->
-      <div class="events">
-        <span class="events__live"><span class="events__dot" /> Listening for GitFlame events</span>
+      <div v-if="session.webhook.status === 'active' || USING_MOCK" class="events">
+        <span v-if="session.webhook.status === 'active'" class="events__live"><span class="events__dot" /> Listening for GitFlame events</span>
         <span v-if="session.lastEvent" class="gf-chip events__last">
-          <GfIcon name="branch" :size="12" /> last push {{ session.lastEvent.when }}
+          <GfIcon name="branch" :size="12" /> last {{ session.lastEvent.kind }} {{ session.lastEvent.when }}
         </span>
         <button v-if="USING_MOCK" class="events__sim" title="Demo: simulate a GitFlame push so the tree, issues and recommendations refresh in place" @click="simulatePush">
           <GfIcon name="refresh" :size="13" /> Simulate a push (demo)
@@ -446,6 +509,13 @@ onMounted(loadRecSummary)
 .medit-err :deep(.gf-icon) {
   flex: none;
 }
+.card__actions,
+.webhook-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .webhookrow {
   display: flex;
   align-items: center;
@@ -472,6 +542,29 @@ onMounted(loadRecSummary)
   border-color: var(--gf-purple);
   color: var(--gf-accent);
 }
+.webhook-setup {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--gf-line);
+  border-radius: 10px;
+  background: var(--gf-surface-2);
+  font-size: 12.5px;
+  color: var(--gf-text-2);
+}
+.webhook-setup p { margin: 0 0 10px; }
+.webhook-secret {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--gf-line-2);
+  border-radius: 8px;
+  background: var(--gf-surface);
+  word-break: break-all;
+}
+.webhook-warning { color: var(--gf-amber); }
+.webhook-error { margin-top: 10px !important; color: var(--gf-red); }
 .events {
   display: flex;
   align-items: center;

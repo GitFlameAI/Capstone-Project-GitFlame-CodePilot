@@ -6,7 +6,7 @@
 // readable). Autogeneration and Recommendations are LOCKED (dimmed + lock icon)
 // until a configuration has been saved, because both flows depend on the
 // repository's .ai.yml. Clicking a locked tab nudges the user to the Config tab.
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   session,
@@ -15,8 +15,10 @@ import {
   beginRepositoryDataLoad,
   setRepositoryData,
   failRepositoryDataLoad,
+  setWebhookRegistration,
+  rememberWebhookEvent,
 } from '../store/session.js'
-import { api } from '../api/index.js'
+import { api, ApiError, USING_MOCK } from '../api/index.js'
 import { describeError } from '../api/errors.js'
 import { buildRepositoryTree } from '../utils/repositoryTree.js'
 import GfIcon from '../components/ui/GfIcon.vue'
@@ -29,6 +31,8 @@ import RecommendationsTab from '../components/workspace/RecommendationsTab.vue'
 const router = useRouter()
 const active = ref('repository')
 const lockHint = ref(false)
+let webhookPoller = null
+let webhookPolling = false
 
 // Always show a new tab from the top of the page (header first). Scrolling the
 // whole window to the top keeps the sticky top bar — with the repo name and
@@ -73,6 +77,70 @@ async function loadRepositoryData() {
   }
 }
 
+async function loadWebhookStatus() {
+  if (!session.connectionId) return
+  try {
+    setWebhookRegistration(await api.getWebhook(session.connectionId))
+  } catch (e) {
+    if (!(e instanceof ApiError) || e.status !== 404) throw e
+  }
+}
+
+function webhookIssue(event) {
+  const issue = event?.payload?.issue || {}
+  const id = String(issue.id ?? issue.iid ?? issue.number ?? '')
+  if (!id) return null
+  const author = issue.author || issue.user || {}
+  return {
+    id,
+    title: issue.title || 'New GitFlame issue',
+    body: issue.body || issue.description || '',
+    author: typeof author === 'string' ? author : (author.username || author.login || author.name || ''),
+    state: issue.state || event.action || '',
+  }
+}
+
+async function pollWebhookEvents() {
+  if (USING_MOCK || webhookPolling || session.webhook.status !== 'active' || !session.connectionId) return
+  webhookPolling = true
+  try {
+    const response = await api.listWebhookEvents(session.connectionId)
+    let refreshRepository = false
+    for (const event of [...(response?.events || [])].reverse()) {
+      const change = rememberWebhookEvent(event)
+      if (change.isNew && (event.event_type === 'push' || event.event_type === 'issue')) {
+        refreshRepository = true
+      }
+      if (event.event_type === 'push') {
+        if (event.status === 'received') session.recommendationsStale = true
+        if (change.statusChanged && event.status === 'processed' && event.payload?.recommendations_status === 'updated') {
+          session.recommendationsStale = false
+          session.recommendationsRevision += 1
+        }
+      }
+      const action = String(event.action || '').toLowerCase()
+      if (change.isNew && event.event_type === 'issue' && (!action || ['create', 'created', 'open', 'opened', 'reopen', 'reopened'].includes(action))) {
+        const issue = webhookIssue(event)
+        if (issue) session.issuePrompt = issue
+      }
+    }
+    if (refreshRepository) await loadRepositoryData()
+  } catch (e) {
+    // Webhook polling is an optional accelerator. Regular repository polling
+    // remains usable when the event feed is temporarily unavailable.
+    if (e instanceof ApiError && e.status === 404) session.webhook.status = 'disabled'
+  } finally {
+    webhookPolling = false
+  }
+}
+
+function analyzeWebhookIssue() {
+  if (!session.issuePrompt) return
+  session.pendingIssue = { ...session.issuePrompt }
+  session.issuePrompt = null
+  goTo('autogen')
+}
+
 async function submitToken() {
   const t = tokenInput.value.trim()
   if (!t) return
@@ -103,6 +171,13 @@ onMounted(async () => {
   // often wants to review it before generating or fetching recommendations.
   active.value = 'config'
   await loadRepositoryData()
+  await loadWebhookStatus()
+  await pollWebhookEvents()
+  webhookPoller = window.setInterval(pollWebhookEvents, 7000)
+})
+
+onBeforeUnmount(() => {
+  if (webhookPoller) window.clearInterval(webhookPoller)
 })
 
 const tabs = computed(() => [
@@ -154,6 +229,16 @@ function goTo(id) {
     </div>
 
     <div class="shell">
+      <div v-if="session.issuePrompt" class="issue-event gf-card">
+        <div>
+          <strong>New issue from GitFlame: {{ session.issuePrompt.title }}</strong>
+          <p>Repository data has been refreshed. Would you like CodePilot to analyse this issue?</p>
+        </div>
+        <div class="issue-event__actions">
+          <GfButton variant="primary" size="s" :disabled="!session.configExists" @click="analyzeWebhookIssue">Analyse issue</GfButton>
+          <GfButton variant="secondary" size="s" @click="session.issuePrompt = null">Dismiss</GfButton>
+        </div>
+      </div>
       <!-- AI disclaimer banner (shown above tabs on every tab) -->
       <div class="disclaimer">
         <GfIcon name="info" :size="15" />
@@ -550,5 +635,28 @@ function goTo(id) {
 .tokgate__exit:hover {
   color: var(--gf-text);
   text-decoration: underline;
+}
+.issue-event {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-color: var(--gf-purple);
+  background: var(--gf-purple-soft);
+}
+.issue-event p {
+  margin: 4px 0 0;
+  color: var(--gf-text-2);
+  font-size: 13px;
+}
+.issue-event__actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+@media (max-width: 720px) {
+  .issue-event { align-items: stretch; flex-direction: column; }
 }
 </style>

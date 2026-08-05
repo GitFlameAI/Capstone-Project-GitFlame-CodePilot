@@ -109,6 +109,16 @@ export const httpApi = {
     ),
   listRepositoryIssues: (connectionId) =>
     request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/issues`),
+  saveRepositoryConfig: (connectionId, yamlConfig) =>
+    request('PUT', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/config`, { yaml_config: yamlConfig }),
+  enableWebhook: (connectionId) =>
+    request('POST', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  getWebhook: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  disableWebhook: (connectionId) =>
+    request('DELETE', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  listWebhookEvents: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook/events?limit=50`),
 
   // --- Recommendation flow ---
   analyzeRepository: (repositoryId, payload) =>

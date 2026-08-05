@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ type Store interface {
 	LatestTask(string) (*domain.AgentTask, error)
 	UpdateTask(*domain.AgentTask) error
 	SaveRecommendations(domain.RepositoryMetadata, domain.AIConfig, string, []domain.RecommendationCard) (*domain.RecommendationReport, error)
+	SaveAIConfig(domain.RepositoryMetadata, domain.AIConfig) error
+	LatestAIConfig(string) (domain.AIConfig, error)
 	Recommendations(string) (*domain.RecommendationReport, error)
 	CloseRecommendation(string) (domain.RecommendationCard, error)
 	DeleteRecommendation(string) error
@@ -34,7 +37,10 @@ type Store interface {
 	RevokeGitFlameConnection(string, string) (*domain.GitFlameConnection, error)
 	TouchGitFlameConnection(string, string) error
 	SaveGitFlameWebhook(domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error)
+	GitFlameWebhook(string) (*domain.GitFlameWebhookRegistration, error)
+	GitFlameWebhookByConnection(string) (*domain.GitFlameWebhookRegistration, error)
 	SaveGitFlameWebhookEvent(domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error)
+	GitFlameWebhookEvents(string, int) ([]domain.GitFlameWebhookEvent, error)
 	SaveRepositorySnapshot(domain.RepositorySnapshot, []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error)
 	RepositorySnapshot(string) (*domain.RepositorySnapshot, []domain.RepositorySnapshotFile, error)
 }
@@ -47,6 +53,7 @@ type MemoryStore struct {
 	issueIndex    map[string]string
 	tasks         map[string]*domain.AgentTask
 	reports       map[string]*domain.RecommendationReport
+	configs       map[string]domain.AIConfig
 	users         map[string]*domain.AppUser
 	userIndex     map[string]string
 	appSessions   map[string]*domain.AppSession
@@ -61,7 +68,7 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		sessions: map[string]*domain.IssueSession{}, issueIndex: map[string]string{},
-		tasks: map[string]*domain.AgentTask{}, reports: map[string]*domain.RecommendationReport{},
+		tasks: map[string]*domain.AgentTask{}, reports: map[string]*domain.RecommendationReport{}, configs: map[string]domain.AIConfig{},
 		users: map[string]*domain.AppUser{}, userIndex: map[string]string{},
 		appSessions: map[string]*domain.AppSession{}, sessionHashes: map[string]string{},
 		connections: map[string]*domain.GitFlameConnection{}, webhooks: map[string]*domain.GitFlameWebhookRegistration{},
@@ -223,6 +230,26 @@ func (s *MemoryStore) SaveRecommendations(repository domain.RepositoryMetadata, 
 	s.reports[repository.ID] = v
 	return cloneReport(v), nil
 }
+
+func (s *MemoryStore) SaveAIConfig(repository domain.RepositoryMetadata, cfg domain.AIConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(repository.ID) == "" {
+		return errors.New("repository id is required")
+	}
+	s.configs[repository.ID] = cfg
+	return nil
+}
+
+func (s *MemoryStore) LatestAIConfig(repositoryID string) (domain.AIConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg, ok := s.configs[repositoryID]
+	if !ok {
+		return domain.AIConfig{}, ErrNotFound
+	}
+	return cfg, nil
+}
 func (s *MemoryStore) Recommendations(id string) (*domain.RecommendationReport, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -367,6 +394,27 @@ func (s *MemoryStore) SaveGitFlameWebhook(v domain.GitFlameWebhookRegistration) 
 	return cloneWebhook(&v), nil
 }
 
+func (s *MemoryStore) GitFlameWebhook(id string) (*domain.GitFlameWebhookRegistration, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.webhooks[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneWebhook(v), nil
+}
+
+func (s *MemoryStore) GitFlameWebhookByConnection(connectionID string) (*domain.GitFlameWebhookRegistration, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, webhook := range s.webhooks {
+		if webhook.ConnectionID == connectionID {
+			return cloneWebhook(webhook), nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (s *MemoryStore) SaveGitFlameWebhookEvent(v domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -381,6 +429,25 @@ func (s *MemoryStore) SaveGitFlameWebhookEvent(v domain.GitFlameWebhookEvent) (*
 	}
 	s.events[v.ID] = cloneWebhookEvent(&v)
 	return cloneWebhookEvent(&v), nil
+}
+
+func (s *MemoryStore) GitFlameWebhookEvents(webhookID string, limit int) ([]domain.GitFlameWebhookEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	result := make([]domain.GitFlameWebhookEvent, 0, limit)
+	for _, event := range s.events {
+		if event.WebhookID == webhookID {
+			result = append(result, *cloneWebhookEvent(event))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ReceivedAt.After(result[j].ReceivedAt) })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 func (s *MemoryStore) SaveRepositorySnapshot(v domain.RepositorySnapshot, files []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error) {

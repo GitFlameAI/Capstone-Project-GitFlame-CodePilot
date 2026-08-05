@@ -326,8 +326,8 @@ function toggleFile(path) {
 // stored it on the session; pick it up and open a pre-filled new-issue form.
 watch(() => session.pendingIssue, (pending) => {
   if (!pending) return
-  issueSource.value = 'new'
-  issue.id = newIssueId()
+  issueSource.value = pending.id ? 'existing' : 'new'
+  issue.id = pending.id || newIssueId()
   issue.title = pending.title || ''
   issue.body = pending.body || ''
   issue.author = pending.author || session.repo.owner || 'roma'
@@ -363,6 +363,7 @@ onBeforeUnmount(stopPolling)
                 <li v-for="it in issues" :key="it.id" class="dd__opt" @click="pickIssue(it)">
                   <span class="dd__id mono">{{ it.id }}</span>
                   <span class="dd__title">{{ it.title }}</span>
+                  <span v-if="it.state" class="gf-chip dd__state">{{ it.state }}</span>
                 </li>
                 <li v-if="!issues.length" class="dd__opt dd__opt_empty">
                   No issues available yet — create a new one instead.
@@ -692,6 +693,11 @@ onBeforeUnmount(stopPolling)
 }
 .dd__opt:hover {
   background: var(--gf-purple-soft);
+}
+.dd__state {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: lowercase;
 }
 .dd__opt_empty {
   color: var(--gf-text-3);

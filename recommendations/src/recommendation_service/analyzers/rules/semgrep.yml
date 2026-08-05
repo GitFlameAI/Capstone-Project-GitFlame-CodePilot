@@ -1,0 +1,50 @@
+rules:
+  - id: codepilot.python.security.subprocess-shell-true
+    languages: [python]
+    message: Avoid shell=True for subprocess execution; pass an argument list to the child process.
+    severity: ERROR
+    metadata:
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+
+  - id: codepilot.python.security.unsafe-yaml-load
+    languages: [python]
+    message: yaml.load may construct arbitrary Python objects; use yaml.safe_load for untrusted YAML.
+    severity: ERROR
+    metadata:
+      category: security
+    pattern: yaml.load(...)
+
+  - id: codepilot.javascript.security.dynamic-eval
+    languages: [javascript, typescript]
+    message: Dynamic eval executes text as code and can enable code injection.
+    severity: ERROR
+    metadata:
+      category: security
+    pattern: eval(...)
+
+  - id: codepilot.go.security.shell-command
+    languages: [go]
+    message: Executing a shell command string increases command-injection risk; invoke the target executable directly.
+    severity: ERROR
+    metadata:
+      category: security
+    pattern-either:
+      - pattern: exec.Command("sh", "-c", ...)
+      - pattern: exec.Command("bash", "-c", ...)
+
+  - id: codepilot.python.maintainability.bare-except
+    languages: [python]
+    message: A bare except catches system-exiting exceptions and hides the actual failure.
+    severity: WARNING
+    metadata:
+      category: maintainability
+    pattern: |
+      try:
+        ...
+      except:
+        ...

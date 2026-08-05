@@ -131,6 +131,8 @@ app = create_app()
 
 
 def run() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("agent_engine.app:app", host="0.0.0.0", port=8001)
+    uvicorn.run("agent_engine.app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))

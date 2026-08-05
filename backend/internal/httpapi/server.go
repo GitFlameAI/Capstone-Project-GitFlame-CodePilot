@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,18 +19,21 @@ import (
 )
 
 type Server struct {
-	workflow         *service.Workflow
-	store            repository.Store
-	gitflame         GitFlameSource
-	recommender      RecommendationAnalyzer
-	router           *http.ServeMux
-	checks           map[string]func(context.Context) error
-	credentialCipher *security.CredentialCipher
-	gitflameBaseURL  string
-	gitflameTimeout  time.Duration
-	sessionCookie    string
-	sessionTTL       time.Duration
-	sessionSecure    bool
+	workflow          *service.Workflow
+	store             repository.Store
+	gitflame          GitFlameSource
+	recommender       RecommendationAnalyzer
+	indexer           RepositoryIndexer
+	router            *http.ServeMux
+	checks            map[string]func(context.Context) error
+	credentialCipher  *security.CredentialCipher
+	gitflameBaseURL   string
+	gitflameTimeout   time.Duration
+	sessionCookie     string
+	sessionTTL        time.Duration
+	sessionSecure     bool
+	publicBaseURL     string
+	webhookSigningKey [32]byte
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -43,9 +47,6 @@ func New(cfg config.Config) (*Server, error) {
 	}
 	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
 	var gitflame GitFlameSource
-	if client := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout); client != nil {
-		gitflame = client
-	}
 	var credentialCipher *security.CredentialCipher
 	if strings.TrimSpace(cfg.GitFlameCredentialKey) != "" {
 		var err error
@@ -55,7 +56,11 @@ func New(cfg config.Config) (*Server, error) {
 		}
 	}
 	recommender := NewRecommendationClient(cfg.RecommendationServiceURL, cfg.RecommendationTimeout)
+	indexer := NewRAGClient(cfg.RAGBaseURL, cfg.RAGAPIKey, cfg.RAGIndexTimeout)
 	checks := map[string]func(context.Context) error{"storage": store.Ping, "agent_engine": engine.Ready}
+	if indexer != nil {
+		checks["rag"] = indexer.Ready
+	}
 	if cfg.DispatchMode == "redis" {
 		if cfg.DatabaseURL == "" {
 			return nil, errors.New("TASK_DISPATCH_MODE=redis requires DATABASE_URL")
@@ -65,19 +70,19 @@ func New(cfg config.Config) (*Server, error) {
 			return nil, err
 		}
 		checks["redis"] = broker.Ping
-		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, checks, cfg, credentialCipher), nil
+		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, indexer, checks, cfg, credentialCipher), nil
 	}
-	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, checks, cfg, credentialCipher), nil
+	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, indexer, checks, cfg, credentialCipher), nil
 }
 func NewWithDependencies(store repository.Store, generator agent.Generator) *Server {
 	return NewWithDependenciesAndIntegrations(store, generator, nil, nil)
 }
 
 func NewWithDependenciesAndIntegrations(store repository.Store, generator agent.Generator, gitflame GitFlameSource, recommender RecommendationAnalyzer) *Server {
-	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, map[string]func(context.Context) error{"storage": store.Ping}, config.Config{SessionCookieName: "codepilot_session", SessionTTL: 168 * time.Hour}, nil)
+	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, nil, map[string]func(context.Context) error{"storage": store.Ping}, config.Config{SessionCookieName: "codepilot_session", SessionTTL: 168 * time.Hour}, nil)
 }
 
-func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, checks map[string]func(context.Context) error, cfg config.Config, credentialCipher *security.CredentialCipher) *Server {
+func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, indexer RepositoryIndexer, checks map[string]func(context.Context) error, cfg config.Config, credentialCipher *security.CredentialCipher) *Server {
 	if cfg.SessionCookieName == "" {
 		cfg.SessionCookieName = "codepilot_session"
 	}
@@ -85,9 +90,11 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 		cfg.SessionTTL = 168 * time.Hour
 	}
 	s := &Server{
-		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, checks: checks,
+		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, indexer: indexer, checks: checks,
 		credentialCipher: credentialCipher, gitflameBaseURL: cfg.GitFlameBaseURL, gitflameTimeout: cfg.GitFlameTimeout,
 		sessionCookie: cfg.SessionCookieName, sessionTTL: cfg.SessionTTL, sessionSecure: cfg.SessionCookieSecure,
+		publicBaseURL:     strings.TrimRight(cfg.PublicBaseURL, "/"),
+		webhookSigningKey: sha256.Sum256([]byte(cfg.GitFlameCredentialKey)),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
@@ -104,8 +111,13 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
 	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
 	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
+	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}/config", s.saveRepositoryConfig)
+	mux.HandleFunc("POST /integrations/gitflame/connections/{id}/webhook", s.createGitFlameWebhook)
+	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/webhook", s.getGitFlameWebhook)
+	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}/webhook", s.disableGitFlameWebhook)
+	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/webhook/events", s.listGitFlameWebhookEvents)
+	mux.HandleFunc("POST /integrations/gitflame/webhooks/{id}", s.receiveGitFlameWebhook)
 	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
-	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
 	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
 	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
 	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
@@ -184,6 +196,10 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	req, err = s.hydrateAnalyzeRequest(r, req)
 	if err != nil {
 		integrationError(w, err, "gitflame_repository_error")
+		return
+	}
+	if err := s.ensureRequestRepositoryIndex(r, &req.Repository); err != nil {
+		integrationError(w, err, "rag_indexing_failed")
 		return
 	}
 	session, task, err := s.workflow.Analyze(req)
@@ -439,34 +455,37 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 			files = append(files, domain.RepositoryFile{Path: path})
 		}
 	}
-	if len(files) == 0 {
-		problem(w, 422, "validation_error", "repository_files must contain at least one file")
+	reader, connection, err := s.gitFlameReaderForRepository(r, req.Repository.ID)
+	if err != nil {
+		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
-	if repositoryFilesNeedContent(files, nil) {
-		reader, connection, err := s.gitFlameReaderForRepository(r, req.Repository.ID)
-		if err != nil {
-			integrationError(w, err, "gitflame_repository_error")
-			return
-		}
-		req.YAMLConfig, files, err = reader.RepositoryFiles(r.Context(), req.Repository.ID, req.Repository.DefaultBranch, req.YAMLConfig, files)
-		if err != nil {
-			integrationError(w, err, "gitflame_files_error")
-			return
-		}
-		if connection != nil {
-			_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
-		}
+	req.YAMLConfig, files, err = repositoryFilesForAnalysis(
+		r.Context(), reader, req.Repository.ID, req.Repository.DefaultBranch,
+		req.YAMLConfig, files,
+	)
+	if err != nil {
+		integrationError(w, err, "gitflame_files_error")
+		return
+	}
+	if connection != nil {
+		_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
 	}
 	if err := service.ValidateRepositoryFilesForIntegration(files); err != nil {
 		problem(w, 422, "validation_error", err.Error())
+		return
+	}
+	if err := s.ensureRequestRepositoryIndex(r, &req.Repository); err != nil {
+		integrationError(w, err, "rag_indexing_failed")
 		return
 	}
 	if s.recommender == nil {
 		problem(w, http.StatusServiceUnavailable, "recommendation_service_unavailable", "recommendation service client is not configured")
 		return
 	}
-	summary, cards, err := s.recommender.AnalyzeRecommendations(r.Context(), req.YAMLConfig, files)
+	summary, cards, err := s.recommender.AnalyzeRecommendations(
+		r.Context(), req.Repository, req.YAMLConfig, files,
+	)
 	if err != nil {
 		integrationError(w, err, "recommendation_service_error")
 		return

@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY recommendations/pyproject.toml recommendations/README.md ./
+COPY recommendations/pyproject.toml ./
 COPY recommendations/src ./src
 
 RUN pip install --no-cache-dir .

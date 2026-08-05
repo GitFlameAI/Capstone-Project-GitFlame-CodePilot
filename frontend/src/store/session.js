@@ -31,13 +31,6 @@ import {
   pushedIssue,
 } from '../data/demo.js'
 
-// Where CodePilot is deployed. GitFlame registers the webhook below so branch /
-// issue events reach the service; the backend receiver is
-// `POST /integrations/gitflame/webhooks/issues`, proxied under /api on the VM
-// (see frontend/nginx.conf). Override via VITE_DEPLOY_BASE if needed.
-export const DEPLOY_BASE = (import.meta.env.VITE_DEPLOY_BASE || 'http://10.93.27.34').replace(/\/$/, '')
-export const WEBHOOK_PATH = '/api/integrations/gitflame/webhooks/issues'
-
 const STORAGE_KEY = 'gfcp.session.v2'
 
 // Parse a GitFlame repository URL into { owner, name, id, url }.
@@ -62,13 +55,6 @@ export function parseRepoUrl(url) {
   const owner = parts[0]
   const name = parts[1]
   return { owner, name, id: `${owner}/${name}`, url: url.trim() }
-}
-
-// The webhook endpoint CodePilot exposes for GitFlame to register. A single
-// receiver handles every repository (GitFlame includes the repo in the event
-// payload), so it is NOT repo-scoped — matching the backend route exactly.
-export function webhookFor(/* id */) {
-  return `${DEPLOY_BASE}${WEBHOOK_PATH}`
 }
 
 export const session = reactive({
@@ -107,9 +93,13 @@ export const session = reactive({
   // --- cross-tab handoff ---
   pendingIssue: null,
 
-  // --- live GitFlame webhook events (mock simulation) ---
+  // --- optional GitFlame webhook ---
+  webhook: { id: '', url: '', status: 'disabled', secret: '' },
+  webhookEvents: {},
   lastEvent: null,
+  issuePrompt: null,
   recommendationsStale: false,
+  recommendationsRevision: 0,
 })
 
 // ---------------------------------------------------------------------------
@@ -124,6 +114,8 @@ function persist() {
       connectionId: session.connectionId,
       intent: session.intent,
       repo: { ...session.repo },
+      webhook: { id: session.webhook.id, url: session.webhook.url, status: session.webhook.status },
+      webhookEvents: { ...session.webhookEvents },
       configExists: session.configExists,
       configYaml: session.configYaml,
       configForm: session.configForm,
@@ -148,6 +140,8 @@ function rehydrate() {
   session.connectionId = snapshot.connectionId || ''
   session.intent = snapshot.intent || 'autogen'
   Object.assign(session.repo, snapshot.repo || {})
+  Object.assign(session.webhook, snapshot.webhook || {})
+  session.webhookEvents = snapshot.webhookEvents || {}
   session.repo.tokenMasked = maskLast4(session.repo.tokenLast4)
   session.configExists = !!snapshot.configExists
   session.configYaml = snapshot.configYaml || ''
@@ -180,7 +174,7 @@ function applyConnectionResponse(conn) {
   session.repo.name = repository.name || parsed.name || nameFromId(session.repo.id)
   session.repo.url = url || session.repo.url
   session.repo.defaultBranch = conn.default_branch || repository.default_branch || session.repo.defaultBranch || 'main'
-  session.repo.webhookUrl = webhookFor(session.repo.id)
+  session.repo.webhookUrl = session.webhook.url || ''
   session.repo.tokenLast4 = conn.token_last4 || ''
   session.repo.tokenMasked = maskLast4(session.repo.tokenLast4)
   session.tokenStatus = conn.token_status && conn.token_status !== 'active' ? 'invalid' : 'active'
@@ -201,7 +195,9 @@ export function connect(conn, { intent } = {}) {
   session.intent = intent || 'autogen'
   session.connected = true
   session.lastEvent = null
+  session.issuePrompt = null
   session.recommendationsStale = false
+  session.recommendationsRevision = 0
   session.fileTree = []
   session.issues = []
   session.repositoryDataStatus = 'idle'
@@ -227,8 +223,10 @@ export function updateConnection(conn) {
     session.configForm.defaultBranch = session.repo.defaultBranch
     session.configDraft.defaultBranch = session.repo.defaultBranch
     session.pendingIssue = null
+    resetWebhookState()
     session.issues = []
     session.recommendationsStale = false
+    session.recommendationsRevision = 0
   }
   session.fileTree = []
   session.repositoryDataStatus = 'idle'
@@ -253,6 +251,9 @@ export function clearConnection() {
   session.tokenStatus = 'active'
   session.tokenError = ''
   session.pendingIssue = null
+  resetWebhookState()
+  session.recommendationsStale = false
+  session.recommendationsRevision = 0
   session.fileTree = []
   session.issues = []
   session.repositoryDataStatus = 'idle'
@@ -262,6 +263,41 @@ export function clearConnection() {
   } catch {
     // ignore
   }
+}
+
+export function setWebhookRegistration(registration) {
+  session.webhook.id = registration?.id || ''
+  session.webhook.url = registration?.webhook_url || ''
+  session.webhook.status = registration?.status || 'disabled'
+  session.webhook.secret = registration?.secret || ''
+  session.repo.webhookUrl = session.webhook.url
+  persist()
+}
+
+export function resetWebhookState() {
+  session.webhook = { id: '', url: '', status: 'disabled', secret: '' }
+  session.webhookEvents = {}
+  session.lastEvent = null
+  session.issuePrompt = null
+  if (session.repo) session.repo.webhookUrl = ''
+}
+
+export function rememberWebhookEvent(event) {
+  const previous = session.webhookEvents[event.id]
+  session.webhookEvents[event.id] = event.status
+  const rememberedIDs = Object.keys(session.webhookEvents)
+  for (const id of rememberedIDs.slice(0, Math.max(0, rememberedIDs.length - 100))) {
+    delete session.webhookEvents[id]
+  }
+  session.lastEvent = {
+    id: event.id,
+    kind: event.event_type,
+    action: event.action,
+    status: event.status,
+    when: new Date(event.received_at || Date.now()).toLocaleTimeString(),
+  }
+  if (!previous || previous !== event.status) persist()
+  return { isNew: !previous, statusChanged: !!previous && previous !== event.status }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +415,9 @@ export function applyMockPush() {
   if (internal) internal.children.push(pushedFileNode(commit))
   session.fileTree = tree
   if (!session.issues.some((i) => i.id === 'ISSUE-204')) {
-    session.issues = [pushedIssue(), ...session.issues]
+    const issue = pushedIssue()
+    session.issues = [issue, ...session.issues]
+    session.issuePrompt = issue
   }
   session.recommendationsStale = true
   session.lastEvent = { kind: 'push', commit, when: new Date().toLocaleTimeString() }

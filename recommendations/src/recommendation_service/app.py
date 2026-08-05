@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from recommendation_service.analyzers import AnalyzerOrchestrator
 from recommendation_service.config import ConfigError
 from recommendation_service.model_client import (
     ModelOutputError,
@@ -22,10 +23,14 @@ def create_app(
     *,
     settings: Settings | None = None,
     model_client: RecommendationModelClient | None = None,
+    analyzer_orchestrator: AnalyzerOrchestrator | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
     resolved_client = model_client or RecommendationModelClient(resolved_settings)
-    recommendation_service = RecommendationService(resolved_client)
+    recommendation_service = RecommendationService(
+        resolved_client,
+        analyzer_orchestrator=analyzer_orchestrator,
+    )
 
     app = FastAPI(
         title="GitFlame Recommendation ML Service",
@@ -82,7 +87,8 @@ app = create_app()
 
 
 def run() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("recommendation_service.app:app", host="0.0.0.0", port=8000)
-
+    uvicorn.run("recommendation_service.app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

@@ -4,7 +4,25 @@ import httpx
 from pydantic import ValidationError
 
 from agent_engine.errors import RagUnavailableError
-from agent_engine.models import RagResult
+from agent_engine.models import Issue, RagResult
+
+
+MAX_RAG_QUERY_CHARS = 2_000
+
+
+def build_issue_search_query(issue: Issue) -> str:
+    """Build one stable hybrid-search query without asking the LLM to rewrite the issue."""
+    title = " ".join(issue.title.split())
+    body = issue.body.strip()
+    query = f"{title}\n\n{body}" if body else title
+    if len(query) <= MAX_RAG_QUERY_CHARS:
+        return query
+
+    marker = "\n...[issue truncated]...\n"
+    remaining = MAX_RAG_QUERY_CHARS - len(marker)
+    head = remaining * 2 // 3
+    tail = remaining - head
+    return query[:head] + marker + query[-tail:]
 
 
 class RagSearch(Protocol):

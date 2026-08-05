@@ -7,7 +7,7 @@ import time
 from pydantic import ValidationError
 
 from agent_engine.context import ContextCompressor
-from agent_engine.errors import InvalidGeneratedFilesError
+from agent_engine.errors import InvalidGeneratedFilesError, RagUnavailableError
 from agent_engine.llm_client import CompletionUsage, OpenAICompatibleClient
 from agent_engine.loop import AgentLoop, ChatClient
 from agent_engine.models import (
@@ -18,6 +18,7 @@ from agent_engine.models import (
     GenerateFilesResponse,
     GeneratePlanRequest,
     GeneratePlanResponse,
+    RagResult,
     Usage,
     parse_configuration,
 )
@@ -30,7 +31,12 @@ from agent_engine.prompt import (
     build_initial_prompt,
     build_single_file_generation_prompt,
 )
-from agent_engine.rag import DisabledRagClient, HttpRagClient, RagSearch
+from agent_engine.rag import (
+    DisabledRagClient,
+    HttpRagClient,
+    RagSearch,
+    build_issue_search_query,
+)
 from agent_engine.repository import ProvidedFilesRepositorySource, path_is_allowed
 from agent_engine.settings import AgentSettings
 from agent_engine.tools import ToolSandbox
@@ -86,7 +92,16 @@ class AgentEngineService:
             compressor,
             self.settings,
         )
-        result = await loop.run(build_initial_prompt(request, configuration, source))
+        issue_context = await self._prefetch_issue_context(request, sandbox)
+        initial_prompt = build_initial_prompt(
+            request,
+            configuration,
+            source,
+            issue_context=issue_context,
+        )
+        result = await loop.run(
+            compressor.compress_text(initial_prompt, compressor.max_context_chars)
+        )
         metrics = result.metrics
         return GeneratePlanResponse(
             request_id=request.request_id,
@@ -102,6 +117,44 @@ class AgentEngineService:
                 generation_time_seconds=metrics.generation_time_seconds,
             ),
         )
+
+    async def _prefetch_issue_context(
+        self,
+        request: GeneratePlanRequest,
+        sandbox: ToolSandbox,
+    ) -> list[RagResult]:
+        query = build_issue_search_query(request.issue)
+        try:
+            results = await sandbox.prefetch_repository(
+                query=query,
+                top_k=self.settings.issue_retrieval_candidate_limit,
+                top_p=self.settings.issue_retrieval_top_p,
+            )
+        except RagUnavailableError as exc:
+            logger.info(
+                "issue retrieval unavailable request_id=%s repository_id=%s: %s",
+                request.request_id,
+                request.repository.id,
+                exc,
+            )
+            return []
+        except Exception:
+            logger.exception(
+                "issue retrieval failed request_id=%s repository_id=%s; continuing without RAG",
+                request.request_id,
+                request.repository.id,
+            )
+            return []
+        logger.info(
+            "issue retrieval completed request_id=%s repository_id=%s commit_sha=%s top_p=%.3f results=%d files=%d",
+            request.request_id,
+            request.repository.id,
+            request.repository.commit_sha or "latest",
+            self.settings.issue_retrieval_top_p,
+            len(results),
+            len({result.path for result in results}),
+        )
+        return results
 
     async def generate_files(self, request: GenerateFilesRequest) -> GenerateFilesResponse:
         """Generate code as plain text, then assemble the public JSON contract locally."""

@@ -6,18 +6,16 @@
 //      scrolls down to the connect form.
 //   2. Intent toggle explaining the two capabilities (Autogeneration vs
 //      Recommendations) — the same toggle style used elsewhere in the app.
-//   3. Connect form: repository URL, default branch, access token, and an
-//      advanced webhook URL. Gray placeholder examples, "i-in-circle" hints.
+//   3. Connect form: repository URL, default branch and access token.
 //   4. AI disclaimer + policy consent checkboxes.
 //   5. Continue: validates; empty required fields / unchecked boxes get a red
 //      underline and navigation is blocked. On success it connects and opens the
 //      workspace.
 import { reactive, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { session, connect, parseRepoUrl, webhookFor } from '../store/session.js'
+import { session, connect, parseRepoUrl } from '../store/session.js'
 import { api } from '../api/index.js'
 import { describeError } from '../api/errors.js'
-import { copyText } from '../utils/clipboard.js'
 import GfIcon from '../components/ui/GfIcon.vue'
 import GfButton from '../components/ui/GfButton.vue'
 import GfTooltip from '../components/ui/GfTooltip.vue'
@@ -36,21 +34,13 @@ const form = reactive({
   defaultBranch: '',
   token: '',
 })
-const showAdvanced = ref(false)
 const showToken = ref(false)
 const showPolicy = ref(false)
-const copied = ref(false)
 
 // Connection request state. The token is submitted once to the backend and then
 // cleared from the form — the frontend never keeps the raw GitFlame token.
 const connecting = ref(false)
 const connectError = ref(null) // { title, message } from describeError
-
-// The webhook URL is something OUR service exposes for GitFlame to register; it
-// is shown read-only so the user can copy it.
-function webhookUrl() {
-  return webhookFor(parseRepoUrl(form.repoUrl).id)
-}
 
 // A single consent: agreeing to the usage policy (which itself covers the
 // "AI output may be wrong — trust, but verify" point and how the repo/token are used).
@@ -77,14 +67,6 @@ function validate() {
 
 function scrollToForm() {
   formEl.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-async function copyWebhook() {
-  const ok = await copyText(webhookUrl())
-  if (ok) {
-    copied.value = true
-    setTimeout(() => (copied.value = false), 1500)
-  }
 }
 
 async function submit() {
@@ -221,25 +203,6 @@ async function submit() {
           </div>
           <span v-if="errors.token" class="field__msg">An access token is required.</span>
         </label>
-
-        <!-- Advanced: the webhook our service exposes for GitFlame to register -->
-        <button class="advanced" @click="showAdvanced = !showAdvanced">
-          <GfIcon name="chevronRight" :size="14" :class="{ advanced__caret_open: showAdvanced }" class="advanced__caret" />
-          Advanced
-        </button>
-        <div v-if="showAdvanced" class="field">
-          <span class="field__label">
-            Webhook URL (register this in GitFlame)
-            <GfTooltip text="In GitFlame open the repository → Settings → Webhooks and add this URL. Subscribe it to the Issues and Issue comment events so approve / correct / reject reach CodePilot. The access token above needs repository read (to analyse code) and pull-request write (to open PRs)." />
-          </span>
-          <div class="input input_group">
-            <GfIcon name="link" :size="15" class="input__lead" />
-            <input :value="webhookUrl()" class="input__field mono" readonly />
-            <button type="button" class="input__toggle" :title="copied ? 'Copied' : 'Copy'" @click="copyWebhook">
-              <GfIcon :name="copied ? 'check' : 'copy'" :size="15" />
-            </button>
-          </div>
-        </div>
 
         <!-- Usage policy consent (a single checkbox; the policy itself covers the
              "AI output may be wrong — trust, but verify" point) -->

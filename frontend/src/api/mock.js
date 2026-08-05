@@ -28,6 +28,7 @@ const sessions = new Map() // sessionId -> session
 const issueAlias = new Map() // issueId -> sessionId
 const tasks = new Map() // taskId -> task
 const connections = new Map() // connectionId -> connection (mock GitFlame connections)
+const webhooks = new Map() // connectionId -> webhook registration
 
 const QUEUED_MS = 700
 const PROCESSING_MS = 2000
@@ -333,6 +334,39 @@ export const mockApi = {
   async listRepositoryIssues() {
     await delay(350)
     return { issues: demoIssues.map((issue) => ({ ...issue })) }
+  },
+  async saveRepositoryConfig(_connectionId, yamlConfig) {
+    await delay(250)
+    return { status: 'saved', yaml_config: yamlConfig }
+  },
+  async enableWebhook(connectionId) {
+    await delay(300)
+    const registration = {
+      id: uid('webhook'), connection_id: connectionId,
+      webhook_url: `https://codepilot.example/api/integrations/gitflame/webhooks/${connectionId}`,
+      secret: uid('secret'), events: ['push', 'issues'], status: 'active',
+      updated_at: new Date().toISOString(),
+    }
+    webhooks.set(connectionId, registration)
+    return { ...registration }
+  },
+  async getWebhook(connectionId) {
+    await delay(150)
+    const registration = webhooks.get(connectionId)
+    if (!registration) throw new ApiError('webhook is not enabled for this connection', 404, 'webhook_not_found')
+    const { secret: _secret, ...safe } = registration
+    return { ...safe }
+  },
+  async disableWebhook(connectionId) {
+    await delay(200)
+    const registration = webhooks.get(connectionId)
+    if (!registration) throw new ApiError('webhook is not enabled for this connection', 404, 'webhook_not_found')
+    registration.status = 'disabled'
+    return { ...registration, secret: undefined }
+  },
+  async listWebhookEvents() {
+    await delay(100)
+    return { events: [] }
   },
 
   // --- Recommendation flow ---
