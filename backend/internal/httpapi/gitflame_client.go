@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
@@ -25,6 +26,8 @@ type GitFlameClient struct {
 	apiKey     string
 	httpClient *http.Client
 }
+
+const gitFlameFileFetchConcurrency = 8
 
 type gitFlameCommitAction struct {
 	Action   string `json:"action"`
@@ -564,15 +567,11 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 			if file.Path == "" || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
 				continue
 			}
-			if strings.TrimSpace(file.Content) == "" {
-				content, err := c.fetchFileContent(ctx, repositoryID, file.Path, ref)
-				if err != nil {
-					return "", nil, err
-				}
-				file.Content = content
-			}
 			file.Type = ""
 			files = append(files, file)
+		}
+		if err := c.fetchRepositoryFileContents(ctx, repositoryID, ref, files); err != nil {
+			return "", nil, err
 		}
 		return yamlConfig, files, nil
 	}
@@ -600,6 +599,62 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 		files = append(files, domain.RepositoryFile{Path: filePath, Content: content})
 	}
 	return yamlConfig, files, nil
+}
+
+// fetchRepositoryFileContents bounds concurrent GitFlame requests while
+// retaining the repository tree order in the returned slice. A connection
+// request performs this work synchronously before RAG indexing, so fetching
+// files serially can otherwise exceed the reverse proxy timeout.
+func (c *GitFlameClient) fetchRepositoryFileContents(
+	ctx context.Context,
+	repositoryID, ref string,
+	files []domain.RepositoryFile,
+) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	workerCount := min(gitFlameFileFetchConcurrency, len(files))
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int, len(files))
+	for index := range files {
+		if strings.TrimSpace(files[index].Content) == "" {
+			jobs <- index
+		}
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	var firstError error
+	var errorOnce sync.Once
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				content, err := c.fetchFileContent(workCtx, repositoryID, files[index].Path, ref)
+				if err != nil {
+					errorOnce.Do(func() {
+						firstError = err
+						cancel()
+					})
+					return
+				}
+				files[index].Content = content
+			}
+		}()
+	}
+	workers.Wait()
+
+	if firstError != nil {
+		return firstError
+	}
+	return ctx.Err()
 }
 
 const defaultIndexConfiguration = `version: 1
