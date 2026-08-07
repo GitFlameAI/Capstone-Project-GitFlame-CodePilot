@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"gitflame-codepilot/backend/internal/agent"
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/queue"
 	"gitflame-codepilot/backend/internal/repository"
 )
@@ -147,10 +149,26 @@ func (w *Workflow) dispatch(job domain.AgentJob) error {
 	return nil
 }
 
-func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
+// ExecuteTask runs one agent task. It is the single execution point for both
+// dispatch modes (inline in the backend, or in the worker), which makes it the
+// right place to measure task duration and outcome.
+func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) (err error) {
 	if w.generator == nil {
 		return errors.New("Agent Engine client is not configured")
 	}
+	started := time.Now()
+	taskType := job.Type
+	if taskType == "" {
+		taskType = "unknown"
+	}
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		observability.AgentTasksExecuted.Inc(taskType, outcome)
+		observability.AgentTaskDuration.Observe(time.Since(started).Seconds(), taskType)
+	}()
 	task, err := w.store.Task(job.TaskID)
 	if err != nil {
 		return err
@@ -223,10 +241,27 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	result.Files = DropUnsafePartialModifyFiles(
-		DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles),
-		request.RepositoryFiles,
-	)
+	result.Files = NormalizeGeneratedFiles(result.Files)
+	withoutNoops := DropNoopGeneratedFiles(result.Files, request.RepositoryFiles)
+	if len(result.Files) > 0 && len(withoutNoops) == 0 {
+		invalid := &agent.Error{
+			Status: http.StatusUnprocessableEntity,
+			Code:   "invalid_generated_files",
+			Detail: "Agent Engine returned only unchanged modify operations",
+		}
+		_ = w.failTask(job.TaskID, invalid)
+		return invalid
+	}
+	result.Files = DropUnsafePartialModifyFiles(withoutNoops, request.RepositoryFiles)
+	if len(withoutNoops) > 0 && len(result.Files) == 0 {
+		invalid := &agent.Error{
+			Status: http.StatusUnprocessableEntity,
+			Code:   "invalid_generated_files",
+			Detail: "Agent Engine returned only incomplete modify operations",
+		}
+		_ = w.failTask(job.TaskID, invalid)
+		return invalid
+	}
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -487,7 +522,18 @@ func validateRepositoryFiles(files []domain.RepositoryFile) error {
 }
 
 func ValidateRepositoryFilesForIntegration(files []domain.RepositoryFile) error {
-	return validateRepositoryFiles(files)
+	if err := validateRepositoryFiles(files); err != nil {
+		return err
+	}
+	const maxIndexPayloadBytes = 20_000_000
+	totalBytes := 0
+	for _, file := range files {
+		totalBytes += len(file.Content)
+		if totalBytes > maxIndexPayloadBytes {
+			return fmt.Errorf("repository index payload exceeds %d bytes", maxIndexPayloadBytes)
+		}
+	}
+	return nil
 }
 
 func NormalizeGeneratedFiles(files []domain.GeneratedFileOperation) []domain.GeneratedFileOperation {

@@ -1,2 +1,0 @@
-"""Recommendation service test suite."""
-

@@ -3,11 +3,12 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 
 from pydantic import ValidationError
 
 from agent_engine.context import ContextCompressor
-from agent_engine.errors import InvalidGeneratedFilesError
+from agent_engine.errors import InvalidGeneratedFilesError, RagUnavailableError
 from agent_engine.llm_client import CompletionUsage, OpenAICompatibleClient
 from agent_engine.loop import AgentLoop, ChatClient
 from agent_engine.models import (
@@ -18,6 +19,7 @@ from agent_engine.models import (
     GenerateFilesResponse,
     GeneratePlanRequest,
     GeneratePlanResponse,
+    RagResult,
     Usage,
     parse_configuration,
 )
@@ -30,7 +32,12 @@ from agent_engine.prompt import (
     build_initial_prompt,
     build_single_file_generation_prompt,
 )
-from agent_engine.rag import DisabledRagClient, HttpRagClient, RagSearch
+from agent_engine.rag import (
+    DisabledRagClient,
+    HttpRagClient,
+    RagSearch,
+    build_issue_search_query,
+)
 from agent_engine.repository import ProvidedFilesRepositorySource, path_is_allowed
 from agent_engine.settings import AgentSettings
 from agent_engine.tools import ToolSandbox
@@ -86,7 +93,16 @@ class AgentEngineService:
             compressor,
             self.settings,
         )
-        result = await loop.run(build_initial_prompt(request, configuration, source))
+        issue_context = await self._prefetch_issue_context(request, sandbox)
+        initial_prompt = build_initial_prompt(
+            request,
+            configuration,
+            source,
+            issue_context=issue_context,
+        )
+        result = await loop.run(
+            compressor.compress_text(initial_prompt, compressor.max_context_chars)
+        )
         metrics = result.metrics
         return GeneratePlanResponse(
             request_id=request.request_id,
@@ -102,6 +118,44 @@ class AgentEngineService:
                 generation_time_seconds=metrics.generation_time_seconds,
             ),
         )
+
+    async def _prefetch_issue_context(
+        self,
+        request: GeneratePlanRequest,
+        sandbox: ToolSandbox,
+    ) -> list[RagResult]:
+        query = build_issue_search_query(request.issue)
+        try:
+            results = await sandbox.prefetch_repository(
+                query=query,
+                top_k=self.settings.issue_retrieval_candidate_limit,
+                top_p=self.settings.issue_retrieval_top_p,
+            )
+        except RagUnavailableError as exc:
+            logger.info(
+                "issue retrieval unavailable request_id=%s repository_id=%s: %s",
+                request.request_id,
+                request.repository.id,
+                exc,
+            )
+            return []
+        except Exception:
+            logger.exception(
+                "issue retrieval failed request_id=%s repository_id=%s; continuing without RAG",
+                request.request_id,
+                request.repository.id,
+            )
+            return []
+        logger.info(
+            "issue retrieval completed request_id=%s repository_id=%s commit_sha=%s top_p=%.3f results=%d files=%d",
+            request.request_id,
+            request.repository.id,
+            request.repository.commit_sha or "latest",
+            self.settings.issue_retrieval_top_p,
+            len(results),
+            len({result.path for result in results}),
+        )
+        return results
 
     async def generate_files(self, request: GenerateFilesRequest) -> GenerateFilesResponse:
         """Generate code as plain text, then assemble the public JSON contract locally."""
@@ -247,7 +301,13 @@ class AgentEngineService:
             reasoning_chars += len(completion.reasoning)
             model = completion.model or model
             try:
-                content = _normalize_plain_file_content(completion.content)
+                had_markdown_fence = "```" in completion.content
+                content = _normalize_plain_file_content(path, completion.content)
+                if had_markdown_fence:
+                    logger.info(
+                        "stripped one outer Markdown fence from generated file %s",
+                        path,
+                    )
                 if action == "modify":
                     _validate_modify_content_shape(path, content, original or "")
                 _validate_plain_source_syntax(path, content)
@@ -711,6 +771,11 @@ def _merge_explanation(previous: str, current: str) -> str:
 def _validate_modify_content_shape(path: str, generated: str, original: str) -> None:
     generated = _normalize_content(generated)
     original = _normalize_content(original)
+    if generated == original:
+        raise InvalidGeneratedFilesError(
+            f"modify content for {path} is unchanged from the original file; "
+            "apply the approved plan instead of returning a no-op"
+        )
     generated_lines = _meaningful_lines(generated)
     original_lines = _meaningful_lines(original)
     if len(original_lines) >= 3 and len(generated_lines) <= 1:
@@ -728,15 +793,66 @@ def _validate_modify_content_shape(path: str, generated: str, original: str) -> 
         )
 
 
-def _normalize_plain_file_content(value: str) -> str:
+_FENCE_LANGUAGES = {
+    ".go": {"go", "golang"},
+    ".java": {"java"},
+    ".js": {"js", "javascript"},
+    ".jsx": {"jsx", "javascript", "javascriptreact"},
+    ".json": {"json"},
+    ".kt": {"kotlin", "kt"},
+    ".php": {"php"},
+    ".py": {"py", "python"},
+    ".rb": {"rb", "ruby"},
+    ".rs": {"rs", "rust"},
+    ".sh": {"bash", "sh", "shell"},
+    ".sql": {"sql"},
+    ".ts": {"ts", "typescript"},
+    ".tsx": {"tsx", "typescript", "typescriptreact"},
+    ".xml": {"xml"},
+    ".yaml": {"yaml", "yml"},
+    ".yml": {"yaml", "yml"},
+}
+
+
+def _normalize_plain_file_content(path: str, value: str) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
     if not normalized.strip():
         raise InvalidGeneratedFilesError("model returned empty file content")
-    if "```" in normalized:
+    if "```" not in normalized:
+        return normalized.rstrip() + "\n"
+
+    candidate = normalized.strip()
+    lines = candidate.split("\n")
+    if len(lines) < 3 or not lines[0].startswith("```") or lines[-1] != "```":
         raise InvalidGeneratedFilesError(
             "model returned Markdown fences instead of plain file content"
         )
-    return normalized.rstrip() + "\n"
+    opening = lines[0]
+    language = opening[3:].strip().lower()
+    if " " in language or "\t" in language or "`" in language:
+        raise InvalidGeneratedFilesError(
+            "model returned an unsupported Markdown fence declaration"
+        )
+    inner = "\n".join(lines[1:-1])
+    if "```" in inner:
+        raise InvalidGeneratedFilesError(
+            "model returned nested or ambiguous Markdown fences"
+        )
+    if language and not _fence_language_matches_path(path, language):
+        raise InvalidGeneratedFilesError(
+            f"model returned a {language} Markdown fence for {path}"
+        )
+    if not inner.strip():
+        raise InvalidGeneratedFilesError("model returned empty file content")
+    return inner.rstrip() + "\n"
+
+
+def _fence_language_matches_path(path: str, language: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    allowed = _FENCE_LANGUAGES.get(suffix)
+    if allowed is not None:
+        return language in allowed
+    return language == suffix.removeprefix(".")
 
 
 def _validate_plain_source_syntax(path: str, content: str) -> None:

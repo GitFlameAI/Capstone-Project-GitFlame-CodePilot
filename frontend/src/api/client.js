@@ -100,6 +100,13 @@ export const httpApi = {
   // DELETE /integrations/gitflame/connections/{id} — revoke the connection.
   revokeConnection: (connectionId) =>
     request('DELETE', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}`),
+  // --- Operations (read-only) ---
+  // These back the /ops screen. They require the same session cookie as the rest
+  // of the API and never return prompts, generated code or tokens.
+  getOpsStatus: () => request('GET', '/ops/status'),
+  getOpsTasks: (limit = 25) => request('GET', `/ops/tasks?limit=${encodeURIComponent(limit)}`),
+  getOpsDeadLetter: () => request('GET', '/ops/dead-letter'),
+
   // DELETE /auth/session — end the server session (clears the cookie).
   logout: () => request('DELETE', '/auth/session'),
   getRepositoryTree: (connectionId, ref) =>
@@ -107,8 +114,23 @@ export const httpApi = {
       'GET',
       `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/tree${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`,
     ),
+  // GET /integrations/gitflame/connections/{id}/index — state of the background
+  // CodeRAG indexing job. Connecting a repository no longer waits for indexing,
+  // so this is how the UI can show progress instead of a blank spinner.
+  getRepositoryIndexStatus: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/index`),
   listRepositoryIssues: (connectionId) =>
     request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/issues`),
+  saveRepositoryConfig: (connectionId, yamlConfig) =>
+    request('PUT', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/config`, { yaml_config: yamlConfig }),
+  enableWebhook: (connectionId) =>
+    request('POST', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  getWebhook: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  disableWebhook: (connectionId) =>
+    request('DELETE', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook`),
+  listWebhookEvents: (connectionId) =>
+    request('GET', `/integrations/gitflame/connections/${encodeURIComponent(connectionId)}/webhook/events?limit=50`),
 
   // --- Recommendation flow ---
   analyzeRepository: (repositoryId, payload) =>

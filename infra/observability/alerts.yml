@@ -1,0 +1,141 @@
+# Alerting rules for GitFlame CodePilot.
+#
+# This file is the portable artefact of the whole observability work: a team that
+# already runs Prometheus can copy it into their own rule_files and get the same
+# alerts without adopting anything else from this repository.
+#
+# Thresholds are chosen for one deployment serving a handful of repositories.
+# The `for` durations are what keep them quiet: a model call that takes five
+# minutes is normal here, so almost every rule waits for a sustained condition
+# rather than firing on a spike.
+groups:
+  - name: codepilot-availability
+    rules:
+      - alert: CodePilotServiceDown
+        expr: up{job=~"codepilot-.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is not answering scrapes"
+          description: >-
+            Prometheus has not been able to scrape {{ $labels.job }}
+            ({{ $labels.instance }}) for 2 minutes. Check `docker compose ps` and
+            the container logs; see docs/OPERATIONS.md.
+
+      - alert: CodePilotDependencyDown
+        expr: min by (component) (codepilot_dependency_up) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dependency {{ $labels.component }} is failing its readiness check"
+          description: >-
+            The backend reports {{ $labels.component }} as unavailable for 5
+            minutes. Plan generation and recommendation analysis will fail while
+            this lasts.
+
+      - alert: CodePilotHTTP5xxRate
+        expr: >-
+          sum(rate(codepilot_http_requests_total{status=~"5.."}[10m]))
+          /
+          sum(rate(codepilot_http_requests_total[10m]))
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of HTTP requests are failing"
+          description: >-
+            Sustained server-error rate across the API. Correlate with the
+            http_request log lines by request_id.
+
+  - name: codepilot-pipeline
+    rules:
+      - alert: CodePilotHighTaskFailureRate
+        expr: >-
+          sum(rate(codepilot_agent_tasks_executed_total{outcome="failure"}[15m]))
+          /
+          sum(rate(codepilot_agent_tasks_executed_total[15m]))
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of agent tasks are failing"
+          description: >-
+            Check /ops/tasks for the error codes. inference_timeout points at the
+            model endpoint, agent_engine_unreachable at the Agent Engine.
+
+      - alert: CodePilotDeadLetterGrowing
+        expr: increase(codepilot_agent_tasks_dead_lettered_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent tasks are being dead-lettered"
+          description: >-
+            A task exhausted its retries and was moved to the dead-letter stream,
+            which means a user request was lost. Inspect /ops/dead-letter.
+
+      - alert: CodePilotQueueBacklog
+        expr: max(codepilot_queue_depth{stream="tasks"}) > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The agent task queue is not draining"
+          description: >-
+            More than 50 tasks have been waiting for 10 minutes. Either the
+            worker is down or the model endpoint is too slow to keep up.
+
+      - alert: CodePilotLLMLatencyHigh
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum by (le, operation) (rate(codepilot_llm_request_duration_seconds_bucket[15m]))
+          ) > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile model latency for {{ $labels.operation }} is above 5 minutes"
+          description: >-
+            Users will be hitting client-side timeouts. Check the model endpoint
+            configured in OPENAI_BASE_URL.
+
+      - alert: CodePilotRepositoryIndexingFailing
+        expr: increase(codepilot_repository_index_jobs_total{outcome="failed"}[1h]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Background repository indexing keeps failing"
+          description: >-
+            More than two indexing jobs failed in the last hour. Plan generation
+            will fall back to indexing inline and users will wait for it.
+
+  - name: codepilot-integration
+    rules:
+      - alert: CodePilotGitFlameTokensNeedReauth
+        expr: sum(codepilot_gitflame_connections{token_status!="active"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GitFlame access tokens are no longer usable"
+          description: >-
+            At least one stored connection has a token that is invalid or
+            revoked. The owner has to reconnect the repository; nothing on the
+            server side can fix it.
+
+      - alert: CodePilotMetricsCollectorFailing
+        expr: increase(codepilot_collector_errors_total[30m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The background metrics collector cannot read {{ $labels.source }}"
+          description: >-
+            Gauge metrics are stale. The service itself may still be healthy, but
+            queue depth and task counts on the dashboards cannot be trusted.

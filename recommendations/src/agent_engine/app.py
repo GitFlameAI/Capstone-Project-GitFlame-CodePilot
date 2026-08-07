@@ -1,6 +1,13 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+
+from observability import (
+    ObservabilityMiddleware,
+    llm_operation_scope,
+    metrics_payload,
+    setup_logging,
+)
 
 from agent_engine.errors import (
     AgentEngineError,
@@ -32,6 +39,7 @@ def create_app(
     model_client=None,
     rag_client: RagSearch | None = None,
 ) -> FastAPI:
+    setup_logging("agent-engine")
     resolved_settings = settings or AgentSettings.from_env()
     service = AgentEngineService(
         resolved_settings,
@@ -45,6 +53,13 @@ def create_app(
             "Stateless issue-to-plan and approved-plan-to-generated-files Agent Engine."
         ),
     )
+
+    app.add_middleware(ObservabilityMiddleware, service="agent-engine")
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        body, content_type = metrics_payload()
+        return Response(content=body, media_type=content_type)
 
     @app.exception_handler(ConfigurationError)
     async def configuration_error_handler(
@@ -98,7 +113,8 @@ def create_app(
         },
     )
     async def generate(request: GeneratePlanRequest) -> GeneratePlanResponse:
-        return await service.generate(request)
+        with llm_operation_scope("plan"):
+            return await service.generate(request)
 
     @app.post(
         "/v1/files/generate",
@@ -111,7 +127,8 @@ def create_app(
         },
     )
     async def generate_files(request: GenerateFilesRequest) -> GenerateFilesResponse:
-        return await service.generate_files(request)
+        with llm_operation_scope("code_generation"):
+            return await service.generate_files(request)
 
     return app
 
@@ -131,6 +148,17 @@ app = create_app()
 
 
 def run() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("agent_engine.app:app", host="0.0.0.0", port=8001)
+    # setup_logging() already owns the process-wide handlers. Letting Uvicorn
+    # install its default log config here would add a second, plain-text access
+    # line next to every structured http_request event.
+    uvicorn.run(
+        "agent_engine.app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8001)),
+        log_config=None,
+        access_log=False,
+    )

@@ -4,6 +4,7 @@ from typing import Any
 
 from agent_engine.context import ContextCompressor
 from agent_engine.errors import RagUnavailableError, ToolExecutionError
+from agent_engine.models import RagResult
 from agent_engine.rag import RagSearch
 from agent_engine.repository import RepositorySource, normalize_tool_path, parent_directories
 
@@ -127,6 +128,33 @@ class ToolSandbox:
         filters = arguments.get("filters")
         if filters is not None and not isinstance(filters, dict):
             raise ToolExecutionError("RAG filters must be an object")
+        results = await self.prefetch_repository(
+            query=query,
+            top_k=top_k,
+            filters=filters,
+        )
+        return {
+            "status": "completed" if results else "empty",
+            "results": [result.model_dump(mode="json") for result in results],
+        }
+
+    async def prefetch_repository(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        filters: dict[str, Any] | None = None,
+        top_p: float | None = None,
+    ) -> list[RagResult]:
+        """Retrieve bounded evidence before the first model call.
+
+        The same filtering and evidence bookkeeping is used by the model-facing
+        search_repository tool, so preselected paths remain valid plan evidence.
+        """
+        query = query.strip()
+        if not query:
+            raise ToolExecutionError("RAG query cannot be empty")
+        top_k = _bounded_int(top_k, minimum=1, maximum=50)
         effective_filters = {**(filters or {}), **self.rag_filters}
         results = await self.rag.search(
             query=query,
@@ -146,11 +174,10 @@ class ToolSandbox:
             snippets_by_path[result.path] = count + 1
             bounded_results.append(result)
         results = bounded_results
+        if top_p is not None:
+            results = _select_file_nucleus(results, top_p)
         self.evidence_paths.update(result.path for result in results)
-        return {
-            "status": "completed" if results else "empty",
-            "results": [result.model_dump(mode="json") for result in results],
-        }
+        return results
 
 
 def _bounded_int(value: Any, *, minimum: int, maximum: int) -> int:
@@ -163,6 +190,38 @@ def _bounded_int(value: Any, *, minimum: int, maximum: int) -> int:
     if not minimum <= parsed <= maximum:
         raise ToolExecutionError(f"tool argument must be between {minimum} and {maximum}")
     return parsed
+
+
+def _select_file_nucleus(results: list[RagResult], top_p: float) -> list[RagResult]:
+    """Keep the smallest ranked file set covering ``top_p`` of relevance mass.
+
+    CodeRAG scores rank chunks, while plans need files. A file's score is its best
+    chunk score so files with many chunks do not gain an artificial advantage.
+    """
+    if not 0.0 < top_p <= 1.0:
+        raise ToolExecutionError("top_p must be in (0, 1]")
+    if not results:
+        return []
+
+    file_scores: dict[str, float] = {}
+    for result in results:
+        file_scores[result.path] = max(file_scores.get(result.path, 0.0), result.score)
+
+    positive_mass = sum(score for score in file_scores.values() if score > 0.0)
+    if positive_mass <= 0.0:
+        return []
+
+    target_mass = positive_mass * top_p
+    selected_paths: set[str] = set()
+    cumulative_mass = 0.0
+    for path, score in file_scores.items():
+        if score <= 0.0:
+            continue
+        selected_paths.add(path)
+        cumulative_mass += score
+        if cumulative_mass >= target_mass:
+            break
+    return [result for result in results if result.path in selected_paths]
 
 
 TOOL_DEFINITIONS = [

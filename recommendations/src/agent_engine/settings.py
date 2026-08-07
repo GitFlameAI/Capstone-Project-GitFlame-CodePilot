@@ -31,6 +31,8 @@ class AgentSettings:
     retry_backoff_seconds: float = 0.25
     rag_base_url: str | None = None
     rag_api_key: str | None = None
+    issue_retrieval_candidate_limit: int = 50
+    issue_retrieval_top_p: float = 0.85
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
@@ -79,6 +81,19 @@ class AgentSettings:
             ),
             rag_base_url=os.getenv("RAG_BASE_URL", "").rstrip("/") or None,
             rag_api_key=os.getenv("RAG_API_KEY"),
+            issue_retrieval_candidate_limit=max(
+                1,
+                min(
+                    50,
+                    int(
+                        os.getenv(
+                            "AGENT_ISSUE_RETRIEVAL_CANDIDATE_LIMIT",
+                            os.getenv("AGENT_ISSUE_RETRIEVAL_TOP_K", "50"),
+                        )
+                    ),
+                ),
+            ),
+            issue_retrieval_top_p=_top_p_from_env(),
         )
 
     def model_endpoints(self) -> list[ModelEndpoint]:
@@ -98,3 +113,10 @@ class AgentSettings:
                 )
             )
         return endpoints
+
+
+def _top_p_from_env() -> float:
+    value = float(os.getenv("AGENT_ISSUE_RETRIEVAL_TOP_P", "0.85"))
+    if not 0.0 < value <= 1.0:
+        raise ValueError("AGENT_ISSUE_RETRIEVAL_TOP_P must be in (0, 1]")
+    return value

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"gitflame-codepilot/backend/internal/agent"
 	"gitflame-codepilot/backend/internal/config"
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/queue"
 	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/security"
@@ -18,18 +20,28 @@ import (
 )
 
 type Server struct {
-	workflow         *service.Workflow
-	store            repository.Store
-	gitflame         GitFlameSource
-	recommender      RecommendationAnalyzer
-	router           *http.ServeMux
-	checks           map[string]func(context.Context) error
-	credentialCipher *security.CredentialCipher
-	gitflameBaseURL  string
-	gitflameTimeout  time.Duration
-	sessionCookie    string
-	sessionTTL       time.Duration
-	sessionSecure    bool
+	workflow          *service.Workflow
+	store             repository.Store
+	gitflame          GitFlameSource
+	recommender       RecommendationAnalyzer
+	indexer           RepositoryIndexer
+	router            *http.ServeMux
+	checks            map[string]func(context.Context) error
+	indexJobs         *indexJobRegistry
+	broker            queue.Broker
+	credentialCipher  *security.CredentialCipher
+	gitflameBaseURL   string
+	gitflameTimeout   time.Duration
+	sessionCookie     string
+	sessionTTL        time.Duration
+	sessionSecure     bool
+	publicBaseURL     string
+	webhookSigningKey [32]byte
+
+	// indexBackgroundTimeout bounds one background indexing job, and
+	// indexWaitTimeout bounds how long a request waits for that job.
+	indexBackgroundTimeout time.Duration
+	indexWaitTimeout       time.Duration
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -43,9 +55,6 @@ func New(cfg config.Config) (*Server, error) {
 	}
 	engine := agent.NewClient(cfg.AgentEngineURL, cfg.AgentTimeout)
 	var gitflame GitFlameSource
-	if client := NewGitFlameClient(cfg.GitFlameBaseURL, cfg.GitFlameAPIKey, cfg.GitFlameTimeout); client != nil {
-		gitflame = client
-	}
 	var credentialCipher *security.CredentialCipher
 	if strings.TrimSpace(cfg.GitFlameCredentialKey) != "" {
 		var err error
@@ -55,7 +64,11 @@ func New(cfg config.Config) (*Server, error) {
 		}
 	}
 	recommender := NewRecommendationClient(cfg.RecommendationServiceURL, cfg.RecommendationTimeout)
+	indexer := NewRAGClient(cfg.RAGBaseURL, cfg.RAGAPIKey, cfg.RAGIndexTimeout)
 	checks := map[string]func(context.Context) error{"storage": store.Ping, "agent_engine": engine.Ready}
+	if indexer != nil {
+		checks["rag"] = indexer.Ready
+	}
 	if cfg.DispatchMode == "redis" {
 		if cfg.DatabaseURL == "" {
 			return nil, errors.New("TASK_DISPATCH_MODE=redis requires DATABASE_URL")
@@ -65,68 +78,99 @@ func New(cfg config.Config) (*Server, error) {
 			return nil, err
 		}
 		checks["redis"] = broker.Ping
-		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, checks, cfg, credentialCipher), nil
+		server := newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, indexer, checks, cfg, credentialCipher)
+		server.broker = broker
+		return server, nil
 	}
-	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, checks, cfg, credentialCipher), nil
+	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, indexer, checks, cfg, credentialCipher), nil
 }
 func NewWithDependencies(store repository.Store, generator agent.Generator) *Server {
 	return NewWithDependenciesAndIntegrations(store, generator, nil, nil)
 }
 
 func NewWithDependenciesAndIntegrations(store repository.Store, generator agent.Generator, gitflame GitFlameSource, recommender RecommendationAnalyzer) *Server {
-	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, map[string]func(context.Context) error{"storage": store.Ping}, config.Config{SessionCookieName: "codepilot_session", SessionTTL: 168 * time.Hour}, nil)
+	return newServer(service.NewWorkflow(store, generator), store, gitflame, recommender, nil, map[string]func(context.Context) error{"storage": store.Ping}, config.Config{SessionCookieName: "codepilot_session", SessionTTL: 168 * time.Hour}, nil)
 }
 
-func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, checks map[string]func(context.Context) error, cfg config.Config, credentialCipher *security.CredentialCipher) *Server {
+func newServer(workflow *service.Workflow, store repository.Store, gitflame GitFlameSource, recommender RecommendationAnalyzer, indexer RepositoryIndexer, checks map[string]func(context.Context) error, cfg config.Config, credentialCipher *security.CredentialCipher) *Server {
 	if cfg.SessionCookieName == "" {
 		cfg.SessionCookieName = "codepilot_session"
 	}
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 168 * time.Hour
 	}
+	if cfg.RAGIndexTimeout <= 0 {
+		cfg.RAGIndexTimeout = defaultIndexWaitTimeout
+	}
+	if cfg.RAGIndexWaitTimeout <= 0 {
+		cfg.RAGIndexWaitTimeout = defaultIndexWaitTimeout
+	}
 	s := &Server{
-		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, checks: checks,
+		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, indexer: indexer, checks: checks,
 		credentialCipher: credentialCipher, gitflameBaseURL: cfg.GitFlameBaseURL, gitflameTimeout: cfg.GitFlameTimeout,
 		sessionCookie: cfg.SessionCookieName, sessionTTL: cfg.SessionTTL, sessionSecure: cfg.SessionCookieSecure,
+		publicBaseURL:     strings.TrimRight(cfg.PublicBaseURL, "/"),
+		webhookSigningKey: sha256.Sum256([]byte(cfg.GitFlameCredentialKey)),
+		indexJobs:         newIndexJobRegistry(),
+
+		indexBackgroundTimeout: cfg.RAGIndexTimeout,
+		indexWaitTimeout:       cfg.RAGIndexWaitTimeout,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /ready", s.ready)
-	mux.HandleFunc("GET /docs", s.docs)
-	mux.HandleFunc("GET /swagger/", s.docs)
-	mux.HandleFunc("GET /swagger/index.html", s.docs)
-	mux.HandleFunc("GET /openapi.json", s.openAPI)
-	mux.HandleFunc("POST /auth/gitflame/session", s.createGitFlameSession)
-	mux.HandleFunc("DELETE /auth/session", s.revokeSession)
-	mux.HandleFunc("POST /integrations/gitflame/connections", s.saveGitFlameConnection)
-	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
-	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
-	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
-	mux.HandleFunc("POST /integrations/gitflame/webhooks/issues", s.gitflameIssueWebhook)
-	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
-	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
-	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
-	mux.HandleFunc("POST /ai/issues/{id}/approve", s.approve)
-	mux.HandleFunc("GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
-	mux.HandleFunc("POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
-	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
-	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
-	mux.HandleFunc("POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
-	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
-	mux.HandleFunc("GET /repositories/recommendations/status", s.recommendationStatus)
-	mux.HandleFunc("GET /repositories/recommendations/summary", s.recommendationSummary)
-	mux.HandleFunc("GET /repositories/recommendations", s.recommendations)
-	mux.HandleFunc("GET /repositories/{id}/recommendations/status", s.recommendationStatus)
-	mux.HandleFunc("GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
-	mux.HandleFunc("GET /repositories/{id}/recommendations", s.recommendations)
-	mux.HandleFunc("PATCH /recommendations/{id}/close", s.closeRecommendation)
-	mux.HandleFunc("DELETE /recommendations/{id}", s.deleteRecommendation)
+	route(mux, "GET /health", s.health)
+	route(mux, "GET /version", s.version)
+	route(mux, "GET /ready", s.ready)
+	route(mux, "GET /docs", s.docs)
+	route(mux, "GET /swagger/", s.docs)
+	route(mux, "GET /swagger/index.html", s.docs)
+	route(mux, "GET /openapi.json", s.openAPI)
+	// Registered directly: a scrape must not measure itself, and nginx blocks
+	// this path from the outside so only Prometheus on the Docker network sees it.
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	route(mux, "GET /ops/status", s.opsStatus)
+	route(mux, "GET /ops/tasks", s.opsTasks)
+	route(mux, "GET /ops/dead-letter", s.opsDeadLetter)
+	route(mux, "POST /auth/gitflame/session", s.createGitFlameSession)
+	route(mux, "DELETE /auth/session", s.revokeSession)
+	route(mux, "POST /integrations/gitflame/connections", s.saveGitFlameConnection)
+	route(mux, "PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
+	route(mux, "DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
+	route(mux, "GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
+	route(mux, "GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
+	route(mux, "GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
+	route(mux, "GET /integrations/gitflame/connections/{id}/index", s.repositoryIndexStatus)
+	route(mux, "PUT /integrations/gitflame/connections/{id}/config", s.saveRepositoryConfig)
+	route(mux, "POST /integrations/gitflame/connections/{id}/webhook", s.createGitFlameWebhook)
+	route(mux, "GET /integrations/gitflame/connections/{id}/webhook", s.getGitFlameWebhook)
+	route(mux, "DELETE /integrations/gitflame/connections/{id}/webhook", s.disableGitFlameWebhook)
+	route(mux, "GET /integrations/gitflame/connections/{id}/webhook/events", s.listGitFlameWebhookEvents)
+	route(mux, "POST /integrations/gitflame/webhooks/{id}", s.receiveGitFlameWebhook)
+	route(mux, "POST /integrations/gitflame/issues/analyze", s.analyze)
+	route(mux, "GET /ai/tasks/{taskId}", s.task)
+	route(mux, "POST /ai/tasks/{taskId}/retry", s.retryTask)
+	route(mux, "GET /ai/issues/{id}/plan", s.plan)
+	route(mux, "POST /ai/issues/{id}/approve", s.approve)
+	route(mux, "GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
+	route(mux, "POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
+	route(mux, "POST /ai/issues/{id}/correct", s.correct)
+	route(mux, "POST /ai/issues/{id}/reject", s.reject)
+	route(mux, "POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
+	route(mux, "POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
+	route(mux, "GET /repositories/recommendations/status", s.recommendationStatus)
+	route(mux, "GET /repositories/recommendations/summary", s.recommendationSummary)
+	route(mux, "GET /repositories/recommendations", s.recommendations)
+	route(mux, "GET /repositories/{id}/recommendations/status", s.recommendationStatus)
+	route(mux, "GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
+	route(mux, "GET /repositories/{id}/recommendations", s.recommendations)
+	route(mux, "PATCH /recommendations/{id}/close", s.closeRecommendation)
+	route(mux, "DELETE /recommendations/{id}", s.deleteRecommendation)
 	s.router = mux
 	return s
 }
+
+// Router builds the middleware chain. Order matters: the request identifier has
+// to exist before anything logs, and panic recovery sits innermost so that the
+// recovered 500 is still counted and logged as a normal response.
 func (s *Server) Router() http.Handler {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/docs" && !strings.HasPrefix(r.URL.Path, "/swagger/") {
@@ -134,11 +178,17 @@ func (s *Server) Router() http.Handler {
 		}
 		s.router.ServeHTTP(w, r)
 	})
-	return requestLogger(handler)
+	return observability.RequestIDMiddleware(requestLogger(recoverMiddleware(handler)))
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	write(w, 200, map[string]string{"status": "ok", "service": "backend"})
+}
+
+// version answers "what exactly is running here", which is the first question of
+// every incident and the only reliable way to tell a redeploy from a rollback.
+func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	write(w, http.StatusOK, observability.Build("backend"))
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	components := make(map[string]string, len(s.checks))
@@ -184,6 +234,10 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	req, err = s.hydrateAnalyzeRequest(r, req)
 	if err != nil {
 		integrationError(w, err, "gitflame_repository_error")
+		return
+	}
+	if err := s.ensureRequestRepositoryIndex(r, &req.Repository); err != nil {
+		integrationError(w, err, "rag_indexing_failed")
 		return
 	}
 	session, task, err := s.workflow.Analyze(req)
@@ -439,34 +493,37 @@ func (s *Server) analyzeRecommendations(w http.ResponseWriter, r *http.Request) 
 			files = append(files, domain.RepositoryFile{Path: path})
 		}
 	}
-	if len(files) == 0 {
-		problem(w, 422, "validation_error", "repository_files must contain at least one file")
+	reader, connection, err := s.gitFlameReaderForRepository(r, req.Repository.ID)
+	if err != nil {
+		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
-	if repositoryFilesNeedContent(files, nil) {
-		reader, connection, err := s.gitFlameReaderForRepository(r, req.Repository.ID)
-		if err != nil {
-			integrationError(w, err, "gitflame_repository_error")
-			return
-		}
-		req.YAMLConfig, files, err = reader.RepositoryFiles(r.Context(), req.Repository.ID, req.Repository.DefaultBranch, req.YAMLConfig, files)
-		if err != nil {
-			integrationError(w, err, "gitflame_files_error")
-			return
-		}
-		if connection != nil {
-			_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
-		}
+	req.YAMLConfig, files, err = repositoryFilesForAnalysis(
+		r.Context(), reader, req.Repository.ID, req.Repository.DefaultBranch,
+		req.YAMLConfig, files,
+	)
+	if err != nil {
+		integrationError(w, err, "gitflame_files_error")
+		return
+	}
+	if connection != nil {
+		_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
 	}
 	if err := service.ValidateRepositoryFilesForIntegration(files); err != nil {
 		problem(w, 422, "validation_error", err.Error())
+		return
+	}
+	if err := s.ensureRequestRepositoryIndex(r, &req.Repository); err != nil {
+		integrationError(w, err, "rag_indexing_failed")
 		return
 	}
 	if s.recommender == nil {
 		problem(w, http.StatusServiceUnavailable, "recommendation_service_unavailable", "recommendation service client is not configured")
 		return
 	}
-	summary, cards, err := s.recommender.AnalyzeRecommendations(r.Context(), req.YAMLConfig, files)
+	summary, cards, err := s.recommender.AnalyzeRecommendations(
+		r.Context(), req.Repository, req.YAMLConfig, files,
+	)
 	if err != nil {
 		integrationError(w, err, "recommendation_service_error")
 		return

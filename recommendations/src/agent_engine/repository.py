@@ -25,8 +25,6 @@ class ProvidedFilesRepositorySource(RepositorySource):
         for file in sorted(files, key=lambda item: item.path):
             if path_is_allowed(file.path, config):
                 selected[file.path] = file.content
-                if len(selected) >= config.max_files:
-                    break
         self._files = selected
 
     def paths(self) -> list[str]:

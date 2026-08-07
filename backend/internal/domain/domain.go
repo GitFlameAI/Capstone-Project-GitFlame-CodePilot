@@ -37,6 +37,7 @@ type IssuePayload struct {
 	Title  string `json:"title"`
 	Body   string `json:"body"`
 	Author string `json:"author"`
+	State  string `json:"state,omitempty"`
 }
 
 type IssueAnalyzeRequest struct {

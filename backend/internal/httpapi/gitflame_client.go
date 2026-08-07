@@ -8,15 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/service"
 )
 
@@ -24,6 +27,20 @@ type GitFlameClient struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+}
+
+const gitFlameFileFetchConcurrency = 8
+
+var nonIndexableRepositoryExtensions = map[string]struct{}{
+	".7z": {}, ".avi": {}, ".bin": {}, ".bmp": {}, ".bz2": {}, ".class": {},
+	".db": {}, ".dll": {}, ".dmg": {}, ".doc": {}, ".docx": {}, ".eot": {},
+	".exe": {}, ".gif": {}, ".gz": {}, ".ico": {}, ".jar": {}, ".jpeg": {},
+	".jpg": {}, ".lockb": {}, ".mov": {}, ".mp3": {}, ".mp4": {}, ".npy": {},
+	".npz": {}, ".otf": {}, ".parquet": {}, ".pdf": {}, ".pickle": {}, ".pkl": {},
+	".png": {}, ".ppt": {}, ".pptx": {}, ".pyc": {}, ".so": {}, ".sqlite": {},
+	".sqlite3": {}, ".tar": {}, ".tiff": {}, ".ttf": {}, ".wav": {}, ".webm": {},
+	".webp": {}, ".woff": {}, ".woff2": {}, ".xls": {}, ".xlsx": {}, ".xz": {},
+	".zip": {},
 }
 
 type gitFlameCommitAction struct {
@@ -93,31 +110,6 @@ func NewGitFlameClient(baseURL, apiKey string, timeout time.Duration) *GitFlameC
 		timeout = 30 * time.Second
 	}
 	return &GitFlameClient{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, httpClient: &http.Client{Timeout: timeout}}
-}
-
-func (c *GitFlameClient) BuildAnalyzeRequest(ctx context.Context, webhook GitFlameIssueWebhook) (domain.IssueAnalyzeRequest, error) {
-	ref := webhook.Ref
-	if ref == "" {
-		ref = webhook.Repository.CommitSHA
-	}
-	if ref == "" {
-		ref = webhook.CommitSHA
-	}
-	if ref == "" {
-		ref = webhook.Repository.DefaultBranch
-	}
-	yamlConfig, files, err := c.RepositoryFiles(ctx, webhook.Repository.ID, ref, webhook.YAMLConfig, webhook.RepositoryFiles)
-	if err != nil {
-		return domain.IssueAnalyzeRequest{}, err
-	}
-	if len(files) == 0 {
-		return domain.IssueAnalyzeRequest{}, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "empty_repository_context", Detail: "GitFlame API returned no repository files after applying .ai.yml analysis rules"}
-	}
-	repository := webhook.Repository
-	if repository.CommitSHA == "" {
-		repository.CommitSHA = webhook.CommitSHA
-	}
-	return domain.IssueAnalyzeRequest{Repository: repository, Issue: webhook.Issue, YAMLConfig: yamlConfig, RepositoryFiles: files, Metadata: webhook.Metadata}, nil
 }
 
 func (c *GitFlameClient) ApplyGeneratedFiles(ctx context.Context, repository domain.RepositoryMetadata, contract domain.GeneratedFilesContract) (domain.GitFlameApplyResult, error) {
@@ -368,10 +360,14 @@ func (c *GitFlameClient) updateGeneratedFileViaContents(
 				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
 			), nil
 		}
-		log.Printf(
-			"gitflame_contents_update path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
-			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
-			integrationCode(lastErr), lastErr.Error(),
+		observability.LoggerFromContext(ctx).Warn(
+			"gitflame_contents_update",
+			slog.String("event", "gitflame_contents_update"),
+			slog.String("path", filePath), slog.String("branch", branch),
+			slog.String("sha", shortSHA(sha)), slog.Int("attempt", attempt+1),
+			slog.Int("status", integrationStatus(lastErr)),
+			slog.String("error_code", integrationCode(lastErr)),
+			slog.String("error", lastErr.Error()),
 		)
 		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
 			return "", lastErr
@@ -398,10 +394,14 @@ func (c *GitFlameClient) deleteGeneratedFileViaContents(
 				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
 			), nil
 		}
-		log.Printf(
-			"gitflame_contents_delete path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
-			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
-			integrationCode(lastErr), lastErr.Error(),
+		observability.LoggerFromContext(ctx).Warn(
+			"gitflame_contents_delete",
+			slog.String("event", "gitflame_contents_delete"),
+			slog.String("path", filePath), slog.String("branch", branch),
+			slog.String("sha", shortSHA(sha)), slog.Int("attempt", attempt+1),
+			slog.Int("status", integrationStatus(lastErr)),
+			slog.String("error_code", integrationCode(lastErr)),
+			slog.String("error", lastErr.Error()),
 		)
 		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
 			return "", lastErr
@@ -546,10 +546,25 @@ func (c *GitFlameClient) fetchTree(ctx context.Context, repositoryID, ref string
 }
 
 func (c *GitFlameClient) RepositoryFiles(ctx context.Context, repositoryID, ref, yamlConfig string, requested []domain.RepositoryFile) (string, []domain.RepositoryFile, error) {
+	return c.repositoryFiles(ctx, repositoryID, ref, yamlConfig, requested, 0, false)
+}
+
+// RepositoryFilesForIndex fetches the complete configured text snapshot. It is
+// intentionally independent from analysis.max_files, which only limits model
+// context and must never truncate the RAG index.
+func (c *GitFlameClient) RepositoryFilesForIndex(ctx context.Context, repositoryID, ref, yamlConfig string, requested []domain.RepositoryFile) (string, []domain.RepositoryFile, error) {
+	return c.repositoryFiles(ctx, repositoryID, ref, yamlConfig, requested, 2000, true)
+}
+
+func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref, yamlConfig string, requested []domain.RepositoryFile, maxFiles int, allowMissingConfig bool) (string, []domain.RepositoryFile, error) {
 	if strings.TrimSpace(yamlConfig) == "" {
 		content, err := c.fetchFileContent(ctx, repositoryID, ".ai.yml", ref)
 		if err != nil {
-			return "", nil, err
+			var integration *IntegrationError
+			if !allowMissingConfig || !errors.As(err, &integration) || integration.Status != http.StatusNotFound {
+				return "", nil, err
+			}
+			content = defaultIndexConfiguration
 		}
 		yamlConfig = content
 	}
@@ -557,46 +572,46 @@ func (c *GitFlameClient) RepositoryFiles(ctx context.Context, repositoryID, ref,
 	if err != nil {
 		return "", nil, &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_ai_config", Detail: err.Error()}
 	}
+	fileLimit := cfg.MaxFiles
+	if maxFiles > 0 {
+		fileLimit = maxFiles
+	}
 	if len(requested) > 0 {
-		files := make([]domain.RepositoryFile, 0, min(len(requested), cfg.MaxFiles))
+		files := make([]domain.RepositoryFile, 0, min(len(requested), fileLimit))
 		for _, file := range requested {
-			if len(files) >= cfg.MaxFiles {
+			if len(files) >= fileLimit {
 				break
 			}
 			if !repositoryFileIsReadable(file.Type) {
 				continue
 			}
 			file.Path = normalizeRepositoryPath(file.Path)
-			if file.Path == "" || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
+			if file.Path == "" || !repositoryPathIsIndexableText(file.Path) || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
 				continue
-			}
-			if strings.TrimSpace(file.Content) == "" {
-				content, err := c.fetchFileContent(ctx, repositoryID, file.Path, ref)
-				if err != nil {
-					return "", nil, err
-				}
-				file.Content = content
 			}
 			file.Type = ""
 			files = append(files, file)
 		}
-		return yamlConfig, files, nil
+		if err := c.fetchRepositoryFileContents(ctx, repositoryID, ref, files); err != nil {
+			return "", nil, err
+		}
+		return yamlConfig, filterIndexableRepositoryContents(files), nil
 	}
 
 	tree, err := c.fetchTree(ctx, repositoryID, ref)
 	if err != nil {
 		return "", nil, err
 	}
-	files := make([]domain.RepositoryFile, 0, min(len(tree), cfg.MaxFiles))
+	files := make([]domain.RepositoryFile, 0, min(len(tree), fileLimit))
 	for _, entry := range tree {
-		if len(files) >= cfg.MaxFiles {
+		if len(files) >= fileLimit {
 			break
 		}
 		if entry.Type != "" && entry.Type != "file" && entry.Type != "blob" {
 			continue
 		}
 		filePath := normalizeRepositoryPath(entry.Path)
-		if !matchesRepositoryRules(filePath, cfg.IncludePatterns, cfg.ExcludePatterns) {
+		if !repositoryPathIsIndexableText(filePath) || !matchesRepositoryRules(filePath, cfg.IncludePatterns, cfg.ExcludePatterns) {
 			continue
 		}
 		content, err := c.fetchFileContent(ctx, repositoryID, filePath, ref)
@@ -608,6 +623,74 @@ func (c *GitFlameClient) RepositoryFiles(ctx context.Context, repositoryID, ref,
 	return yamlConfig, files, nil
 }
 
+// fetchRepositoryFileContents bounds concurrent GitFlame requests while
+// retaining the repository tree order in the returned slice. A connection
+// request performs this work synchronously before RAG indexing, so fetching
+// files serially can otherwise exceed the reverse proxy timeout.
+func (c *GitFlameClient) fetchRepositoryFileContents(
+	ctx context.Context,
+	repositoryID, ref string,
+	files []domain.RepositoryFile,
+) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	workerCount := min(gitFlameFileFetchConcurrency, len(files))
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int, len(files))
+	for index := range files {
+		if strings.TrimSpace(files[index].Content) == "" {
+			jobs <- index
+		}
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	var firstError error
+	var errorOnce sync.Once
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				content, err := c.fetchFileContent(workCtx, repositoryID, files[index].Path, ref)
+				if err != nil {
+					errorOnce.Do(func() {
+						firstError = err
+						cancel()
+					})
+					return
+				}
+				files[index].Content = content
+			}
+		}()
+	}
+	workers.Wait()
+
+	if firstError != nil {
+		return firstError
+	}
+	return ctx.Err()
+}
+
+const defaultIndexConfiguration = `version: 1
+analysis:
+  enabled: true
+  include:
+    - "**/*"
+  exclude:
+    - ".git/**"
+    - "node_modules/**"
+    - "dist/**"
+    - "build/**"
+`
+
 func repositoryFileIsReadable(fileType string) bool {
 	switch strings.ToLower(strings.TrimSpace(fileType)) {
 	case "", "file", "blob":
@@ -615,6 +698,22 @@ func repositoryFileIsReadable(fileType string) bool {
 	default:
 		return false
 	}
+}
+
+func repositoryPathIsIndexableText(filePath string) bool {
+	_, excluded := nonIndexableRepositoryExtensions[strings.ToLower(filepath.Ext(filePath))]
+	return !excluded
+}
+
+func filterIndexableRepositoryContents(files []domain.RepositoryFile) []domain.RepositoryFile {
+	filtered := make([]domain.RepositoryFile, 0, len(files))
+	for _, file := range files {
+		if !utf8.ValidString(file.Content) || strings.IndexByte(file.Content, 0) >= 0 {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
 }
 
 func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {
@@ -688,13 +787,33 @@ func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref s
 	return tree, nil
 }
 
+func (c *GitFlameClient) RepositoryRevision(ctx context.Context, repositoryID, ref string) (string, error) {
+	repositoryEndpoint, ok := giteaRepositoryEndpoint(repositoryID)
+	if !ok {
+		return "", &IntegrationError{Status: http.StatusUnprocessableEntity, Code: "invalid_repository_id", Detail: "repository id must use owner/repository format"}
+	}
+	ref = strings.TrimSpace(strings.TrimPrefix(ref, "refs/heads/"))
+	if ref == "" {
+		ref = "main"
+	}
+	var response map[string]any
+	if err := c.getJSON(ctx, repositoryEndpoint+"/branches/"+url.PathEscape(ref), "", &response); err != nil {
+		return "", err
+	}
+	commitSHA := strings.TrimSpace(firstString(response, "commit.id", "commit.sha", "sha", "id"))
+	if commitSHA == "" {
+		return "", &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame branch response did not contain a commit sha"}
+	}
+	return commitSHA, nil
+}
+
 func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID string) ([]domain.IssuePayload, error) {
 	candidates := make([]gitFlameGETCandidate, 0, 2)
 	if endpoint, ok := giteaRepositoryEndpoint(repositoryID); ok {
-		candidates = append(candidates, gitFlameGETCandidate{Endpoint: endpoint + "/issues?state=open&type=issues&limit=100"})
+		candidates = append(candidates, gitFlameGETCandidate{Endpoint: endpoint + "/issues?state=all&type=issues&limit=100"})
 	}
 	candidates = append(candidates, gitFlameGETCandidate{
-		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/issues?state=open", url.PathEscape(repositoryID)),
+		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/issues?state=all", url.PathEscape(repositoryID)),
 	})
 	body, err := c.getFirstAvailable(ctx, candidates)
 	if err != nil {
@@ -707,6 +826,7 @@ func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID stri
 		Title       string          `json:"title"`
 		Body        string          `json:"body"`
 		Description string          `json:"description"`
+		State       string          `json:"state"`
 		Author      json.RawMessage `json:"author"`
 		User        json.RawMessage `json:"user"`
 	}
@@ -724,7 +844,7 @@ func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID stri
 		if author == "" {
 			author = gitFlameIssueAuthor(item.User)
 		}
-		issues = append(issues, domain.IssuePayload{ID: id, Title: item.Title, Body: body, Author: author})
+		issues = append(issues, domain.IssuePayload{ID: id, Title: item.Title, Body: body, Author: author, State: item.State})
 	}
 	return issues, nil
 }
@@ -896,13 +1016,22 @@ func (c *GitFlameClient) requestJSON(ctx context.Context, method, endpoint strin
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	observability.PropagateRequestID(ctx, req)
+	logger := observability.LoggerFromContext(ctx)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("gitflame_http method=%s path=%s error=%q", method, req.URL.EscapedPath(), err)
+		observability.ObserveUpstream("gitflame", "unreachable", started)
+		logger.Error("gitflame_http",
+			slog.String("event", "gitflame_http"), slog.String("method", method),
+			slog.String("path", req.URL.EscapedPath()), slog.String("error", err.Error()))
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=%s path=%s status=%d", method, req.URL.EscapedPath(), resp.StatusCode)
+	observability.ObserveUpstream("gitflame", observability.UpstreamOutcome(resp.StatusCode), started)
+	logger.Info("gitflame_http",
+		slog.String("event", "gitflame_http"), slog.String("method", method),
+		slog.String("path", req.URL.EscapedPath()), slog.Int("status", resp.StatusCode))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gitFlameHTTPError(resp)
 	}
@@ -939,13 +1068,22 @@ func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byt
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	observability.PropagateRequestID(ctx, req)
+	logger := observability.LoggerFromContext(ctx)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("gitflame_http method=GET path=%s error=%q", req.URL.EscapedPath(), err)
+		observability.ObserveUpstream("gitflame", "unreachable", started)
+		logger.Error("gitflame_http",
+			slog.String("event", "gitflame_http"), slog.String("method", http.MethodGet),
+			slog.String("path", req.URL.EscapedPath()), slog.String("error", err.Error()))
 		return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=GET path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
+	observability.ObserveUpstream("gitflame", observability.UpstreamOutcome(resp.StatusCode), started)
+	logger.Info("gitflame_http",
+		slog.String("event", "gitflame_http"), slog.String("method", http.MethodGet),
+		slog.String("path", req.URL.EscapedPath()), slog.Int("status", resp.StatusCode))
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2_000_000))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &IntegrationError{Status: normalizeIntegrationStatus(resp.StatusCode), Code: "gitflame_api_error", Detail: fmt.Sprintf("GitFlame API returned status %d", resp.StatusCode)}

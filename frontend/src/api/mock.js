@@ -28,6 +28,7 @@ const sessions = new Map() // sessionId -> session
 const issueAlias = new Map() // issueId -> sessionId
 const tasks = new Map() // taskId -> task
 const connections = new Map() // connectionId -> connection (mock GitFlame connections)
+const webhooks = new Map() // connectionId -> webhook registration
 
 const QUEUED_MS = 700
 const PROCESSING_MS = 2000
@@ -330,9 +331,96 @@ export const mockApi = {
     await delay(350)
     return { tree: flattenMockTree(demoFileTree(false)) }
   },
+  async getOpsStatus() {
+    await delay(180)
+    return {
+      service: 'backend',
+      status: 'ok',
+      build: { service: 'backend', version: 'demo', commit: 'mock', go_version: 'mock' },
+      dependencies: [
+        { component: 'agent_engine', status: 'ok' },
+        { component: 'rag', status: 'ok' },
+        { component: 'redis', status: 'ok' },
+        { component: 'storage', status: 'ok' },
+      ],
+      queue: { stream: 0, pending: 0, dead_letter: 0 },
+      tasks_last_24h: { completed: 12, failed: 1 },
+      connections_by_token_status: { active: 1 },
+      indexing: { running: 0 },
+      generated_at: new Date().toISOString(),
+    }
+  },
+  async getOpsTasks() {
+    await delay(180)
+    return {
+      count: 2,
+      tasks: [
+        {
+          id: 'task-demo-1', task_type: 'initial_plan', status: 'completed', attempt: 1,
+          model: 'demo-model', duration_ms: 42000,
+          created_at: new Date(Date.now() - 3600000).toISOString(),
+          updated_at: new Date(Date.now() - 3558000).toISOString(),
+        },
+        {
+          id: 'task-demo-2', task_type: 'code_generation', status: 'failed', attempt: 3,
+          model: 'demo-model', error_code: 'inference_timeout', duration_ms: 601000,
+          created_at: new Date(Date.now() - 7200000).toISOString(),
+          updated_at: new Date(Date.now() - 6599000).toISOString(),
+        },
+      ],
+    }
+  },
+  async getOpsDeadLetter() {
+    await delay(150)
+    return { count: 0, entries: [] }
+  },
+  async getRepositoryIndexStatus() {
+    await delay(120)
+    return {
+      repository_id: 'gitflame/demo-repo',
+      status: 'completed',
+      file_count: 42,
+      chunk_count: 128,
+      embedding_count: 128,
+      duration_ms: 4200,
+    }
+  },
   async listRepositoryIssues() {
     await delay(350)
     return { issues: demoIssues.map((issue) => ({ ...issue })) }
+  },
+  async saveRepositoryConfig(_connectionId, yamlConfig) {
+    await delay(250)
+    return { status: 'saved', yaml_config: yamlConfig }
+  },
+  async enableWebhook(connectionId) {
+    await delay(300)
+    const registration = {
+      id: uid('webhook'), connection_id: connectionId,
+      webhook_url: `https://codepilot.example/api/integrations/gitflame/webhooks/${connectionId}`,
+      secret: uid('secret'), events: ['push', 'issues'], status: 'active',
+      updated_at: new Date().toISOString(),
+    }
+    webhooks.set(connectionId, registration)
+    return { ...registration }
+  },
+  async getWebhook(connectionId) {
+    await delay(150)
+    const registration = webhooks.get(connectionId)
+    if (!registration) throw new ApiError('webhook is not enabled for this connection', 404, 'webhook_not_found')
+    const { secret: _secret, ...safe } = registration
+    return { ...safe }
+  },
+  async disableWebhook(connectionId) {
+    await delay(200)
+    const registration = webhooks.get(connectionId)
+    if (!registration) throw new ApiError('webhook is not enabled for this connection', 404, 'webhook_not_found')
+    registration.status = 'disabled'
+    return { ...registration, secret: undefined }
+  },
+  async listWebhookEvents() {
+    await delay(100)
+    return { events: [] }
   },
 
   // --- Recommendation flow ---

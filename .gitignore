@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+.cache/
 
 # Node
 node_modules/
@@ -25,4 +26,3 @@ npm-debug.log*
 
 # Logs
 *.log
-

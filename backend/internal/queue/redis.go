@@ -278,3 +278,120 @@ func readRESP(reader *bufio.Reader) (any, error) {
 		return nil, fmt.Errorf("unsupported Redis response prefix %q", prefix)
 	}
 }
+
+// Depths reports how much work is waiting, which is the single most useful
+// number for someone watching the system: a growing stream means the worker
+// cannot keep up, and a growing dead-letter stream means tasks are being lost.
+type Depths struct {
+	Stream     int64
+	Pending    int64
+	DeadLetter int64
+}
+
+// Depths is read by the background metrics collector, not by request handlers,
+// so a failure here degrades the metrics and nothing else.
+func (r *RedisBroker) Depths(ctx context.Context) (Depths, error) {
+	stream, err := r.streamLength(ctx, r.stream)
+	if err != nil {
+		return Depths{}, err
+	}
+	deadLetter, err := r.streamLength(ctx, r.deadLetter)
+	if err != nil {
+		return Depths{}, err
+	}
+	pending, err := r.pendingCount(ctx)
+	if err != nil {
+		return Depths{}, err
+	}
+	return Depths{Stream: stream, Pending: pending, DeadLetter: deadLetter}, nil
+}
+
+func (r *RedisBroker) streamLength(ctx context.Context, stream string) (int64, error) {
+	value, err := r.command(ctx, "XLEN", stream)
+	if err != nil {
+		return 0, err
+	}
+	length, _ := value.(int64)
+	return length, nil
+}
+
+// pendingCount asks for the summary form of XPENDING, whose first element is
+// the number of messages delivered to the group but not yet acknowledged. The
+// group may not exist yet on a fresh deployment, which is not an error.
+func (r *RedisBroker) pendingCount(ctx context.Context) (int64, error) {
+	value, err := r.command(ctx, "XPENDING", r.stream, r.group)
+	if err != nil {
+		if strings.Contains(err.Error(), "NOGROUP") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	entries, ok := value.([]any)
+	if !ok || len(entries) == 0 {
+		return 0, nil
+	}
+	count, _ := entries[0].(int64)
+	return count, nil
+}
+
+// DeadLetterEntry is one failed task as stored in the dead-letter stream.
+type DeadLetterEntry struct {
+	ID       string `json:"id"`
+	TaskID   string `json:"task_id,omitempty"`
+	TaskType string `json:"task_type,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// DeadLetterEntries returns the most recent dead-lettered tasks for the
+// operational endpoint. The stored job payload contains the issue body and the
+// repository files that were sent to the model, so it is never returned: only
+// the identifiers and the failure cause leave this function.
+func (r *RedisBroker) DeadLetterEntries(ctx context.Context, limit int) ([]DeadLetterEntry, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	value, err := r.command(ctx, "XREVRANGE", r.deadLetter, "+", "-", "COUNT", strconv.Itoa(limit))
+	if err != nil {
+		return nil, err
+	}
+	rawEntries, ok := value.([]any)
+	if !ok {
+		return nil, nil
+	}
+	entries := make([]DeadLetterEntry, 0, len(rawEntries))
+	for _, rawEntry := range rawEntries {
+		entry, ok := rawEntry.([]any)
+		if !ok || len(entry) < 2 {
+			continue
+		}
+		id, _ := entry[0].(string)
+		fields, _ := entry[1].([]any)
+		decoded := DeadLetterEntry{ID: id}
+		for index := 0; index+1 < len(fields); index += 2 {
+			name, _ := fields[index].(string)
+			fieldValue, _ := fields[index+1].(string)
+			switch name {
+			case "error":
+				decoded.Error = truncateCause(fieldValue)
+			case "job":
+				var job domain.AgentJob
+				if json.Unmarshal([]byte(fieldValue), &job) == nil {
+					decoded.TaskID = job.TaskID
+					decoded.TaskType = job.Type
+				}
+			}
+		}
+		entries = append(entries, decoded)
+	}
+	return entries, nil
+}
+
+// truncateCause keeps the failure readable without letting an upstream error
+// body turn the response into a dump.
+func truncateCause(cause string) string {
+	const limit = 300
+	if len(cause) <= limit {
+		return cause
+	}
+	return cause[:limit] + "…"
+}

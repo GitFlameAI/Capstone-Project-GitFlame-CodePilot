@@ -458,6 +458,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session_id
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status
     ON agent_tasks(status);
 
+-- Supports the operational endpoints: the recent-task list and the 24-hour
+-- status counts both order or filter by creation time.
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_created_at
+    ON agent_tasks(created_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_agent_task_statuses_task_id
     ON agent_task_statuses(agent_task_id);
 

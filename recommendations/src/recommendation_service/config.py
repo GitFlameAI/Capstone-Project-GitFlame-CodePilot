@@ -70,6 +70,15 @@ def parse_config(config_yaml: str) -> ServiceConfig:
 
 
 def filter_repo_context(files: list[RepoFile], config: ServiceConfig) -> list[RepoFile]:
+    return filter_analysis_files(files, config, limit=config.rag.max_files)
+
+
+def filter_analysis_files(
+    files: list[RepoFile],
+    config: ServiceConfig,
+    *,
+    limit: int | None = None,
+) -> list[RepoFile]:
     selected = []
     max_bytes = config.rag.max_file_size_kb * 1024
 
@@ -81,7 +90,7 @@ def filter_repo_context(files: list[RepoFile], config: ServiceConfig) -> list[Re
         if _matches_any(file.path, config.analysis.exclude):
             continue
         selected.append(file)
-        if len(selected) >= config.rag.max_files:
+        if limit is not None and len(selected) >= limit:
             break
 
     if not selected:

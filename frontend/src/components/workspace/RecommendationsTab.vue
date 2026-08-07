@@ -11,7 +11,7 @@
 // There is intentionally no "resolved" concept here — a recommendation is either
 // acted on (turned into an issue) or dismissed (deleted). Severity is kept but
 // explained in a small legend and in the detail overlay.
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { api, ApiError, USING_MOCK } from '../../api/index.js'
 import { describeError } from '../../api/errors.js'
 import { session } from '../../store/session.js'
@@ -228,6 +228,7 @@ function createIssue() {
 }
 
 onMounted(load)
+watch(() => session.recommendationsRevision, () => load({ auto: true }))
 </script>
 
 <template>

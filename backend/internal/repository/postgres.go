@@ -543,6 +543,47 @@ func (s *PostgresStore) SaveRecommendations(repository domain.RepositoryMetadata
 	return &domain.RecommendationReport{RepositoryID: repository.ID, Summary: summary, Status: "ready", Recommendations: cards}, nil
 }
 
+func (s *PostgresStore) SaveAIConfig(repository domain.RepositoryMetadata, cfg domain.AIConfig) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	repositoryID, err := upsertRepository(ctx, tx, repository)
+	if err != nil {
+		return err
+	}
+	if _, err := insertAIConfig(ctx, tx, repositoryID, cfg); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) LatestAIConfig(repositoryExternalID string) (domain.AIConfig, error) {
+	var raw string
+	var parsed []byte
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT c.raw_yml,c.parsed_config_json
+		FROM ai_configs c
+		JOIN repositories r ON r.id=c.repository_id
+		WHERE r.external_id=$1
+		ORDER BY c.created_at DESC
+		LIMIT 1`, repositoryExternalID).Scan(&raw, &parsed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AIConfig{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.AIConfig{}, err
+	}
+	var cfg domain.AIConfig
+	if err := json.Unmarshal(parsed, &cfg); err != nil {
+		return domain.AIConfig{}, err
+	}
+	cfg.Raw = raw
+	return cfg, nil
+}
+
 func (s *PostgresStore) Recommendations(repositoryID string) (*domain.RecommendationReport, error) {
 	var runID, summary, status string
 	err := s.pool.QueryRow(context.Background(), `SELECT rr.id::text,rr.summary,rr.status FROM recommendation_runs rr
@@ -784,6 +825,33 @@ func (s *PostgresStore) SaveGitFlameWebhook(webhook domain.GitFlameWebhookRegist
 	return &webhook, nil
 }
 
+func (s *PostgresStore) GitFlameWebhook(id string) (*domain.GitFlameWebhookRegistration, error) {
+	return s.gitFlameWebhook(`WHERE id=$1::uuid`, id)
+}
+
+func (s *PostgresStore) GitFlameWebhookByConnection(connectionID string) (*domain.GitFlameWebhookRegistration, error) {
+	return s.gitFlameWebhook(`WHERE connection_id=$1::uuid ORDER BY updated_at DESC LIMIT 1`, connectionID)
+}
+
+func (s *PostgresStore) gitFlameWebhook(where, value string) (*domain.GitFlameWebhookRegistration, error) {
+	var webhook domain.GitFlameWebhookRegistration
+	var eventsJSON []byte
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT id::text,connection_id::text,webhook_url,webhook_secret_hash,events,status,
+		       external_webhook_id,created_at,updated_at
+		FROM gitflame_webhooks `+where, value).Scan(
+		&webhook.ID, &webhook.ConnectionID, &webhook.WebhookURL, &webhook.WebhookSecretHash,
+		&eventsJSON, &webhook.Status, &webhook.ExternalWebhookID, &webhook.CreatedAt, &webhook.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(eventsJSON, &webhook.Events)
+	return &webhook, nil
+}
+
 func (s *PostgresStore) SaveGitFlameWebhookEvent(event domain.GitFlameWebhookEvent) (*domain.GitFlameWebhookEvent, error) {
 	if event.ID == "" {
 		event.ID = NewID()
@@ -803,7 +871,17 @@ func (s *PostgresStore) SaveGitFlameWebhookEvent(event domain.GitFlameWebhookEve
 		) VALUES (
 			$1::uuid,$2::uuid,$3,$4,$5,$6,NULLIF($7::text,'')::uuid,$8::jsonb,$9,$10::jsonb,
 			$11,$12
-		) RETURNING received_at`,
+		) ON CONFLICT (id) DO UPDATE SET
+			event_type=EXCLUDED.event_type,
+			action=EXCLUDED.action,
+			delivery_id=EXCLUDED.delivery_id,
+			repository_external_id=EXCLUDED.repository_external_id,
+			issue_session_id=EXCLUDED.issue_session_id,
+			payload_json=EXCLUDED.payload_json,
+			status=EXCLUDED.status,
+			error_json=EXCLUDED.error_json,
+			processed_at=EXCLUDED.processed_at
+		RETURNING received_at`,
 		event.ID, event.WebhookID, event.EventType, event.Action, event.DeliveryID, event.RepositoryID,
 		event.IssueSessionID, string(payloadJSON), event.Status, string(errorJSON), event.ReceivedAt, event.ProcessedAt).
 		Scan(&event.ReceivedAt)
@@ -811,6 +889,42 @@ func (s *PostgresStore) SaveGitFlameWebhookEvent(event domain.GitFlameWebhookEve
 		return nil, err
 	}
 	return &event, nil
+}
+
+func (s *PostgresStore) GitFlameWebhookEvents(webhookID string, limit int) ([]domain.GitFlameWebhookEvent, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT id::text,webhook_id::text,event_type,action,delivery_id,repository_external_id,
+		       COALESCE(issue_session_id::text,''),payload_json,status,error_json,received_at,processed_at
+		FROM gitflame_webhook_events
+		WHERE webhook_id=$1::uuid
+		ORDER BY received_at DESC
+		LIMIT $2`, webhookID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.GitFlameWebhookEvent, 0, limit)
+	for rows.Next() {
+		var event domain.GitFlameWebhookEvent
+		var payloadJSON, errorJSON []byte
+		if err := rows.Scan(&event.ID, &event.WebhookID, &event.EventType, &event.Action,
+			&event.DeliveryID, &event.RepositoryID, &event.IssueSessionID, &payloadJSON,
+			&event.Status, &errorJSON, &event.ReceivedAt, &event.ProcessedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(payloadJSON, &event.Payload)
+		if len(errorJSON) > 0 && string(errorJSON) != "null" {
+			var taskError domain.TaskError
+			if json.Unmarshal(errorJSON, &taskError) == nil {
+				event.Error = &taskError
+			}
+		}
+		result = append(result, event)
+	}
+	return result, rows.Err()
 }
 
 func (s *PostgresStore) SaveRepositorySnapshot(snapshot domain.RepositorySnapshot, files []domain.RepositorySnapshotFile) (*domain.RepositorySnapshot, error) {
@@ -1098,4 +1212,89 @@ func latestFeedback(history []string) string {
 		return ""
 	}
 	return history[len(history)-1]
+}
+
+// ObservabilityCounts runs two cheap aggregates for the background metrics
+// collector. Nothing here reads task payloads or connection tokens: the result
+// is counts only, so it is safe to expose through /metrics.
+func (s *PostgresStore) ObservabilityCounts(ctx context.Context) (ObservabilityCounts, error) {
+	counts := ObservabilityCounts{
+		ConnectionsByTokenStatus: map[string]int{},
+		TasksByStatusLast24h:     map[string]int{},
+	}
+
+	connectionRows, err := s.pool.Query(ctx, `
+		SELECT COALESCE(NULLIF(token_status, ''), 'unknown'), COUNT(*)
+		FROM gitflame_connections
+		GROUP BY 1`)
+	if err != nil {
+		return ObservabilityCounts{}, err
+	}
+	defer connectionRows.Close()
+	for connectionRows.Next() {
+		var status string
+		var total int
+		if err := connectionRows.Scan(&status, &total); err != nil {
+			return ObservabilityCounts{}, err
+		}
+		counts.ConnectionsByTokenStatus[status] = total
+	}
+	if err := connectionRows.Err(); err != nil {
+		return ObservabilityCounts{}, err
+	}
+
+	taskRows, err := s.pool.Query(ctx, `
+		SELECT status, COUNT(*)
+		FROM agent_tasks
+		WHERE created_at >= NOW() - INTERVAL '24 hours'
+		GROUP BY 1`)
+	if err != nil {
+		return ObservabilityCounts{}, err
+	}
+	defer taskRows.Close()
+	for taskRows.Next() {
+		var status string
+		var total int
+		if err := taskRows.Scan(&status, &total); err != nil {
+			return ObservabilityCounts{}, err
+		}
+		counts.TasksByStatusLast24h[status] = total
+	}
+	return counts, taskRows.Err()
+}
+
+// RecentAgentTasks powers GET /ops/tasks. The projection is deliberately narrow:
+// identifiers, status, timing and the error code, but never plan text, generated
+// files or prompts.
+func (s *PostgresStore) RecentAgentTasks(ctx context.Context, query RecentTasksQuery) ([]AgentTaskSummary, error) {
+	limit := query.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.id::text, COALESCE(t.issue_session_id::text, ''), t.task_type, t.status, t.attempt,
+		       COALESCE(t.model, ''), COALESCE(t.error_json->>'code', ''),
+		       t.created_at, t.updated_at
+		FROM agent_tasks t
+		WHERE ($1 = '' OR t.status = $1)
+		ORDER BY t.created_at DESC
+		LIMIT $2`, query.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	summaries := make([]AgentTaskSummary, 0, limit)
+	for rows.Next() {
+		var summary AgentTaskSummary
+		if err := rows.Scan(
+			&summary.ID, &summary.SessionID, &summary.Type, &summary.Status, &summary.Attempt,
+			&summary.Model, &summary.ErrorCode, &summary.CreatedAt, &summary.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		summary.DurationMS = summary.UpdatedAt.Sub(summary.CreatedAt).Milliseconds()
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
 }
