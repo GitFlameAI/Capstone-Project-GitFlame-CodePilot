@@ -17,6 +17,7 @@ from agent_engine.plan_validator import PlanValidator, ValidatedPlan
 from agent_engine.prompt import SYSTEM_PROMPT, build_validation_feedback
 from agent_engine.settings import AgentSettings
 from agent_engine.tools import ToolSandbox
+from observability.metrics import AGENT_TOOL_CALLS
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ class AgentLoop:
                     )
                 messages.append(_assistant_tool_call_message(completion))
                 for call in completion.tool_calls:
+                    AGENT_TOOL_CALLS.labels(tool=call.name).inc()
                     logger.info(
                         "agent tool call step=%d tool=%s arguments=%s",
                         step_number,

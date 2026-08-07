@@ -1,0 +1,12 @@
+# Grafana finds Prometheus without anyone clicking through the UI, so a fresh
+# `docker compose --profile observability up` lands on a working dashboard.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: codepilot-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

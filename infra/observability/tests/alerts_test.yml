@@ -1,0 +1,107 @@
+# Unit tests for infra/observability/alerts.yml.
+#
+# Run them without deploying anything:
+#   docker run --rm -v "$PWD/infra/observability:/rules" prom/prometheus:v2.55.1 \
+#     promtool test rules /rules/tests/alerts_test.yml
+#
+# The tests exist because an alert rule that never fires is worse than no alert
+# at all: it is a rule everyone believes in.
+rule_files:
+  - ../alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: a service that stops answering scrapes pages after two minutes
+    input_series:
+      - series: 'up{job="codepilot-backend", instance="backend:8000"}'
+        values: "1 1 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: CodePilotServiceDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: CodePilotServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: codepilot-backend
+              instance: backend:8000
+            exp_annotations:
+              summary: "codepilot-backend is not answering scrapes"
+              description: "Prometheus has not been able to scrape codepilot-backend (backend:8000) for 2 minutes. Check `docker compose ps` and the container logs; see docs/OPERATIONS.md."
+
+  - interval: 1m
+    name: a dependency that recovers before five minutes does not alert
+    input_series:
+      - series: 'codepilot_dependency_up{component="rag"}'
+        values: "1 0 0 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: CodePilotDependencyDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: a dependency that stays down alerts
+    input_series:
+      - series: 'codepilot_dependency_up{component="rag"}'
+        values: "0+0x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CodePilotDependencyDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Dependency rag is failing its readiness check"
+              description: "The backend reports rag as unavailable for 5 minutes. Plan generation and recommendation analysis will fail while this lasts."
+
+  - interval: 1m
+    name: one dead-lettered task is enough to page
+    input_series:
+      - series: 'codepilot_agent_tasks_dead_lettered_total{task_type="initial_plan"}'
+        values: "0+0x10 1+0x10"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CodePilotDeadLetterGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              task_type: initial_plan
+            exp_annotations:
+              summary: "Agent tasks are being dead-lettered"
+              description: "A task exhausted its retries and was moved to the dead-letter stream, which means a user request was lost. Inspect /ops/dead-letter."
+
+  - interval: 1m
+    name: a healthy failure ratio stays quiet, an unhealthy one fires
+    input_series:
+      # 9 successes and 1 failure per minute is a 10% failure rate: below the
+      # 20% threshold, so nothing should fire.
+      - series: 'codepilot_agent_tasks_executed_total{task_type="initial_plan", outcome="success"}'
+        values: "0+9x40"
+      - series: 'codepilot_agent_tasks_executed_total{task_type="initial_plan", outcome="failure"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: CodePilotHighTaskFailureRate
+        exp_alerts: []
+
+  - interval: 1m
+    name: an expired GitFlame token alerts after thirty minutes
+    input_series:
+      - series: 'codepilot_gitflame_connections{token_status="invalid"}'
+        values: "1+0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CodePilotGitFlameTokensNeedReauth
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CodePilotGitFlameTokensNeedReauth
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "GitFlame access tokens are no longer usable"
+              description: "At least one stored connection has a token that is invalid or revoked. The owner has to reconnect the repository; nothing on the server side can fix it."

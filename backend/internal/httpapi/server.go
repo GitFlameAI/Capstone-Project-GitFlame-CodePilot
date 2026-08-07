@@ -12,6 +12,7 @@ import (
 	"gitflame-codepilot/backend/internal/agent"
 	"gitflame-codepilot/backend/internal/config"
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/queue"
 	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/security"
@@ -26,6 +27,8 @@ type Server struct {
 	indexer           RepositoryIndexer
 	router            *http.ServeMux
 	checks            map[string]func(context.Context) error
+	indexJobs         *indexJobRegistry
+	broker            queue.Broker
 	credentialCipher  *security.CredentialCipher
 	gitflameBaseURL   string
 	gitflameTimeout   time.Duration
@@ -34,6 +37,11 @@ type Server struct {
 	sessionSecure     bool
 	publicBaseURL     string
 	webhookSigningKey [32]byte
+
+	// indexBackgroundTimeout bounds one background indexing job, and
+	// indexWaitTimeout bounds how long a request waits for that job.
+	indexBackgroundTimeout time.Duration
+	indexWaitTimeout       time.Duration
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -70,7 +78,9 @@ func New(cfg config.Config) (*Server, error) {
 			return nil, err
 		}
 		checks["redis"] = broker.Ping
-		return newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, indexer, checks, cfg, credentialCipher), nil
+		server := newServer(service.NewQueuedWorkflow(store, broker), store, gitflame, recommender, indexer, checks, cfg, credentialCipher)
+		server.broker = broker
+		return server, nil
 	}
 	return newServer(service.NewWorkflow(store, engine), store, gitflame, recommender, indexer, checks, cfg, credentialCipher), nil
 }
@@ -89,56 +99,78 @@ func newServer(workflow *service.Workflow, store repository.Store, gitflame GitF
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 168 * time.Hour
 	}
+	if cfg.RAGIndexTimeout <= 0 {
+		cfg.RAGIndexTimeout = defaultIndexWaitTimeout
+	}
+	if cfg.RAGIndexWaitTimeout <= 0 {
+		cfg.RAGIndexWaitTimeout = defaultIndexWaitTimeout
+	}
 	s := &Server{
 		workflow: workflow, store: store, gitflame: gitflame, recommender: recommender, indexer: indexer, checks: checks,
 		credentialCipher: credentialCipher, gitflameBaseURL: cfg.GitFlameBaseURL, gitflameTimeout: cfg.GitFlameTimeout,
 		sessionCookie: cfg.SessionCookieName, sessionTTL: cfg.SessionTTL, sessionSecure: cfg.SessionCookieSecure,
 		publicBaseURL:     strings.TrimRight(cfg.PublicBaseURL, "/"),
 		webhookSigningKey: sha256.Sum256([]byte(cfg.GitFlameCredentialKey)),
+		indexJobs:         newIndexJobRegistry(),
+
+		indexBackgroundTimeout: cfg.RAGIndexTimeout,
+		indexWaitTimeout:       cfg.RAGIndexWaitTimeout,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /ready", s.ready)
-	mux.HandleFunc("GET /docs", s.docs)
-	mux.HandleFunc("GET /swagger/", s.docs)
-	mux.HandleFunc("GET /swagger/index.html", s.docs)
-	mux.HandleFunc("GET /openapi.json", s.openAPI)
-	mux.HandleFunc("POST /auth/gitflame/session", s.createGitFlameSession)
-	mux.HandleFunc("DELETE /auth/session", s.revokeSession)
-	mux.HandleFunc("POST /integrations/gitflame/connections", s.saveGitFlameConnection)
-	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
-	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
-	mux.HandleFunc("PUT /integrations/gitflame/connections/{id}/config", s.saveRepositoryConfig)
-	mux.HandleFunc("POST /integrations/gitflame/connections/{id}/webhook", s.createGitFlameWebhook)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/webhook", s.getGitFlameWebhook)
-	mux.HandleFunc("DELETE /integrations/gitflame/connections/{id}/webhook", s.disableGitFlameWebhook)
-	mux.HandleFunc("GET /integrations/gitflame/connections/{id}/webhook/events", s.listGitFlameWebhookEvents)
-	mux.HandleFunc("POST /integrations/gitflame/webhooks/{id}", s.receiveGitFlameWebhook)
-	mux.HandleFunc("POST /integrations/gitflame/issues/analyze", s.analyze)
-	mux.HandleFunc("GET /ai/tasks/{taskId}", s.task)
-	mux.HandleFunc("POST /ai/tasks/{taskId}/retry", s.retryTask)
-	mux.HandleFunc("GET /ai/issues/{id}/plan", s.plan)
-	mux.HandleFunc("POST /ai/issues/{id}/approve", s.approve)
-	mux.HandleFunc("GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
-	mux.HandleFunc("POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
-	mux.HandleFunc("POST /ai/issues/{id}/correct", s.correct)
-	mux.HandleFunc("POST /ai/issues/{id}/reject", s.reject)
-	mux.HandleFunc("POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
-	mux.HandleFunc("POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
-	mux.HandleFunc("GET /repositories/recommendations/status", s.recommendationStatus)
-	mux.HandleFunc("GET /repositories/recommendations/summary", s.recommendationSummary)
-	mux.HandleFunc("GET /repositories/recommendations", s.recommendations)
-	mux.HandleFunc("GET /repositories/{id}/recommendations/status", s.recommendationStatus)
-	mux.HandleFunc("GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
-	mux.HandleFunc("GET /repositories/{id}/recommendations", s.recommendations)
-	mux.HandleFunc("PATCH /recommendations/{id}/close", s.closeRecommendation)
-	mux.HandleFunc("DELETE /recommendations/{id}", s.deleteRecommendation)
+	route(mux, "GET /health", s.health)
+	route(mux, "GET /version", s.version)
+	route(mux, "GET /ready", s.ready)
+	route(mux, "GET /docs", s.docs)
+	route(mux, "GET /swagger/", s.docs)
+	route(mux, "GET /swagger/index.html", s.docs)
+	route(mux, "GET /openapi.json", s.openAPI)
+	// Registered directly: a scrape must not measure itself, and nginx blocks
+	// this path from the outside so only Prometheus on the Docker network sees it.
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	route(mux, "GET /ops/status", s.opsStatus)
+	route(mux, "GET /ops/tasks", s.opsTasks)
+	route(mux, "GET /ops/dead-letter", s.opsDeadLetter)
+	route(mux, "POST /auth/gitflame/session", s.createGitFlameSession)
+	route(mux, "DELETE /auth/session", s.revokeSession)
+	route(mux, "POST /integrations/gitflame/connections", s.saveGitFlameConnection)
+	route(mux, "PUT /integrations/gitflame/connections/{id}", s.reconnectGitFlameConnection)
+	route(mux, "DELETE /integrations/gitflame/connections/{id}", s.revokeGitFlameConnection)
+	route(mux, "GET /integrations/gitflame/connections/{id}/tree", s.repositoryTree)
+	route(mux, "GET /integrations/gitflame/connections/{id}/files", s.repositoryFiles)
+	route(mux, "GET /integrations/gitflame/connections/{id}/issues", s.repositoryIssues)
+	route(mux, "GET /integrations/gitflame/connections/{id}/index", s.repositoryIndexStatus)
+	route(mux, "PUT /integrations/gitflame/connections/{id}/config", s.saveRepositoryConfig)
+	route(mux, "POST /integrations/gitflame/connections/{id}/webhook", s.createGitFlameWebhook)
+	route(mux, "GET /integrations/gitflame/connections/{id}/webhook", s.getGitFlameWebhook)
+	route(mux, "DELETE /integrations/gitflame/connections/{id}/webhook", s.disableGitFlameWebhook)
+	route(mux, "GET /integrations/gitflame/connections/{id}/webhook/events", s.listGitFlameWebhookEvents)
+	route(mux, "POST /integrations/gitflame/webhooks/{id}", s.receiveGitFlameWebhook)
+	route(mux, "POST /integrations/gitflame/issues/analyze", s.analyze)
+	route(mux, "GET /ai/tasks/{taskId}", s.task)
+	route(mux, "POST /ai/tasks/{taskId}/retry", s.retryTask)
+	route(mux, "GET /ai/issues/{id}/plan", s.plan)
+	route(mux, "POST /ai/issues/{id}/approve", s.approve)
+	route(mux, "GET /ai/issues/{id}/code-generation", s.codeGenerationStatus)
+	route(mux, "POST /ai/issues/{id}/gitflame/apply", s.applyGeneratedFiles)
+	route(mux, "POST /ai/issues/{id}/correct", s.correct)
+	route(mux, "POST /ai/issues/{id}/reject", s.reject)
+	route(mux, "POST /integrations/gitflame/recommendations/analyze", s.analyzeRecommendations)
+	route(mux, "POST /integrations/gitflame/repositories/{id}/recommendations/analyze", s.analyzeRecommendations)
+	route(mux, "GET /repositories/recommendations/status", s.recommendationStatus)
+	route(mux, "GET /repositories/recommendations/summary", s.recommendationSummary)
+	route(mux, "GET /repositories/recommendations", s.recommendations)
+	route(mux, "GET /repositories/{id}/recommendations/status", s.recommendationStatus)
+	route(mux, "GET /repositories/{id}/recommendations/summary", s.recommendationSummary)
+	route(mux, "GET /repositories/{id}/recommendations", s.recommendations)
+	route(mux, "PATCH /recommendations/{id}/close", s.closeRecommendation)
+	route(mux, "DELETE /recommendations/{id}", s.deleteRecommendation)
 	s.router = mux
 	return s
 }
+
+// Router builds the middleware chain. Order matters: the request identifier has
+// to exist before anything logs, and panic recovery sits innermost so that the
+// recovered 500 is still counted and logged as a normal response.
 func (s *Server) Router() http.Handler {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/docs" && !strings.HasPrefix(r.URL.Path, "/swagger/") {
@@ -146,11 +178,17 @@ func (s *Server) Router() http.Handler {
 		}
 		s.router.ServeHTTP(w, r)
 	})
-	return requestLogger(handler)
+	return observability.RequestIDMiddleware(requestLogger(recoverMiddleware(handler)))
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	write(w, 200, map[string]string{"status": "ok", "service": "backend"})
+}
+
+// version answers "what exactly is running here", which is the first question of
+// every incident and the only reliable way to tell a redeploy from a rollback.
+func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	write(w, http.StatusOK, observability.Build("backend"))
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	components := make(map[string]string, len(s.checks))

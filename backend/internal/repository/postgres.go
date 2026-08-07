@@ -1213,3 +1213,88 @@ func latestFeedback(history []string) string {
 	}
 	return history[len(history)-1]
 }
+
+// ObservabilityCounts runs two cheap aggregates for the background metrics
+// collector. Nothing here reads task payloads or connection tokens: the result
+// is counts only, so it is safe to expose through /metrics.
+func (s *PostgresStore) ObservabilityCounts(ctx context.Context) (ObservabilityCounts, error) {
+	counts := ObservabilityCounts{
+		ConnectionsByTokenStatus: map[string]int{},
+		TasksByStatusLast24h:     map[string]int{},
+	}
+
+	connectionRows, err := s.pool.Query(ctx, `
+		SELECT COALESCE(NULLIF(token_status, ''), 'unknown'), COUNT(*)
+		FROM gitflame_connections
+		GROUP BY 1`)
+	if err != nil {
+		return ObservabilityCounts{}, err
+	}
+	defer connectionRows.Close()
+	for connectionRows.Next() {
+		var status string
+		var total int
+		if err := connectionRows.Scan(&status, &total); err != nil {
+			return ObservabilityCounts{}, err
+		}
+		counts.ConnectionsByTokenStatus[status] = total
+	}
+	if err := connectionRows.Err(); err != nil {
+		return ObservabilityCounts{}, err
+	}
+
+	taskRows, err := s.pool.Query(ctx, `
+		SELECT status, COUNT(*)
+		FROM agent_tasks
+		WHERE created_at >= NOW() - INTERVAL '24 hours'
+		GROUP BY 1`)
+	if err != nil {
+		return ObservabilityCounts{}, err
+	}
+	defer taskRows.Close()
+	for taskRows.Next() {
+		var status string
+		var total int
+		if err := taskRows.Scan(&status, &total); err != nil {
+			return ObservabilityCounts{}, err
+		}
+		counts.TasksByStatusLast24h[status] = total
+	}
+	return counts, taskRows.Err()
+}
+
+// RecentAgentTasks powers GET /ops/tasks. The projection is deliberately narrow:
+// identifiers, status, timing and the error code, but never plan text, generated
+// files or prompts.
+func (s *PostgresStore) RecentAgentTasks(ctx context.Context, query RecentTasksQuery) ([]AgentTaskSummary, error) {
+	limit := query.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.id::text, COALESCE(t.issue_session_id::text, ''), t.task_type, t.status, t.attempt,
+		       COALESCE(t.model, ''), COALESCE(t.error_json->>'code', ''),
+		       t.created_at, t.updated_at
+		FROM agent_tasks t
+		WHERE ($1 = '' OR t.status = $1)
+		ORDER BY t.created_at DESC
+		LIMIT $2`, query.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	summaries := make([]AgentTaskSummary, 0, limit)
+	for rows.Next() {
+		var summary AgentTaskSummary
+		if err := rows.Scan(
+			&summary.ID, &summary.SessionID, &summary.Type, &summary.Status, &summary.Attempt,
+			&summary.Model, &summary.ErrorCode, &summary.CreatedAt, &summary.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		summary.DurationMS = summary.UpdatedAt.Sub(summary.CreatedAt).Milliseconds()
+		summaries = append(summaries, summary)
+	}
+	return summaries, rows.Err()
+}

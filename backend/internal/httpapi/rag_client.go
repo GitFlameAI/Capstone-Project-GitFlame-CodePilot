@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 )
 
 type RepositoryIndexer interface {
@@ -62,11 +63,15 @@ func (c *RAGClient) Ready(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	observability.PropagateRequestID(ctx, req)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		observability.ObserveUpstream("rag", "unreachable", started)
 		return fmt.Errorf("CodeRAG is unreachable: %w", err)
 	}
 	defer resp.Body.Close()
+	observability.ObserveUpstream("rag", observability.UpstreamOutcome(resp.StatusCode), started)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("CodeRAG health returned HTTP %d", resp.StatusCode)
 	}
@@ -105,11 +110,15 @@ func (c *RAGClient) request(ctx context.Context, method, endpoint string, payloa
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	observability.PropagateRequestID(ctx, req)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		observability.ObserveUpstream("rag", "unreachable", started)
 		return &IntegrationError{Status: http.StatusServiceUnavailable, Code: "rag_unreachable", Detail: "CodeRAG service is unreachable"}
 	}
 	defer resp.Body.Close()
+	observability.ObserveUpstream("rag", observability.UpstreamOutcome(resp.StatusCode), started)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var problem struct {
 			Detail any `json:"detail"`

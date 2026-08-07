@@ -5,9 +5,19 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Metrics are scraped by Prometheus over the internal Docker network. They
+    # are not secret, but they describe the internals of the deployment and have
+    # no reason to be reachable from the public port.
+    location = /api/metrics {
+        return 404;
+    }
+
     location /api/ {
         proxy_pass http://${BACKEND_HOST}:${BACKEND_INTERNAL_PORT}/;
         proxy_http_version 1.1;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 900s;
+        proxy_read_timeout 900s;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

@@ -2,12 +2,45 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/service"
 )
+
+// repositoryIndexStatus exposes the background indexing job for a connected
+// repository so the UI (and an operator) can tell whether the repository is
+// still being prepared, and why it failed if it did.
+func (s *Server) repositoryIndexStatus(w http.ResponseWriter, r *http.Request) {
+	connection, err := s.authenticatedConnection(r, r.PathValue("id"))
+	if err != nil {
+		integrationError(w, err, "gitflame_repository_error")
+		return
+	}
+	if s.indexer == nil {
+		write(w, http.StatusOK, indexJobStatus{
+			RepositoryID: connection.Repository.ID,
+			ConnectionID: connection.ID,
+			Status:       indexStatusDisabled,
+		})
+		return
+	}
+	status, known := s.indexJobs.status(connection.Repository.ID)
+	if !known {
+		// No job has run in this process. The index may still exist in CodeRAG;
+		// the next analysis verifies it and rebuilds it when needed.
+		status = indexJobStatus{
+			RepositoryID: connection.Repository.ID,
+			ConnectionID: connection.ID,
+			Ref:          connection.DefaultBranch,
+			Status:       indexStatusIdle,
+		}
+	}
+	write(w, http.StatusOK, status)
+}
 
 func (s *Server) saveRepositoryConfig(w http.ResponseWriter, r *http.Request) {
 	connection, err := s.authenticatedConnection(r, r.PathValue("id"))
@@ -36,11 +69,15 @@ func (s *Server) saveRepositoryConfig(w http.ResponseWriter, r *http.Request) {
 		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
-	if _, err := s.synchronizeRepositoryIndex(r.Context(), reader, connection, connection.DefaultBranch, "", true); err != nil {
-		integrationError(w, err, "rag_indexing_failed")
-		return
-	}
-	write(w, http.StatusOK, map[string]any{"repository_id": connection.Repository.ID, "yaml_config": cfg.Raw, "status": "saved"})
+	// The .ai.yml controls which files are indexed, so the index is rebuilt —
+	// in the background, so that saving the configuration stays instant.
+	indexJob := s.startRepositoryIndexInBackground(r.Context(), reader, connection, connection.DefaultBranch, true)
+	write(w, http.StatusOK, map[string]any{
+		"repository_id": connection.Repository.ID,
+		"yaml_config":   cfg.Raw,
+		"status":        "saved",
+		"index":         indexJob,
+	})
 }
 
 func (s *Server) repositoryTree(w http.ResponseWriter, r *http.Request) {
@@ -53,25 +90,21 @@ func (s *Server) repositoryTree(w http.ResponseWriter, r *http.Request) {
 	if ref == "" {
 		ref = connection.DefaultBranch
 	}
-	syncResult, err := s.synchronizeRepositoryIndex(r.Context(), reader, connection, ref, "", false)
+	// Browsing the repository must stay fast, so the tree is read directly from
+	// GitFlame and indexing only gets nudged in the background. The reported
+	// `index` state lets the caller show progress without blocking on it.
+	indexJob := s.startRepositoryIndexInBackground(r.Context(), reader, connection, ref, false)
+	tree, err := reader.RepositoryTree(r.Context(), connection.Repository.ID, ref)
 	if err != nil {
-		integrationError(w, err, "rag_indexing_failed")
+		integrationError(w, err, "gitflame_tree_error")
 		return
-	}
-	tree := syncResult.Tree
-	if tree == nil {
-		tree, err = reader.RepositoryTree(r.Context(), connection.Repository.ID, ref)
-		if err != nil {
-			integrationError(w, err, "gitflame_tree_error")
-			return
-		}
 	}
 	_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
 	write(w, http.StatusOK, map[string]any{
 		"repository_id": connection.Repository.ID,
 		"ref":           ref,
 		"tree":          tree,
-		"index":         syncResult.Result,
+		"index":         indexJob,
 	})
 }
 
@@ -85,18 +118,22 @@ func (s *Server) repositoryFiles(w http.ResponseWriter, r *http.Request) {
 	if ref == "" {
 		ref = connection.DefaultBranch
 	}
-	syncResult, err := s.synchronizeRepositoryIndex(r.Context(), reader, connection, ref, "", false)
-	if err != nil {
-		integrationError(w, err, "rag_indexing_failed")
+	storedConfig := ""
+	if stored, configErr := s.store.LatestAIConfig(connection.Repository.ID); configErr == nil {
+		storedConfig = stored.Raw
+	} else if !errors.Is(configErr, repository.ErrNotFound) {
+		problem(w, http.StatusInternalServerError, "storage_error", configErr.Error())
 		return
 	}
-	yamlConfig, files := syncResult.YAMLConfig, syncResult.Files
-	if files == nil {
-		yamlConfig, files, err = reader.RepositoryFiles(r.Context(), connection.Repository.ID, ref, "", nil)
-		if err != nil {
-			integrationError(w, err, "gitflame_files_error")
-			return
-		}
+	// Same reasoning as repositoryTree: file contents come straight from
+	// GitFlame and indexing runs in the background.
+	indexJob := s.startRepositoryIndexInBackground(r.Context(), reader, connection, ref, false)
+	yamlConfig, files, err := repositoryFilesForAnalysis(
+		r.Context(), reader, connection.Repository.ID, ref, storedConfig, nil,
+	)
+	if err != nil {
+		integrationError(w, err, "gitflame_files_error")
+		return
 	}
 	_ = s.store.TouchGitFlameConnection(connection.UserID, connection.ID)
 	write(w, http.StatusOK, map[string]any{
@@ -104,7 +141,7 @@ func (s *Server) repositoryFiles(w http.ResponseWriter, r *http.Request) {
 		"ref":              ref,
 		"yaml_config":      yamlConfig,
 		"repository_files": files,
-		"index":            syncResult.Result,
+		"index":            indexJob,
 	})
 }
 

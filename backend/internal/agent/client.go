@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 )
 
 type PlanGenerator interface {
@@ -68,14 +69,19 @@ func (c *Client) GeneratePlan(ctx context.Context, payload domain.AgentPlanReque
 		return domain.AgentPlanResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	observability.PropagateRequestID(ctx, req)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			observability.ObserveUpstream("agent_engine", "timeout", started)
 			return domain.AgentPlanResponse{}, &Error{Status: http.StatusGatewayTimeout, Code: "inference_timeout", Detail: "Agent Engine request timed out"}
 		}
+		observability.ObserveUpstream("agent_engine", "unreachable", started)
 		return domain.AgentPlanResponse{}, &Error{Status: http.StatusBadGateway, Code: "agent_engine_unreachable", Detail: "Agent Engine is unreachable"}
 	}
 	defer resp.Body.Close()
+	observability.ObserveUpstream("agent_engine", observability.UpstreamOutcome(resp.StatusCode), started)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var problem struct {
 			Detail string `json:"detail"`
@@ -116,14 +122,19 @@ func (c *Client) GenerateFiles(ctx context.Context, payload domain.AgentCodeGene
 		return domain.AgentGeneratedFilesResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	observability.PropagateRequestID(ctx, req)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			observability.ObserveUpstream("agent_engine", "timeout", started)
 			return domain.AgentGeneratedFilesResponse{}, &Error{Status: http.StatusGatewayTimeout, Code: "inference_timeout", Detail: "Agent Engine code generation request timed out"}
 		}
+		observability.ObserveUpstream("agent_engine", "unreachable", started)
 		return domain.AgentGeneratedFilesResponse{}, &Error{Status: http.StatusBadGateway, Code: "agent_engine_unreachable", Detail: "Agent Engine is unreachable"}
 	}
 	defer resp.Body.Close()
+	observability.ObserveUpstream("agent_engine", observability.UpstreamOutcome(resp.StatusCode), started)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var problem struct {
 			Detail string `json:"detail"`

@@ -8,15 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/service"
 )
 
@@ -25,6 +27,8 @@ type GitFlameClient struct {
 	apiKey     string
 	httpClient *http.Client
 }
+
+const gitFlameFileFetchConcurrency = 8
 
 type gitFlameCommitAction struct {
 	Action   string `json:"action"`
@@ -343,10 +347,14 @@ func (c *GitFlameClient) updateGeneratedFileViaContents(
 				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
 			), nil
 		}
-		log.Printf(
-			"gitflame_contents_update path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
-			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
-			integrationCode(lastErr), lastErr.Error(),
+		observability.LoggerFromContext(ctx).Warn(
+			"gitflame_contents_update",
+			slog.String("event", "gitflame_contents_update"),
+			slog.String("path", filePath), slog.String("branch", branch),
+			slog.String("sha", shortSHA(sha)), slog.Int("attempt", attempt+1),
+			slog.Int("status", integrationStatus(lastErr)),
+			slog.String("error_code", integrationCode(lastErr)),
+			slog.String("error", lastErr.Error()),
 		)
 		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
 			return "", lastErr
@@ -373,10 +381,14 @@ func (c *GitFlameClient) deleteGeneratedFileViaContents(
 				*response, "commit.sha", "commit.id", "sha", "commit_sha", "id",
 			), nil
 		}
-		log.Printf(
-			"gitflame_contents_delete path=%s branch=%s sha=%s attempt=%d status=%d code=%s detail=%q",
-			filePath, branch, shortSHA(sha), attempt+1, integrationStatus(lastErr),
-			integrationCode(lastErr), lastErr.Error(),
+		observability.LoggerFromContext(ctx).Warn(
+			"gitflame_contents_delete",
+			slog.String("event", "gitflame_contents_delete"),
+			slog.String("path", filePath), slog.String("branch", branch),
+			slog.String("sha", shortSHA(sha)), slog.Int("attempt", attempt+1),
+			slog.Int("status", integrationStatus(lastErr)),
+			slog.String("error_code", integrationCode(lastErr)),
+			slog.String("error", lastErr.Error()),
 		)
 		if integrationStatus(lastErr) != http.StatusConflict || attempt == 1 {
 			return "", lastErr
@@ -564,15 +576,11 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 			if file.Path == "" || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
 				continue
 			}
-			if strings.TrimSpace(file.Content) == "" {
-				content, err := c.fetchFileContent(ctx, repositoryID, file.Path, ref)
-				if err != nil {
-					return "", nil, err
-				}
-				file.Content = content
-			}
 			file.Type = ""
 			files = append(files, file)
+		}
+		if err := c.fetchRepositoryFileContents(ctx, repositoryID, ref, files); err != nil {
+			return "", nil, err
 		}
 		return yamlConfig, files, nil
 	}
@@ -600,6 +608,62 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 		files = append(files, domain.RepositoryFile{Path: filePath, Content: content})
 	}
 	return yamlConfig, files, nil
+}
+
+// fetchRepositoryFileContents bounds concurrent GitFlame requests while
+// retaining the repository tree order in the returned slice. A connection
+// request performs this work synchronously before RAG indexing, so fetching
+// files serially can otherwise exceed the reverse proxy timeout.
+func (c *GitFlameClient) fetchRepositoryFileContents(
+	ctx context.Context,
+	repositoryID, ref string,
+	files []domain.RepositoryFile,
+) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	workerCount := min(gitFlameFileFetchConcurrency, len(files))
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int, len(files))
+	for index := range files {
+		if strings.TrimSpace(files[index].Content) == "" {
+			jobs <- index
+		}
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	var firstError error
+	var errorOnce sync.Once
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				content, err := c.fetchFileContent(workCtx, repositoryID, files[index].Path, ref)
+				if err != nil {
+					errorOnce.Do(func() {
+						firstError = err
+						cancel()
+					})
+					return
+				}
+				files[index].Content = content
+			}
+		}()
+	}
+	workers.Wait()
+
+	if firstError != nil {
+		return firstError
+	}
+	return ctx.Err()
 }
 
 const defaultIndexConfiguration = `version: 1
@@ -923,13 +987,22 @@ func (c *GitFlameClient) requestJSON(ctx context.Context, method, endpoint strin
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	observability.PropagateRequestID(ctx, req)
+	logger := observability.LoggerFromContext(ctx)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("gitflame_http method=%s path=%s error=%q", method, req.URL.EscapedPath(), err)
+		observability.ObserveUpstream("gitflame", "unreachable", started)
+		logger.Error("gitflame_http",
+			slog.String("event", "gitflame_http"), slog.String("method", method),
+			slog.String("path", req.URL.EscapedPath()), slog.String("error", err.Error()))
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=%s path=%s status=%d", method, req.URL.EscapedPath(), resp.StatusCode)
+	observability.ObserveUpstream("gitflame", observability.UpstreamOutcome(resp.StatusCode), started)
+	logger.Info("gitflame_http",
+		slog.String("event", "gitflame_http"), slog.String("method", method),
+		slog.String("path", req.URL.EscapedPath()), slog.Int("status", resp.StatusCode))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gitFlameHTTPError(resp)
 	}
@@ -966,13 +1039,22 @@ func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byt
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	observability.PropagateRequestID(ctx, req)
+	logger := observability.LoggerFromContext(ctx)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("gitflame_http method=GET path=%s error=%q", req.URL.EscapedPath(), err)
+		observability.ObserveUpstream("gitflame", "unreachable", started)
+		logger.Error("gitflame_http",
+			slog.String("event", "gitflame_http"), slog.String("method", http.MethodGet),
+			slog.String("path", req.URL.EscapedPath()), slog.String("error", err.Error()))
 		return nil, &IntegrationError{Status: http.StatusBadGateway, Code: "gitflame_unreachable", Detail: "GitFlame API is unreachable"}
 	}
 	defer resp.Body.Close()
-	log.Printf("gitflame_http method=GET path=%s status=%d", req.URL.EscapedPath(), resp.StatusCode)
+	observability.ObserveUpstream("gitflame", observability.UpstreamOutcome(resp.StatusCode), started)
+	logger.Info("gitflame_http",
+		slog.String("event", "gitflame_http"), slog.String("method", http.MethodGet),
+		slog.String("path", req.URL.EscapedPath()), slog.Int("status", resp.StatusCode))
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2_000_000))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &IntegrationError{Status: normalizeIntegrationStatus(resp.StatusCode), Code: "gitflame_api_error", Detail: fmt.Sprintf("GitFlame API returned status %d", resp.StatusCode)}

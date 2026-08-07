@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"gitflame-codepilot/backend/internal/agent"
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/queue"
 	"gitflame-codepilot/backend/internal/repository"
 )
@@ -147,10 +149,26 @@ func (w *Workflow) dispatch(job domain.AgentJob) error {
 	return nil
 }
 
-func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) error {
+// ExecuteTask runs one agent task. It is the single execution point for both
+// dispatch modes (inline in the backend, or in the worker), which makes it the
+// right place to measure task duration and outcome.
+func (w *Workflow) ExecuteTask(ctx context.Context, job domain.AgentJob) (err error) {
 	if w.generator == nil {
 		return errors.New("Agent Engine client is not configured")
 	}
+	started := time.Now()
+	taskType := job.Type
+	if taskType == "" {
+		taskType = "unknown"
+	}
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		observability.AgentTasksExecuted.Inc(taskType, outcome)
+		observability.AgentTaskDuration.Observe(time.Since(started).Seconds(), taskType)
+	}()
 	task, err := w.store.Task(job.TaskID)
 	if err != nil {
 		return err

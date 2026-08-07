@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/repository"
 )
 
@@ -43,11 +44,15 @@ func (c *RecommendationClient) AnalyzeRecommendations(ctx context.Context, repos
 		return "", nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	observability.PropagateRequestID(ctx, req)
+	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		observability.ObserveUpstream("recommendation_service", "unreachable", started)
 		return "", nil, &IntegrationError{Status: http.StatusBadGateway, Code: "recommendation_service_unreachable", Detail: "recommendation service is unreachable"}
 	}
 	defer resp.Body.Close()
+	observability.ObserveUpstream("recommendation_service", observability.UpstreamOutcome(resp.StatusCode), started)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var problem struct {
 			Detail string `json:"detail"`

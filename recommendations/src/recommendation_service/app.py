@@ -1,5 +1,12 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+
+from observability import (
+    ObservabilityMiddleware,
+    llm_operation_scope,
+    metrics_payload,
+    setup_logging,
+)
 
 from recommendation_service.analyzers import AnalyzerOrchestrator
 from recommendation_service.config import ConfigError
@@ -25,6 +32,7 @@ def create_app(
     model_client: RecommendationModelClient | None = None,
     analyzer_orchestrator: AnalyzerOrchestrator | None = None,
 ) -> FastAPI:
+    setup_logging("recommendation-service")
     resolved_settings = settings or Settings.from_env()
     resolved_client = model_client or RecommendationModelClient(resolved_settings)
     recommendation_service = RecommendationService(
@@ -37,6 +45,13 @@ def create_app(
         version="0.1.0",
         description="Real model-backed Sprint 1 recommendation service. No mock fallback.",
     )
+
+    app.add_middleware(ObservabilityMiddleware, service="recommendation-service")
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        body, content_type = metrics_payload()
+        return Response(content=body, media_type=content_type)
 
     @app.exception_handler(ConfigError)
     async def config_error_handler(_, exc: ConfigError) -> JSONResponse:
@@ -71,7 +86,8 @@ def create_app(
     )
     async def analyze(request: AnalyzeRequest) -> RecommendationResponse:
         try:
-            response, _ = await recommendation_service.analyze(request)
+            with llm_operation_scope("recommendations"):
+                response, _ = await recommendation_service.analyze(request)
             return response
         except ModelUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc

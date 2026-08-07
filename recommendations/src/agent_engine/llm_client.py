@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -7,6 +8,8 @@ import httpx
 
 from agent_engine.errors import EmptyModelOutputError, InferenceTimeoutError, ModelUnavailableError
 from agent_engine.settings import AgentSettings, ModelEndpoint
+from observability.context import current_llm_operation
+from observability.metrics import record_llm_result
 
 
 @dataclass(frozen=True)
@@ -75,8 +78,13 @@ class OpenAICompatibleClient:
         max_tokens: int | None = None,
         enable_thinking: bool | None = None,
     ) -> ChatCompletion:
+        # Every model call in both services goes through here, which makes this
+        # the one place that has to record model latency, outcome and tokens.
+        # The operation label comes from a context variable set by the endpoint.
+        operation = current_llm_operation()
         last_error: Exception | None = None
         for endpoint in self.endpoints:
+            started = time.perf_counter()
             try:
                 response = await self._complete_with_endpoint(
                     endpoint,
@@ -86,9 +94,30 @@ class OpenAICompatibleClient:
                     max_tokens=max_tokens,
                     enable_thinking=enable_thinking,
                 )
-                return replace(response, model=response.model or endpoint.model)
             except (ModelUnavailableError, InferenceTimeoutError) as exc:
+                record_llm_result(
+                    model=endpoint.model,
+                    operation=operation,
+                    outcome="timeout" if isinstance(exc, InferenceTimeoutError) else "unavailable",
+                    duration_seconds=time.perf_counter() - started,
+                )
                 last_error = exc
+                continue
+            except EmptyModelOutputError:
+                record_llm_result(
+                    model=endpoint.model, operation=operation, outcome="empty_output",
+                    duration_seconds=time.perf_counter() - started,
+                )
+                raise
+            record_llm_result(
+                model=endpoint.model,
+                operation=operation,
+                outcome="success",
+                duration_seconds=time.perf_counter() - started,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+            )
+            return replace(response, model=response.model or endpoint.model)
         assert last_error is not None
         raise last_error
 

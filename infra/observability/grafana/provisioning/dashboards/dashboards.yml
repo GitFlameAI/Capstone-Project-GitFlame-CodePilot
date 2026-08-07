@@ -1,0 +1,14 @@
+# Dashboards are provisioned from files, not stored in Grafana's database: the
+# dashboard lives in git and survives `docker compose down -v`.
+apiVersion: 1
+
+providers:
+  - name: codepilot
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

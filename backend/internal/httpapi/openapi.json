@@ -16,6 +16,65 @@
   ],
   "paths": {
     "/health": {"get": {"tags": ["health"], "summary": "Backend health check", "responses": {"200": {"description": "Healthy"}}}},
+    "/ops/status": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Operational status of the deployment",
+        "description": "Read-only aggregate for operators: build identity, dependency health, queue depth, task counts for the last 24 hours, connections by token status, and running indexing jobs. Requires an application session. Never returns prompts, generated code, repository contents or tokens.",
+        "responses": {
+          "200": {"description": "Operational status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OpsStatus"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/ops/tasks": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Recent agent tasks",
+        "description": "The most recent agent tasks, newest first. Summaries only: identifiers, status, attempt, model, error code and duration.",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["queued", "processing", "completed", "failed"]}}
+        ],
+        "responses": {
+          "200": {"description": "Task summaries", "content": {"application/json": {"schema": {"type": "object", "properties": {"count": {"type": "integer"}, "tasks": {"type": "array", "items": {"$ref": "#/components/schemas/OpsTaskSummary"}}}}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/ops/dead-letter": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Tasks that exhausted their retries",
+        "description": "Entries of the Redis dead-letter stream, newest first. The stored job payload is not returned: only the task identifier, type and the failure cause.",
+        "responses": {
+          "200": {"description": "Dead-letter entries", "content": {"application/json": {"schema": {"type": "object", "properties": {"count": {"type": "integer"}, "detail": {"type": "string"}, "entries": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "task_id": {"type": "string"}, "task_type": {"type": "string"}, "error": {"type": "string"}}}}}}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "503": {"description": "The queue is unavailable"}
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Prometheus metrics exposition",
+        "description": "Prometheus text format (version 0.0.4). Scraped over the internal Docker network; the public nginx route returns 404 for this path. The agent worker exposes the same endpoint on WORKER_METRICS_PORT (default 9100).",
+        "responses": {
+          "200": {"description": "Metrics exposition", "content": {"text/plain": {"schema": {"type": "string"}}}}
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Build identity of the running backend",
+        "description": "Version, git commit, build timestamp and Go version, injected at link time. Values are \"unknown\" when the binary was built without -ldflags.",
+        "responses": {
+          "200": {"description": "Build information", "content": {"application/json": {"schema": {"type": "object", "required": ["service", "version", "commit"], "properties": {"service": {"type": "string"}, "version": {"type": "string"}, "commit": {"type": "string"}, "build_time": {"type": "string"}, "go_version": {"type": "string"}}}}}}
+        }
+      }
+    },
     "/ready": {"get": {"tags": ["health"], "summary": "Check storage, Redis, and Agent Engine readiness", "responses": {"200": {"description": "All configured dependencies are ready"}, "503": {"description": "At least one dependency is unavailable"}}}},
     "/auth/gitflame/session": {
       "post": {
@@ -70,7 +129,7 @@
           {"name": "ref", "in": "query", "required": false, "schema": {"type": "string"}, "description": "Branch, tag, or commit. Defaults to the connection's default branch."}
         ],
         "responses": {
-          "200": {"description": "Repository tree", "content": {"application/json": {"schema": {"type": "object", "properties": {"repository_id": {"type": "string"}, "ref": {"type": "string"}, "tree": {"type": "array", "items": {"$ref": "#/components/schemas/GitFlameTreeEntry"}}}}}}},
+          "200": {"description": "Repository tree", "content": {"application/json": {"schema": {"type": "object", "properties": {"repository_id": {"type": "string"}, "ref": {"type": "string"}, "tree": {"type": "array", "items": {"$ref": "#/components/schemas/GitFlameTreeEntry"}}, "index": {"$ref": "#/components/schemas/RepositoryIndexJob"}}}}}},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "502": {"description": "GitFlame API error"}
@@ -104,6 +163,19 @@
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "502": {"description": "GitFlame API error"}
+        }
+      }
+    },
+    "/integrations/gitflame/connections/{id}/index": {
+      "get": {
+        "tags": ["integrations"],
+        "summary": "Read the state of background CodeRAG indexing for a connected repository",
+        "description": "Indexing starts in the background when a repository is connected, reconnected, browsed, or reconfigured, so those endpoints answer immediately. Endpoints that need the index (issue analysis, recommendation analysis) wait for the running job before queueing AI work.",
+        "parameters": [{"$ref": "#/components/parameters/ConnectionID"}],
+        "responses": {
+          "200": {"description": "Indexing job state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RepositoryIndexJob"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {"$ref": "#/components/responses/NotFound"}
         }
       }
     },
@@ -210,6 +282,9 @@
       "GitFlameConnectionRequest": {"type": "object", "required": ["access_token"], "properties": {"access_token": {"type": "string", "format": "password"}, "repository": {"$ref": "#/components/schemas/Repository"}, "repo_url": {"type": "string", "description": "GitFlame repository URL, for example https://gitflametest.ru/owner/repo/code. Required when repository.id is omitted."}, "default_branch": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string"}}, "token_expires_at": {"type": "string", "format": "date-time"}}},
       "GitFlameConnection": {"type": "object", "required": ["id", "user_id", "repository", "token_status"], "properties": {"id": {"type": "string"}, "user_id": {"type": "string"}, "repository": {"$ref": "#/components/schemas/Repository"}, "repo_url": {"type": "string"}, "default_branch": {"type": "string"}, "token_last4": {"type": "string"}, "token_status": {"type": "string", "enum": ["active", "invalid", "expired", "revoked", "reauth_required"]}, "scopes": {"type": "array", "items": {"type": "string"}}, "token_expires_at": {"type": "string", "format": "date-time"}, "last_validated_at": {"type": "string", "format": "date-time"}, "last_used_at": {"type": "string", "format": "date-time"}, "revoked_at": {"type": "string", "format": "date-time"}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
       "GitFlameTreeEntry": {"type": "object", "required": ["path", "type"], "properties": {"path": {"type": "string"}, "type": {"type": "string", "enum": ["file", "dir"]}}},
+      "OpsStatus": {"type": "object", "required": ["service", "status"], "properties": {"service": {"type": "string"}, "status": {"type": "string", "enum": ["ok", "degraded"]}, "build": {"type": "object", "properties": {"service": {"type": "string"}, "version": {"type": "string"}, "commit": {"type": "string"}, "build_time": {"type": "string"}, "go_version": {"type": "string"}}}, "dependencies": {"type": "array", "items": {"type": "object", "properties": {"component": {"type": "string"}, "status": {"type": "string", "enum": ["ok", "down"]}, "error": {"type": "string"}}}}, "queue": {"type": "object", "properties": {"stream": {"type": "integer"}, "pending": {"type": "integer"}, "dead_letter": {"type": "integer"}}}, "tasks_last_24h": {"type": "object", "additionalProperties": {"type": "integer"}}, "connections_by_token_status": {"type": "object", "additionalProperties": {"type": "integer"}}, "indexing": {"type": "object", "properties": {"running": {"type": "integer"}}}, "generated_at": {"type": "string", "format": "date-time"}, "warnings": {"type": "array", "items": {"type": "string"}}}},
+      "OpsTaskSummary": {"type": "object", "required": ["id", "task_type", "status"], "properties": {"id": {"type": "string"}, "session_id": {"type": "string"}, "task_type": {"type": "string"}, "status": {"type": "string"}, "attempt": {"type": "integer"}, "model": {"type": "string"}, "error_code": {"type": "string"}, "duration_ms": {"type": "integer"}, "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"}}},
+      "RepositoryIndexJob": {"type": "object", "required": ["repository_id", "status"], "properties": {"repository_id": {"type": "string"}, "connection_id": {"type": "string"}, "ref": {"type": "string"}, "commit_sha": {"type": "string"}, "status": {"type": "string", "enum": ["running", "completed", "failed", "idle", "disabled"], "description": "idle: no job has run in this backend process yet. disabled: RAG_BASE_URL is not configured."}, "error_code": {"type": "string"}, "error": {"type": "string"}, "file_count": {"type": "integer"}, "chunk_count": {"type": "integer"}, "embedding_count": {"type": "integer"}, "started_at": {"type": "string", "format": "date-time"}, "finished_at": {"type": "string", "format": "date-time"}, "duration_ms": {"type": "integer"}}},
       "Issue": {"type": "object", "required": ["id", "title", "body", "author"], "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "author": {"type": "string"}, "state": {"type": "string"}}},
       "WebhookRegistration": {"type": "object", "required": ["id", "connection_id", "webhook_url", "events", "status"], "properties": {"id": {"type": "string"}, "connection_id": {"type": "string"}, "webhook_url": {"type": "string", "format": "uri"}, "secret": {"type": "string", "description": "Returned only when enabled or rotated; store it in GitFlame immediately."}, "events": {"type": "array", "items": {"type": "string", "enum": ["push", "issues"]}}, "status": {"type": "string", "enum": ["active", "disabled"]}, "updated_at": {"type": "string", "format": "date-time"}}},
       "WebhookEvent": {"type": "object", "required": ["id", "webhook_id", "event_type", "status", "received_at"], "properties": {"id": {"type": "string"}, "webhook_id": {"type": "string"}, "event_type": {"type": "string", "enum": ["push", "issue", "unknown"]}, "action": {"type": "string"}, "delivery_id": {"type": "string"}, "repository_id": {"type": "string"}, "payload": {"type": "object", "additionalProperties": true}, "status": {"type": "string", "enum": ["received", "processed", "ignored", "failed"]}, "error": {"$ref": "#/components/schemas/TaskError"}, "received_at": {"type": "string", "format": "date-time"}, "processed_at": {"type": "string", "format": "date-time"}}},

@@ -93,10 +93,11 @@ func (s *Server) saveGitFlameConnection(w http.ResponseWriter, r *http.Request) 
 		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
-	if _, err := s.synchronizeRepositoryIndex(r.Context(), reader, saved, saved.DefaultBranch, "", false); err != nil {
-		integrationError(w, err, "rag_indexing_failed")
-		return
-	}
+	// Indexing is intentionally not awaited: the user is redirected into the
+	// workspace immediately and the index is ready (or waited for) by the time
+	// plan generation or recommendation analysis needs it. Progress is exposed
+	// by GET /integrations/gitflame/connections/{id}/index.
+	s.startRepositoryIndexInBackground(r.Context(), reader, saved, saved.DefaultBranch, false)
 	write(w, http.StatusCreated, saved)
 }
 
@@ -140,10 +141,10 @@ func (s *Server) reconnectGitFlameConnection(w http.ResponseWriter, r *http.Requ
 		integrationError(w, err, "gitflame_repository_error")
 		return
 	}
-	if _, err := s.synchronizeRepositoryIndex(r.Context(), reader, saved, saved.DefaultBranch, "", true); err != nil {
-		integrationError(w, err, "rag_indexing_failed")
-		return
-	}
+	// A reconnect can point at a different repository or a rotated token, so the
+	// index is rebuilt from scratch — in the background, for the same reason as
+	// in saveGitFlameConnection.
+	s.startRepositoryIndexInBackground(r.Context(), reader, saved, saved.DefaultBranch, true)
 	write(w, http.StatusOK, saved)
 }
 

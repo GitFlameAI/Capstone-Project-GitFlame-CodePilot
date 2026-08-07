@@ -12,13 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/service"
 )
@@ -178,13 +179,18 @@ func (s *Server) receiveGitFlameWebhook(w http.ResponseWriter, r *http.Request) 
 		problem(w, http.StatusInternalServerError, "storage_error", err.Error())
 		return
 	}
-	log.Printf("gitflame_webhook event_id=%s type=%s action=%s connection_id=%s", saved.ID, eventType, action, connection.ID)
+	observability.LoggerFromContext(r.Context()).Info("gitflame_webhook",
+		slog.String("event", "gitflame_webhook"), slog.String("event_id", saved.ID),
+		slog.String("event_type", eventType), slog.String("action", action),
+		slog.String("connection_id", connection.ID))
 	write(w, http.StatusAccepted, map[string]any{"status": "received", "event_id": saved.ID})
-	go s.processGitFlameWebhookEvent(*webhook, *connection, *saved)
+	// Webhook processing outlives the delivery request but keeps its request id.
+	go s.processGitFlameWebhookEvent(observability.RequestIDFromContext(r.Context()), *webhook, *connection, *saved)
 }
 
-func (s *Server) processGitFlameWebhookEvent(_ domain.GitFlameWebhookRegistration, connection domain.GitFlameConnection, event domain.GitFlameWebhookEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+func (s *Server) processGitFlameWebhookEvent(requestID string, _ domain.GitFlameWebhookRegistration, connection domain.GitFlameConnection, event domain.GitFlameWebhookEvent) {
+	ctx, cancel := context.WithTimeout(
+		observability.WithRequestID(context.Background(), requestID), 10*time.Minute)
 	defer cancel()
 	var err error
 	switch event.EventType {
@@ -201,12 +207,16 @@ func (s *Server) processGitFlameWebhookEvent(_ domain.GitFlameWebhookRegistratio
 	if err != nil {
 		event.Status = "failed"
 		event.Error = &domain.TaskError{HTTPStatus: http.StatusBadGateway, Code: "webhook_processing_failed", Detail: err.Error()}
-		log.Printf("gitflame_webhook event_id=%s status=failed error=%q", event.ID, err)
+		observability.LoggerFromContext(ctx).Error("gitflame_webhook",
+			slog.String("event", "gitflame_webhook"), slog.String("event_id", event.ID),
+			slog.String("status", "failed"), slog.String("error", err.Error()))
 	} else if event.Status == "received" {
 		event.Status = "processed"
 	}
 	if _, saveErr := s.store.SaveGitFlameWebhookEvent(event); saveErr != nil {
-		log.Printf("gitflame_webhook event_id=%s status_update_error=%q", event.ID, saveErr)
+		observability.LoggerFromContext(ctx).Error("gitflame_webhook_status_update",
+			slog.String("event", "gitflame_webhook_status_update"),
+			slog.String("event_id", event.ID), slog.String("error", saveErr.Error()))
 	}
 }
 

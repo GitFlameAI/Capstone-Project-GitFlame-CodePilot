@@ -1,5 +1,6 @@
 import logging
 
+from observability.metrics import observe_analyzer
 from recommendation_service.analyzers.common import AnalyzerContext, diagnostic
 from recommendation_service.analyzers.cpd import CpdAdapter
 from recommendation_service.analyzers.gitleaks import GitleaksAdapter
@@ -66,7 +67,8 @@ class AnalyzerOrchestrator:
                         )
                         continue
                     try:
-                        result = await adapter.run(self.runner, snapshot, context)
+                        with observe_analyzer(adapter.name):
+                            result = await adapter.run(self.runner, snapshot, context)
                     except FileNotFoundError:
                         result = None
                         diagnostics.append(

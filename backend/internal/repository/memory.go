@@ -36,6 +36,8 @@ type Store interface {
 	UserGitFlameConnectionByRepository(string, string) (*domain.GitFlameConnection, error)
 	RevokeGitFlameConnection(string, string) (*domain.GitFlameConnection, error)
 	TouchGitFlameConnection(string, string) error
+	ObservabilityCounts(context.Context) (ObservabilityCounts, error)
+	RecentAgentTasks(context.Context, RecentTasksQuery) ([]AgentTaskSummary, error)
 	SaveGitFlameWebhook(domain.GitFlameWebhookRegistration) (*domain.GitFlameWebhookRegistration, error)
 	GitFlameWebhook(string) (*domain.GitFlameWebhookRegistration, error)
 	GitFlameWebhookByConnection(string) (*domain.GitFlameWebhookRegistration, error)
@@ -584,3 +586,89 @@ func cloneSnapshot(v *domain.RepositorySnapshot) *domain.RepositorySnapshot {
 }
 
 func sessionKey(repositoryID, issueID string) string { return repositoryID + "\x00" + issueID }
+
+// ObservabilityCounts is the small aggregate the background metrics collector
+// needs. It is deliberately narrow: two counts, no rows, no payloads, so it can
+// run every 30 seconds without weighing on the database.
+type ObservabilityCounts struct {
+	ConnectionsByTokenStatus map[string]int
+	TasksByStatusLast24h     map[string]int
+}
+
+func (s *MemoryStore) ObservabilityCounts(context.Context) (ObservabilityCounts, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	counts := ObservabilityCounts{
+		ConnectionsByTokenStatus: map[string]int{},
+		TasksByStatusLast24h:     map[string]int{},
+	}
+	for _, connection := range s.connections {
+		status := connection.TokenStatus
+		if status == "" {
+			status = "unknown"
+		}
+		counts.ConnectionsByTokenStatus[status]++
+	}
+	threshold := time.Now().Add(-24 * time.Hour)
+	for _, task := range s.tasks {
+		if task.CreatedAt.Before(threshold) {
+			continue
+		}
+		counts.TasksByStatusLast24h[task.Status]++
+	}
+	return counts, nil
+}
+
+// RecentTasksQuery bounds the operational task list.
+type RecentTasksQuery struct {
+	Limit  int
+	Status string
+}
+
+// AgentTaskSummary is what /ops/tasks returns. It carries no prompts, no
+// generated code and no repository contents on purpose: an operator needs to
+// know what failed and how long it took, not what the model was asked.
+type AgentTaskSummary struct {
+	ID         string    `json:"id"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Type       string    `json:"task_type"`
+	Status     string    `json:"status"`
+	Attempt    int       `json:"attempt"`
+	Model      string    `json:"model,omitempty"`
+	ErrorCode  string    `json:"error_code,omitempty"`
+	DurationMS int64     `json:"duration_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (s *MemoryStore) RecentAgentTasks(_ context.Context, query RecentTasksQuery) ([]AgentTaskSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	summaries := make([]AgentTaskSummary, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		if query.Status != "" && task.Status != query.Status {
+			continue
+		}
+		summaries = append(summaries, summarizeTask(task))
+	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].CreatedAt.After(summaries[j].CreatedAt) })
+	if query.Limit > 0 && len(summaries) > query.Limit {
+		summaries = summaries[:query.Limit]
+	}
+	return summaries, nil
+}
+
+func summarizeTask(task *domain.AgentTask) AgentTaskSummary {
+	summary := AgentTaskSummary{
+		ID: task.ID, SessionID: task.SessionID, Type: task.Type, Status: task.Status,
+		Attempt: task.Attempt, Model: task.Model,
+		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+	}
+	if task.Error != nil {
+		summary.ErrorCode = task.Error.Code
+	}
+	if !task.UpdatedAt.IsZero() && !task.CreatedAt.IsZero() {
+		summary.DurationMS = task.UpdatedAt.Sub(task.CreatedAt).Milliseconds()
+	}
+	return summary
+}

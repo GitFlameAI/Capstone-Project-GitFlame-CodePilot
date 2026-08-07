@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
 
 	"gitflame-codepilot/backend/internal/domain"
+	"gitflame-codepilot/backend/internal/observability"
 	"gitflame-codepilot/backend/internal/repository"
 	"gitflame-codepilot/backend/internal/service"
 )
@@ -26,11 +27,15 @@ type gitFlameIndexReader interface {
 
 type repositoryIndexSync struct {
 	Result     RAGIndexResult
-	Tree       []GitFlameTreeEntry
 	YAMLConfig string
 	Files      []domain.RepositoryFile
 }
 
+// ensureRequestRepositoryIndex guarantees that the repository is indexed before
+// AI work is queued. Indexing usually already runs in the background (started
+// when the repository was connected or browsed), so the common path is a wait
+// on that job; only when no job exists, or the background job failed, does this
+// index the repository inline.
 func (s *Server) ensureRequestRepositoryIndex(
 	r *http.Request,
 	repositoryMetadata *domain.RepositoryMetadata,
@@ -42,6 +47,9 @@ func (s *Server) ensureRequestRepositoryIndex(
 	if err != nil {
 		return err
 	}
+	if err := s.awaitRepositoryIndexJob(r.Context(), repositoryMetadata.ID); err != nil {
+		return err
+	}
 	result, err := s.synchronizeRepositoryIndex(
 		r.Context(), reader, connection, repositoryMetadata.DefaultBranch,
 		repositoryMetadata.CommitSHA, false,
@@ -51,6 +59,97 @@ func (s *Server) ensureRequestRepositoryIndex(
 	}
 	if result.Result.CommitSHA != "" {
 		repositoryMetadata.CommitSHA = result.Result.CommitSHA
+	}
+	return nil
+}
+
+// startRepositoryIndexInBackground runs synchronizeRepositoryIndex in its own
+// goroutine and returns the job state immediately, so the caller can answer the
+// HTTP request without waiting for CodeRAG. A repository never has more than
+// one job in flight: concurrent callers observe the running one.
+//
+// The connection is copied because synchronizeRepositoryIndex updates the
+// resolved commit SHA on it, and the caller keeps using its own copy to build
+// the response.
+func (s *Server) startRepositoryIndexInBackground(
+	callerCtx context.Context,
+	reader GitFlameRepositoryReader,
+	connection *domain.GitFlameConnection,
+	ref string,
+	force bool,
+) indexJobStatus {
+	if s.indexer == nil {
+		return indexJobStatus{Status: indexStatusDisabled}
+	}
+	if connection == nil || strings.TrimSpace(connection.Repository.ID) == "" {
+		return indexJobStatus{Status: indexStatusDisabled}
+	}
+	if strings.TrimSpace(ref) == "" {
+		ref = connection.DefaultBranch
+	}
+	repositoryID := connection.Repository.ID
+	status, owned := s.indexJobs.begin(repositoryID, connection.ID, ref, force)
+	if !owned {
+		return status
+	}
+	snapshot := *connection
+	// The job outlives the request, so it gets a fresh context — but it keeps the
+	// caller's request id, which is what makes "connect repository" and the index
+	// job that it started greppable as one story.
+	requestID := observability.RequestIDFromContext(callerCtx)
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			observability.WithRequestID(context.Background(), requestID), s.indexBackgroundTimeout)
+		defer cancel()
+		result, err := s.synchronizeRepositoryIndex(ctx, reader, &snapshot, ref, "", force)
+		finished := s.indexJobs.finish(repositoryID, result.Result, err)
+		observability.RepositoryIndexDuration.Observe(float64(finished.DurationMS) / 1000)
+		logger := observability.LoggerFromContext(ctx)
+		if err != nil {
+			observability.RepositoryIndexJobs.Inc("failed")
+			logger.Error("rag_index_job",
+				slog.String("event", "rag_index_job"),
+				slog.String("repository_id", repositoryID), slog.String("ref", ref),
+				slog.String("status", indexStatusFailed),
+				slog.Int64("duration_ms", finished.DurationMS),
+				slog.String("error_code", finished.ErrorCode),
+				slog.String("error", finished.Error))
+			return
+		}
+		observability.RepositoryIndexJobs.Inc("completed")
+		logger.Info("rag_index_job",
+			slog.String("event", "rag_index_job"),
+			slog.String("repository_id", repositoryID), slog.String("ref", ref),
+			slog.String("status", indexStatusCompleted),
+			slog.Int64("duration_ms", finished.DurationMS),
+			slog.String("commit_sha", finished.CommitSHA),
+			slog.Int("files", finished.FileCount))
+	}()
+	return status
+}
+
+// awaitRepositoryIndexJob blocks while a background job for the repository is
+// still running. A failed background job is not an error here: the caller falls
+// through to inline indexing, which either succeeds or reports a fresh error.
+func (s *Server) awaitRepositoryIndexJob(ctx context.Context, repositoryID string) error {
+	status, known, err := s.indexJobs.wait(ctx, repositoryID, s.indexWaitTimeout)
+	if err != nil {
+		if errors.Is(err, errIndexWaitTimeout) {
+			return &IntegrationError{
+				Status: http.StatusServiceUnavailable,
+				Code:   "rag_indexing_in_progress",
+				Detail: "repository indexing is still running, retry in a few moments",
+			}
+		}
+		return err
+	}
+	if known && status.Status == indexStatusFailed {
+		observability.LoggerFromContext(ctx).Warn(
+			"rag_index_job_retry_inline",
+			slog.String("event", "rag_index_job_retry_inline"),
+			slog.String("repository_id", repositoryID),
+			slog.String("error_code", status.ErrorCode),
+		)
 	}
 	return nil
 }
@@ -158,12 +257,17 @@ func (s *Server) synchronizeRepositoryIndex(
 		FileCount:    len(files),
 		Status:       "indexed",
 	}, snapshotFiles)
-	log.Printf(
-		"rag_index repository_id=%s commit_sha=%s files=%d chunks=%d embeddings=%d status=%s",
-		connection.Repository.ID, commitSHA, result.FileCount, result.ChunkCount,
-		result.EmbeddingCount, result.Status,
+	observability.LoggerFromContext(ctx).Info(
+		"rag_index",
+		slog.String("event", "rag_index"),
+		slog.String("repository_id", connection.Repository.ID),
+		slog.String("commit_sha", commitSHA),
+		slog.Int("files", result.FileCount),
+		slog.Int("chunks", result.ChunkCount),
+		slog.Int("embeddings", result.EmbeddingCount),
+		slog.String("status", result.Status),
 	)
-	return repositoryIndexSync{Result: result, Tree: tree, YAMLConfig: yamlConfig, Files: files}, nil
+	return repositoryIndexSync{Result: result, YAMLConfig: yamlConfig, Files: files}, nil
 }
 
 func snapshotRevision(files []domain.RepositoryFile) string {
