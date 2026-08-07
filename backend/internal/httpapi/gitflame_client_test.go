@@ -66,3 +66,34 @@ func TestRepositoryFilesForIndexFetchesConcurrentlyAndPreservesOrder(t *testing.
 		}
 	}
 }
+
+func TestRepositoryFilesForIndexSkipsBinaryPathsAndContents(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/bad.dat"):
+			_, _ = w.Write([]byte{'t', 'e', 'x', 't', 0, 'd', 'a', 't', 'a'})
+		default:
+			_, _ = fmt.Fprint(w, "package main")
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitFlameClient(server.URL, "token", time.Second)
+	requested := []domain.RepositoryFile{
+		{Path: "main.go", Type: "file"},
+		{Path: "proof.png", Type: "file"},
+		{Path: "bad.dat", Type: "file"},
+	}
+
+	_, files, err := client.RepositoryFilesForIndex(
+		context.Background(), "acme/project", "main", defaultIndexConfiguration, requested,
+	)
+	if err != nil {
+		t.Fatalf("RepositoryFilesForIndex returned error: %v", err)
+	}
+	if len(files) != 1 || files[0].Path != "main.go" {
+		t.Fatalf("files = %#v, want only main.go", files)
+	}
+}

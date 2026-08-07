@@ -87,8 +87,8 @@ services:
       RECOMMENDATION_SERVICE_TIMEOUT_SECONDS: ${RECOMMENDATION_SERVICE_TIMEOUT_SECONDS:-120}
       RAG_BASE_URL: ${RAG_BASE_URL:-http://${RAG_SERVICE_HOST:-rag-service}:${RAG_INTERNAL_PORT:-8004}}
       RAG_API_KEY: ${RAG_API_KEY:-}
-      RAG_INDEX_TIMEOUT_SECONDS: ${RAG_INDEX_TIMEOUT_SECONDS:-600}
-      RAG_INDEX_WAIT_TIMEOUT_SECONDS: ${RAG_INDEX_WAIT_TIMEOUT_SECONDS:-600}
+      RAG_INDEX_TIMEOUT_SECONDS: ${RAG_INDEX_TIMEOUT_SECONDS:-1800}
+      RAG_INDEX_WAIT_TIMEOUT_SECONDS: ${RAG_INDEX_WAIT_TIMEOUT_SECONDS:-1800}
     depends_on:
       database:
         condition: service_healthy
@@ -243,9 +243,13 @@ services:
     environment:
       PORT: ${RAG_INTERNAL_PORT:-8004}
       DATABASE_URL: postgresql+psycopg://${CODERAG_DB_USER:-gitflame}:${CODERAG_DB_PASSWORD:-gitflame}@${CODERAG_DATABASE_HOST:-coderag-database}:${CODERAG_DB_INTERNAL_PORT:-5432}/${CODERAG_DB_NAME:-gitflame_coderag}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-jinaai/jina-embeddings-v2-base-code}
+      # CPU-friendly local default. Production/GPU deployments can override this
+      # with jinaai/jina-embeddings-v2-base-code.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       RAG_API_KEY: ${RAG_API_KEY:-}
       RAG_USE_DENSE: ${RAG_USE_DENSE:-true}
+      RAG_MAX_INDEX_FILE_BYTES: ${RAG_MAX_INDEX_FILE_BYTES:-500000}
+      RAG_MAX_INDEX_PAYLOAD_BYTES: ${RAG_MAX_INDEX_PAYLOAD_BYTES:-20000000}
       RAG_CANDIDATE_TOP_K: ${RAG_CANDIDATE_TOP_K:-50}
       RAG_MIN_RELEVANCE_SCORE: ${RAG_MIN_RELEVANCE_SCORE:-}
       RAG_MAX_CONTEXT_FILES: ${RAG_MAX_CONTEXT_FILES:-20}

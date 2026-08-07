@@ -1,3 +1,4 @@
+import importlib
 import json
 import logging
 
@@ -52,6 +53,37 @@ def test_setup_logging_is_idempotent():
     # Two applications built in one process (as the tests do) must not produce
     # duplicated log lines.
     assert len(logging.getLogger().handlers) == 1
+
+
+@pytest.mark.parametrize(
+    ("module_name", "app_path", "default_port"),
+    [
+        ("agent_engine.app", "agent_engine.app:app", 8001),
+        ("recommendation_service.app", "recommendation_service.app:app", 8000),
+    ],
+)
+def test_service_runner_keeps_uvicorn_on_structured_logging(
+    monkeypatch, module_name, app_path, default_port
+):
+    module = importlib.import_module(module_name)
+    captured = {}
+
+    def fake_run(app, **kwargs):
+        captured["app"] = app
+        captured.update(kwargs)
+
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    module.run()
+
+    assert captured == {
+        "app": app_path,
+        "host": "0.0.0.0",
+        "port": default_port,
+        "log_config": None,
+        "access_log": False,
+    }
 
 
 @pytest.mark.parametrize(

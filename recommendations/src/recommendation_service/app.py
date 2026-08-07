@@ -107,4 +107,10 @@ def run() -> None:
 
     import uvicorn
 
-    uvicorn.run("recommendation_service.app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    uvicorn.run(
+        "recommendation_service.app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        log_config=None,
+        access_log=False,
+    )

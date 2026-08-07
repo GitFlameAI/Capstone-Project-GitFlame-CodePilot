@@ -241,10 +241,27 @@ func (w *Workflow) executeCodeGenerationTask(ctx context.Context, task *domain.A
 		_ = w.failTask(job.TaskID, err)
 		return err
 	}
-	result.Files = DropUnsafePartialModifyFiles(
-		DropNoopGeneratedFiles(NormalizeGeneratedFiles(result.Files), request.RepositoryFiles),
-		request.RepositoryFiles,
-	)
+	result.Files = NormalizeGeneratedFiles(result.Files)
+	withoutNoops := DropNoopGeneratedFiles(result.Files, request.RepositoryFiles)
+	if len(result.Files) > 0 && len(withoutNoops) == 0 {
+		invalid := &agent.Error{
+			Status: http.StatusUnprocessableEntity,
+			Code:   "invalid_generated_files",
+			Detail: "Agent Engine returned only unchanged modify operations",
+		}
+		_ = w.failTask(job.TaskID, invalid)
+		return invalid
+	}
+	result.Files = DropUnsafePartialModifyFiles(withoutNoops, request.RepositoryFiles)
+	if len(withoutNoops) > 0 && len(result.Files) == 0 {
+		invalid := &agent.Error{
+			Status: http.StatusUnprocessableEntity,
+			Code:   "invalid_generated_files",
+			Detail: "Agent Engine returned only incomplete modify operations",
+		}
+		_ = w.failTask(job.TaskID, invalid)
+		return invalid
+	}
 	if err := ValidateGeneratedFiles(result.Files, request.RepositoryFiles); err != nil {
 		invalid := &agent.Error{Status: http.StatusUnprocessableEntity, Code: "invalid_generated_files", Detail: err.Error()}
 		_ = w.failTask(job.TaskID, invalid)
@@ -505,7 +522,18 @@ func validateRepositoryFiles(files []domain.RepositoryFile) error {
 }
 
 func ValidateRepositoryFilesForIntegration(files []domain.RepositoryFile) error {
-	return validateRepositoryFiles(files)
+	if err := validateRepositoryFiles(files); err != nil {
+		return err
+	}
+	const maxIndexPayloadBytes = 20_000_000
+	totalBytes := 0
+	for _, file := range files {
+		totalBytes += len(file.Content)
+		if totalBytes > maxIndexPayloadBytes {
+			return fmt.Errorf("repository index payload exceeds %d bytes", maxIndexPayloadBytes)
+		}
+	}
+	return nil
 }
 
 func NormalizeGeneratedFiles(files []domain.GeneratedFileOperation) []domain.GeneratedFileOperation {

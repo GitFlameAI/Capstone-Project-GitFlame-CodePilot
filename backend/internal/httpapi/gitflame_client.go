@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gitflame-codepilot/backend/internal/domain"
 	"gitflame-codepilot/backend/internal/observability"
@@ -29,6 +30,18 @@ type GitFlameClient struct {
 }
 
 const gitFlameFileFetchConcurrency = 8
+
+var nonIndexableRepositoryExtensions = map[string]struct{}{
+	".7z": {}, ".avi": {}, ".bin": {}, ".bmp": {}, ".bz2": {}, ".class": {},
+	".db": {}, ".dll": {}, ".dmg": {}, ".doc": {}, ".docx": {}, ".eot": {},
+	".exe": {}, ".gif": {}, ".gz": {}, ".ico": {}, ".jar": {}, ".jpeg": {},
+	".jpg": {}, ".lockb": {}, ".mov": {}, ".mp3": {}, ".mp4": {}, ".npy": {},
+	".npz": {}, ".otf": {}, ".parquet": {}, ".pdf": {}, ".pickle": {}, ".pkl": {},
+	".png": {}, ".ppt": {}, ".pptx": {}, ".pyc": {}, ".so": {}, ".sqlite": {},
+	".sqlite3": {}, ".tar": {}, ".tiff": {}, ".ttf": {}, ".wav": {}, ".webm": {},
+	".webp": {}, ".woff": {}, ".woff2": {}, ".xls": {}, ".xlsx": {}, ".xz": {},
+	".zip": {},
+}
 
 type gitFlameCommitAction struct {
 	Action   string `json:"action"`
@@ -573,7 +586,7 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 				continue
 			}
 			file.Path = normalizeRepositoryPath(file.Path)
-			if file.Path == "" || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
+			if file.Path == "" || !repositoryPathIsIndexableText(file.Path) || !matchesRepositoryRules(file.Path, cfg.IncludePatterns, cfg.ExcludePatterns) {
 				continue
 			}
 			file.Type = ""
@@ -582,7 +595,7 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 		if err := c.fetchRepositoryFileContents(ctx, repositoryID, ref, files); err != nil {
 			return "", nil, err
 		}
-		return yamlConfig, files, nil
+		return yamlConfig, filterIndexableRepositoryContents(files), nil
 	}
 
 	tree, err := c.fetchTree(ctx, repositoryID, ref)
@@ -598,7 +611,7 @@ func (c *GitFlameClient) repositoryFiles(ctx context.Context, repositoryID, ref,
 			continue
 		}
 		filePath := normalizeRepositoryPath(entry.Path)
-		if !matchesRepositoryRules(filePath, cfg.IncludePatterns, cfg.ExcludePatterns) {
+		if !repositoryPathIsIndexableText(filePath) || !matchesRepositoryRules(filePath, cfg.IncludePatterns, cfg.ExcludePatterns) {
 			continue
 		}
 		content, err := c.fetchFileContent(ctx, repositoryID, filePath, ref)
@@ -685,6 +698,22 @@ func repositoryFileIsReadable(fileType string) bool {
 	default:
 		return false
 	}
+}
+
+func repositoryPathIsIndexableText(filePath string) bool {
+	_, excluded := nonIndexableRepositoryExtensions[strings.ToLower(filepath.Ext(filePath))]
+	return !excluded
+}
+
+func filterIndexableRepositoryContents(files []domain.RepositoryFile) []domain.RepositoryFile {
+	filtered := make([]domain.RepositoryFile, 0, len(files))
+	for _, file := range files {
+		if !utf8.ValidString(file.Content) || strings.IndexByte(file.Content, 0) >= 0 {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
 }
 
 func (c *GitFlameClient) RepositoryTree(ctx context.Context, repositoryID, ref string) ([]GitFlameTreeEntry, error) {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -13,11 +14,7 @@ import (
 )
 
 func TestRecommendationClientSendsRepositoryRevision(t *testing.T) {
-	var payload struct {
-		Repository  domain.RepositoryMetadata `json:"repository"`
-		ConfigYAML  string                    `json:"config_yaml"`
-		RepoContext []domain.RepositoryFile   `json:"repo_context"`
-	}
+	var payload recommendationAnalyzePayload
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -32,12 +29,15 @@ func TestRecommendationClientSendsRepositoryRevision(t *testing.T) {
 
 	client := NewRecommendationClient("http://recommendation-service", time.Second)
 	client.httpClient.Transport = transport
-	repository := domain.RepositoryMetadata{ID: "owner/repository", CommitSHA: "abc123"}
+	repository := domain.RepositoryMetadata{
+		ID: "owner/repository", Name: "repository", DefaultBranch: "main",
+		CommitSHA: "abc123", WebURL: "https://gitflame.test/owner/repository",
+	}
 	_, _, err := client.AnalyzeRecommendations(
 		context.Background(),
 		repository,
 		"version: 1",
-		[]domain.RepositoryFile{{Path: "src/app.py", Content: "package app\n"}},
+		[]domain.RepositoryFile{{Path: "src/app.py", Content: "package app\n", Type: "file"}},
 	)
 	if err != nil {
 		t.Fatalf("AnalyzeRecommendations returned error: %v", err)
@@ -47,6 +47,39 @@ func TestRecommendationClientSendsRepositoryRevision(t *testing.T) {
 	}
 	if len(payload.RepoContext) != 1 || payload.RepoContext[0].Path != "src/app.py" {
 		t.Fatalf("unexpected repository files: %+v", payload.RepoContext)
+	}
+}
+
+func TestRecommendationClientFormatsFastAPIValidationErrors(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnprocessableEntity,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"detail":[
+					{"loc":["body","repository","commit_sha"],"msg":"Field required"},
+					{"loc":["body","repo_context",0,"type"],"msg":"Extra inputs are not permitted"}
+				]
+			}`)),
+			Request: r,
+		}, nil
+	})
+
+	client := NewRecommendationClient("http://recommendation-service", time.Second)
+	client.httpClient.Transport = transport
+	_, _, err := client.AnalyzeRecommendations(
+		context.Background(),
+		domain.RepositoryMetadata{ID: "owner/repository", CommitSHA: "abc123"},
+		"version: 1",
+		[]domain.RepositoryFile{{Path: "src/app.py", Content: "package app\n"}},
+	)
+	var integrationError *IntegrationError
+	if !errors.As(err, &integrationError) {
+		t.Fatalf("expected IntegrationError, got %T: %v", err, err)
+	}
+	want := "repository.commit_sha: Field required; repo_context.0.type: Extra inputs are not permitted"
+	if integrationError.Detail != want {
+		t.Fatalf("unexpected validation detail: %q", integrationError.Detail)
 	}
 }
 

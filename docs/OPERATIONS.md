@@ -126,7 +126,7 @@ button: replaying a task whose cause has not been fixed just burns model budget.
 
 **This is by design.** Repository indexing runs in the background so the user is
 not blocked on the connect screen. The first plan request waits for that
-indexing job to finish (up to `RAG_INDEX_WAIT_TIMEOUT_SECONDS`, default 600).
+indexing job to finish (up to `RAG_INDEX_WAIT_TIMEOUT_SECONDS`, default 1800).
 
 Check progress: `GET /integrations/gitflame/connections/{id}/index`, or the
 "Indexing jobs running" tile on `/ops`.
@@ -236,8 +236,11 @@ users; there is no re-encryption tool.
   finishes in-flight requests and waits up to 30 s for background indexing; the
   worker lets the task it is currently running finish. A task that takes longer
   than the `stop_grace_period` in `docker-compose.yml` is killed, and because it
-  was never acknowledged it stays in the Redis pending list and is not
-  redelivered automatically. If that happens, the user has to re-run the action.
+  was never acknowledged it stays in the Redis pending list. A replacement
+  worker reclaims pending tasks after 60 s of idle time with `XAUTOCLAIM`, so the
+  task is processed again automatically. The operation must therefore remain
+  idempotent: the killed worker may already have completed part of the external
+  work before it lost the chance to acknowledge the message.
 - **CodeRAG is a git submodule** (`coderag/`). Clone with
   `git clone --recurse-submodules`, or run `git submodule update --init` after
   cloning, otherwise the RAG image cannot be built.

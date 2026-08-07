@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -114,6 +115,14 @@ func (c *RAGClient) request(ctx context.Context, method, endpoint string, payloa
 	started := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			observability.ObserveUpstream("rag", "timeout", started)
+			return &IntegrationError{
+				Status: http.StatusGatewayTimeout,
+				Code:   "rag_index_timeout",
+				Detail: "CodeRAG indexing exceeded the configured timeout",
+			}
+		}
 		observability.ObserveUpstream("rag", "unreachable", started)
 		return &IntegrationError{Status: http.StatusServiceUnavailable, Code: "rag_unreachable", Detail: "CodeRAG service is unreachable"}
 	}

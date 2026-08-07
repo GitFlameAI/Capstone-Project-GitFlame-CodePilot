@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -300,7 +301,13 @@ class AgentEngineService:
             reasoning_chars += len(completion.reasoning)
             model = completion.model or model
             try:
-                content = _normalize_plain_file_content(completion.content)
+                had_markdown_fence = "```" in completion.content
+                content = _normalize_plain_file_content(path, completion.content)
+                if had_markdown_fence:
+                    logger.info(
+                        "stripped one outer Markdown fence from generated file %s",
+                        path,
+                    )
                 if action == "modify":
                     _validate_modify_content_shape(path, content, original or "")
                 _validate_plain_source_syntax(path, content)
@@ -764,6 +771,11 @@ def _merge_explanation(previous: str, current: str) -> str:
 def _validate_modify_content_shape(path: str, generated: str, original: str) -> None:
     generated = _normalize_content(generated)
     original = _normalize_content(original)
+    if generated == original:
+        raise InvalidGeneratedFilesError(
+            f"modify content for {path} is unchanged from the original file; "
+            "apply the approved plan instead of returning a no-op"
+        )
     generated_lines = _meaningful_lines(generated)
     original_lines = _meaningful_lines(original)
     if len(original_lines) >= 3 and len(generated_lines) <= 1:
@@ -781,15 +793,66 @@ def _validate_modify_content_shape(path: str, generated: str, original: str) -> 
         )
 
 
-def _normalize_plain_file_content(value: str) -> str:
+_FENCE_LANGUAGES = {
+    ".go": {"go", "golang"},
+    ".java": {"java"},
+    ".js": {"js", "javascript"},
+    ".jsx": {"jsx", "javascript", "javascriptreact"},
+    ".json": {"json"},
+    ".kt": {"kotlin", "kt"},
+    ".php": {"php"},
+    ".py": {"py", "python"},
+    ".rb": {"rb", "ruby"},
+    ".rs": {"rs", "rust"},
+    ".sh": {"bash", "sh", "shell"},
+    ".sql": {"sql"},
+    ".ts": {"ts", "typescript"},
+    ".tsx": {"tsx", "typescript", "typescriptreact"},
+    ".xml": {"xml"},
+    ".yaml": {"yaml", "yml"},
+    ".yml": {"yaml", "yml"},
+}
+
+
+def _normalize_plain_file_content(path: str, value: str) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
     if not normalized.strip():
         raise InvalidGeneratedFilesError("model returned empty file content")
-    if "```" in normalized:
+    if "```" not in normalized:
+        return normalized.rstrip() + "\n"
+
+    candidate = normalized.strip()
+    lines = candidate.split("\n")
+    if len(lines) < 3 or not lines[0].startswith("```") or lines[-1] != "```":
         raise InvalidGeneratedFilesError(
             "model returned Markdown fences instead of plain file content"
         )
-    return normalized.rstrip() + "\n"
+    opening = lines[0]
+    language = opening[3:].strip().lower()
+    if " " in language or "\t" in language or "`" in language:
+        raise InvalidGeneratedFilesError(
+            "model returned an unsupported Markdown fence declaration"
+        )
+    inner = "\n".join(lines[1:-1])
+    if "```" in inner:
+        raise InvalidGeneratedFilesError(
+            "model returned nested or ambiguous Markdown fences"
+        )
+    if language and not _fence_language_matches_path(path, language):
+        raise InvalidGeneratedFilesError(
+            f"model returned a {language} Markdown fence for {path}"
+        )
+    if not inner.strip():
+        raise InvalidGeneratedFilesError("model returned empty file content")
+    return inner.rstrip() + "\n"
+
+
+def _fence_language_matches_path(path: str, language: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    allowed = _FENCE_LANGUAGES.get(suffix)
+    if allowed is not None:
+        return language in allowed
+    return language == suffix.removeprefix(".")
 
 
 def _validate_plain_source_syntax(path: str, content: str) -> None:

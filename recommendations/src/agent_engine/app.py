@@ -152,4 +152,13 @@ def run() -> None:
 
     import uvicorn
 
-    uvicorn.run("agent_engine.app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))
+    # setup_logging() already owns the process-wide handlers. Letting Uvicorn
+    # install its default log config here would add a second, plain-text access
+    # line next to every structured http_request event.
+    uvicorn.run(
+        "agent_engine.app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8001)),
+        log_config=None,
+        access_log=False,
+    )

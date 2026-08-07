@@ -6,8 +6,10 @@
 # infra/observability/alerts.yml is enough. This file exists so the stack can
 # also be demonstrated and used standalone:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.dependencies.yml \
-#     -f backend/deploy/docker-compose.full.yml -f docker-compose.observability.yml \
+#   make observability
+#
+# Or, without Make:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml \
 #     --profile observability up -d
 #
 # Grafana: http://localhost:3000 (admin / the value of GRAFANA_PASSWORD)

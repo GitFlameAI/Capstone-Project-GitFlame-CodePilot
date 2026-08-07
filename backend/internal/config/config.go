@@ -33,7 +33,7 @@ func Load() Config {
 	}
 	gitFlameSeconds := positiveInt("GITFLAME_TIMEOUT_SECONDS", 30)
 	recommendationSeconds := positiveInt("RECOMMENDATION_SERVICE_TIMEOUT_SECONDS", 120)
-	ragIndexSeconds := positiveInt("RAG_INDEX_TIMEOUT_SECONDS", 600)
+	ragIndexSeconds := positiveInt("RAG_INDEX_TIMEOUT_SECONDS", 1800)
 	ragIndexWaitSeconds := positiveInt("RAG_INDEX_WAIT_TIMEOUT_SECONDS", ragIndexSeconds)
 	queueMaxLength := positiveInt("AGENT_QUEUE_MAX_LENGTH", 1000)
 	workerMaxRetries := positiveInt("WORKER_MAX_RETRIES", 3)

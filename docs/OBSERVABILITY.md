@@ -251,11 +251,13 @@ configuration.
 Verify the rules before shipping them:
 
 ```bash
-docker run --rm -v "$PWD/infra/observability:/rules" prom/prometheus:v2.55.1 \
-  promtool check rules /rules/alerts.yml
+docker run --rm --entrypoint promtool \
+  -v "$PWD/infra/observability:/rules" prom/prometheus:v2.55.1 \
+  check rules /rules/alerts.yml
 
-docker run --rm -v "$PWD/infra/observability:/rules" prom/prometheus:v2.55.1 \
-  promtool test rules /rules/tests/alerts_test.yml
+docker run --rm --entrypoint promtool \
+  -v "$PWD/infra/observability:/rules" prom/prometheus:v2.55.1 \
+  test rules /rules/tests/alerts_test.yml
 ```
 
 ### Shipped alerts
@@ -288,8 +290,11 @@ that fails to parse would take the profile down.
 | `LOG_LEVEL` | `info` | log verbosity, all services |
 | `LOG_FORMAT` | `json` | `json` or `text`, Go and Python services |
 | `WORKER_METRICS_PORT` | `9100` | the worker's metrics/health port |
-| `RAG_INDEX_TIMEOUT_SECONDS` | `600` | bounds one background indexing job |
-| `RAG_INDEX_WAIT_TIMEOUT_SECONDS` | `600` | how long a request waits for a running indexing job before returning `503 rag_indexing_in_progress` |
+| `RAG_INDEX_TIMEOUT_SECONDS` | `1800` | bounds one background indexing job |
+| `RAG_INDEX_WAIT_TIMEOUT_SECONDS` | `1800` | how long a request waits for a running indexing job before returning `503 rag_indexing_in_progress` |
+| `RAG_MAX_INDEX_FILE_BYTES` | `500000` | skips oversized files before chunking |
+| `RAG_MAX_INDEX_PAYLOAD_BYTES` | `20000000` | rejects an indexing payload whose selected text exceeds this many bytes |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | CPU-friendly local default; override with the Jina code model on GPU deployments |
 | `PROMETHEUS_PORT` | `9090` | observability profile only |
 | `PROMETHEUS_RETENTION` | `15d` | observability profile only |
 | `GRAFANA_PORT` | `3000` | observability profile only |

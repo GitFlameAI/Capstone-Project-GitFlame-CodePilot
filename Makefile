@@ -7,7 +7,7 @@
 #   make trace ID=…  follow one request across every service
 
 COMPOSE ?= docker compose
-OBSERVABILITY_FILES = -f docker-compose.yml -f docker-compose.observability.yml
+STACK_FILES = -f docker-compose.yml -f docker-compose.observability.yml
 
 export VERSION      ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 export GIT_COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -22,7 +22,7 @@ build: ## Build every image, stamping the git commit into /version
 	$(COMPOSE) build
 
 up: ## Build and start the whole stack
-	$(COMPOSE) up -d --build
+	$(COMPOSE) $(STACK_FILES) up -d --build --remove-orphans
 	@echo "frontend: http://localhost:$${FRONTEND_PORT:-80}   ops: http://localhost:$${FRONTEND_PORT:-80}/ops"
 
 down: ## Stop the stack (volumes are kept)
@@ -46,17 +46,17 @@ trace: ## Follow one request across all services: make trace ID=<request_id>
 	$(COMPOSE) logs --since 24h | grep "$(ID)"
 
 observability: ## Start Prometheus, Alertmanager and Grafana (opt-in)
-	$(COMPOSE) $(OBSERVABILITY_FILES) --profile observability up -d
+	$(COMPOSE) $(STACK_FILES) --profile observability up -d
 	@echo "grafana: http://localhost:$${GRAFANA_PORT:-3000}   prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}"
 
 observability-down: ## Stop the monitoring stack only
-	$(COMPOSE) $(OBSERVABILITY_FILES) --profile observability stop prometheus alertmanager grafana
+	$(COMPOSE) $(STACK_FILES) --profile observability stop prometheus alertmanager grafana
 
 check-alerts: ## Validate the alerting rules and run their unit tests
-	docker run --rm -v "$(PWD)/infra/observability:/rules" prom/prometheus:v2.55.1 \
-		promtool check rules /rules/alerts.yml
-	docker run --rm -v "$(PWD)/infra/observability:/rules" prom/prometheus:v2.55.1 \
-		promtool test rules /rules/tests/alerts_test.yml
+	docker run --rm --entrypoint promtool -v "$(PWD)/infra/observability:/rules" prom/prometheus:v2.55.1 \
+		check rules /rules/alerts.yml
+	docker run --rm --entrypoint promtool -v "$(PWD)/infra/observability:/rules" prom/prometheus:v2.55.1 \
+		test rules /rules/tests/alerts_test.yml
 
 test: ## Run the backend, Python and frontend test suites
 	cd backend && gofmt -l internal cmd && go vet ./... && go test -race ./...
