@@ -44,6 +44,8 @@ def build_analysis_prompt(
         "- Each finding must reference an exact supplied file path and an exact "
         "numbered source line.",
         "- Every recommendation must be grounded in exactly one deterministic analyzer finding.",
+        "- Copy finding_fingerprint exactly from that analyzer finding's fingerprint field.",
+        "- Return at most one recommendation for each finding_fingerprint.",
         "- Do not create a recommendation for a concern that is absent from ANALYZER FINDINGS.",
         "- Each recommendation must belong to one of the allowed categories.",
         "- Each recommendation must explain a concrete problem and a concrete suggestion.",
@@ -54,6 +56,7 @@ def build_analysis_prompt(
         "- The summary must still be present even when recommendations is empty.",
         "",
         "RECOMMENDATION CARD FIELDS",
+        "- finding_fingerprint: exact 64-character fingerprint from ANALYZER FINDINGS.",
         "- severity: low, medium, or high.",
         "- category: one of the allowed categories.",
         "- file: exact supplied repository-relative file path.",
@@ -79,6 +82,7 @@ def build_analysis_prompt(
                     "message": finding.message,
                     "evidence": finding.evidence,
                     "related_files": finding.related_files,
+                    "fingerprint": finding.fingerprint,
                 }
                 for finding in findings
             ],

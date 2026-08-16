@@ -9,7 +9,7 @@ from recommendation_service.analyzers.orchestrator import AnalyzerOrchestrator
 from recommendation_service.analyzers.osv import OsvScannerAdapter
 from recommendation_service.analyzers.runner import AnalyzerRunner
 from recommendation_service.analyzers.semgrep import SemgrepAdapter
-from recommendation_service.findings import build_finding
+from recommendation_service.findings import build_finding, finding_fingerprint
 from recommendation_service.model_client import InferenceMetrics
 from recommendation_service.models import (
     AnalyzeRequest,
@@ -284,9 +284,20 @@ class FakeAnalyzerOrchestrator:
         )
 
 
+GITLEAKS_FINDING_FINGERPRINT = finding_fingerprint(
+    repository_id="owner/repo",
+    tool="gitleaks",
+    rule_id="generic-api-key",
+    file=".env",
+    start_line=1,
+    end_line=1,
+)
+
+
 class GroundedRecommendationModel:
-    def __init__(self):
+    def __init__(self, recommendation_count=1):
         self.prompt = ""
+        self.recommendation_count = recommendation_count
 
     async def analyze(self, *, system_prompt, user_prompt, response_schema):
         self.prompt = user_prompt
@@ -295,6 +306,7 @@ class GroundedRecommendationModel:
                 summary="One deterministic security finding.",
                 recommendations=[
                     Recommendation(
+                        finding_fingerprint=GITLEAKS_FINDING_FINGERPRINT,
                         severity=Severity.HIGH,
                         category=Category.SECURITY,
                         file=".env",
@@ -303,6 +315,7 @@ class GroundedRecommendationModel:
                         suggestion="Rotate it and load it from a secret store.",
                         confidence=1.0,
                     )
+                    for _ in range(self.recommendation_count)
                 ],
             ),
             InferenceMetrics(),
@@ -332,6 +345,28 @@ class AnalyzerRecommendationIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[REDACTED SECRET]", model.prompt)
         self.assertNotIn("do-not-send-this", model.prompt)
         self.assertIn("generic-api-key", model.prompt)
+
+    async def test_duplicate_model_cards_for_one_finding_are_collapsed(self):
+        model = GroundedRecommendationModel(recommendation_count=2)
+        service = RecommendationService(
+            model,
+            analyzer_orchestrator=FakeAnalyzerOrchestrator(),
+        )
+        request = AnalyzeRequest.model_validate(
+            {
+                "repository": {"id": "owner/repo", "commit_sha": "abc123"},
+                "config_yaml": "version: 1\nrecommendations:\n  categories: [security]\n",
+                "repo_context": [{"path": ".env", "content": "TOKEN=redacted\n"}],
+            }
+        )
+
+        response, _ = await service.analyze(request)
+
+        self.assertEqual(len(response.recommendations), 1)
+        self.assertEqual(
+            response.recommendations[0].finding_fingerprint,
+            GITLEAKS_FINDING_FINGERPRINT,
+        )
 
 
 if __name__ == "__main__":

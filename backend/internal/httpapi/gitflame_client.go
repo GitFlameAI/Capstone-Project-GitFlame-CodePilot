@@ -815,11 +815,7 @@ func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID stri
 	candidates = append(candidates, gitFlameGETCandidate{
 		Endpoint: fmt.Sprintf("/api/v1/repositories/%s/issues?state=all", url.PathEscape(repositoryID)),
 	})
-	body, err := c.getFirstAvailable(ctx, candidates)
-	if err != nil {
-		return nil, err
-	}
-	var raw []struct {
+	type rawIssue struct {
 		ID          any             `json:"id"`
 		IID         any             `json:"iid"`
 		Number      any             `json:"number"`
@@ -830,8 +826,36 @@ func (c *GitFlameClient) RepositoryIssues(ctx context.Context, repositoryID stri
 		Author      json.RawMessage `json:"author"`
 		User        json.RawMessage `json:"user"`
 	}
-	if err := decodeGitFlameCollection(body, []string{"issues", "items", "data"}, &raw); err != nil {
-		return nil, err
+	var raw []rawIssue
+	var lastErr error
+	for _, candidate := range candidates {
+		body, err := c.doGET(ctx, candidate.Endpoint, candidate.Ref)
+		if err != nil {
+			lastErr = err
+			var integration *IntegrationError
+			if errors.As(err, &integration) && integration.Status == http.StatusNotFound {
+				continue
+			}
+			return nil, err
+		}
+		raw = nil
+		if err := decodeGitFlameCollection(body, []string{"issues", "items", "data"}, &raw); err != nil {
+			lastErr = err
+			observability.LoggerFromContext(ctx).Warn(
+				"gitflame_issues_decode",
+				slog.String("event", "gitflame_issues_decode"),
+				slog.String("repository_id", repositoryID),
+				slog.String("path", candidate.Endpoint),
+				slog.Int("response_bytes", len(body)),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	issues := make([]domain.IssuePayload, 0, len(raw))
 	for _, item := range raw {
@@ -911,26 +935,41 @@ func decodeGitFlameCollection(body []byte, keys []string, target any) error {
 	if err := json.Unmarshal(body, target); err == nil {
 		return nil
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	var document any
+	if err := json.Unmarshal(body, &document); err != nil {
 		return &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API returned invalid JSON"}
 	}
-	for _, key := range keys {
-		if raw, ok := envelope[key]; ok {
-			if err := json.Unmarshal(raw, target); err == nil {
-				return nil
-			}
-			var nested map[string]json.RawMessage
-			if json.Unmarshal(raw, &nested) == nil {
-				for _, nestedKey := range keys {
-					if collection, ok := nested[nestedKey]; ok && json.Unmarshal(collection, target) == nil {
-						return nil
-					}
-				}
-			}
-		}
+	wrapperKeys := make(map[string]struct{}, len(keys)+3)
+	for _, key := range append(keys, "content", "results", "values") {
+		wrapperKeys[key] = struct{}{}
+	}
+	if decodeGitFlameCollectionValue(document, wrapperKeys, target, 0) {
+		return nil
 	}
 	return &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_gitflame_response", Detail: "GitFlame API returned an unexpected collection format"}
+}
+
+func decodeGitFlameCollectionValue(value any, wrapperKeys map[string]struct{}, target any, depth int) bool {
+	if depth > 4 {
+		return false
+	}
+	envelope, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, nested := range envelope {
+		if _, allowed := wrapperKeys[key]; !allowed {
+			continue
+		}
+		raw, err := json.Marshal(nested)
+		if err == nil && json.Unmarshal(raw, target) == nil {
+			return true
+		}
+		if decodeGitFlameCollectionValue(nested, wrapperKeys, target, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func gitFlameIssueAuthor(raw json.RawMessage) string {
@@ -1016,6 +1055,7 @@ func (c *GitFlameClient) requestJSON(ctx context.Context, method, endpoint strin
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	req.Header.Set("Accept", "application/json")
 	observability.PropagateRequestID(ctx, req)
 	logger := observability.LoggerFromContext(ctx)
 	started := time.Now()
@@ -1068,6 +1108,7 @@ func (c *GitFlameClient) doGET(ctx context.Context, endpoint, ref string) ([]byt
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	req.Header.Set("Accept", "application/json")
 	observability.PropagateRequestID(ctx, req)
 	logger := observability.LoggerFromContext(ctx)
 	started := time.Now()

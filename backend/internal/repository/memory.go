@@ -228,6 +228,7 @@ func (s *MemoryStore) UpdateTask(v *domain.AgentTask) error {
 func (s *MemoryStore) SaveRecommendations(repository domain.RepositoryMetadata, _ domain.AIConfig, summary string, cards []domain.RecommendationCard) (*domain.RecommendationReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cards = NormalizeRecommendations(cards)
 	v := &domain.RecommendationReport{RepositoryID: repository.ID, Summary: summary, Status: "ready", Recommendations: append([]domain.RecommendationCard(nil), cards...)}
 	s.reports[repository.ID] = v
 	return cloneReport(v), nil

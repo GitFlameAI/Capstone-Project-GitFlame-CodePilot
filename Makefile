@@ -13,7 +13,7 @@ export VERSION      ?= $(shell git describe --tags --always 2>/dev/null || echo 
 export GIT_COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 export BUILD_TIME   ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: help up down build logs ps restart ops trace observability observability-down check-alerts test
+.PHONY: help up down build logs ps restart ops trace migrate-integrity observability observability-down check-alerts test
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
@@ -44,6 +44,11 @@ ops: ## Print the deployment's build identity and readiness
 trace: ## Follow one request across all services: make trace ID=<request_id>
 	@test -n "$(ID)" || (echo "usage: make trace ID=<request_id>"; exit 1)
 	$(COMPOSE) logs --since 24h | grep "$(ID)"
+
+migrate-integrity: ## Apply the snapshot-status and recommendation-dedup migration
+	$(COMPOSE) exec -T database sh -c \
+		'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' \
+		< backend/db/migrations/007_recommendation_integrity.sql
 
 observability: ## Start Prometheus, Alertmanager and Grafana (opt-in)
 	$(COMPOSE) $(STACK_FILES) --profile observability up -d

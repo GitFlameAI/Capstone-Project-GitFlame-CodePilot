@@ -582,7 +582,11 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request) {
 		resourceError(w, err, "recommendations_not_found", "recommendation report was not found")
 		return
 	}
-	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "recommendations": v.Recommendations})
+	recommendations := v.Recommendations
+	if recommendations == nil {
+		recommendations = []domain.RecommendationCard{}
+	}
+	write(w, 200, map[string]any{"repository_id": v.RepositoryID, "recommendations": recommendations})
 }
 
 func repositoryIDFromRequest(r *http.Request) string {

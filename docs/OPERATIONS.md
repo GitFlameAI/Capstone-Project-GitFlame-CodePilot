@@ -122,6 +122,21 @@ button: replaying a task whose cause has not been fixed just burns model budget.
 
 ---
 
+### "Redis warns that Memory overcommit must be enabled"
+
+This is a Linux host/VM kernel setting, not a Redis container option. Apply it
+on the Docker host and persist it using the host's normal sysctl configuration:
+
+```bash
+sudo sysctl vm.overcommit_memory=1
+```
+
+For Docker Desktop, apply the setting inside its Linux VM. Do not add
+`vm.overcommit_memory` to Compose `sysctls`: it is not a namespaced container
+setting and many runtimes reject it.
+
+---
+
 ### "Connecting a repository is fast but plans take forever the first time"
 
 **This is by design.** Repository indexing runs in the background so the user is
@@ -195,9 +210,13 @@ automatically by Postgres on **first** start of an empty volume. For an existing
 database, apply the numbered migrations manually, newest last:
 
 ```bash
-docker compose exec -T database \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < backend/db/migrations/006_observability_indexes.sql
+make migrate-integrity
 ```
+
+Migration `007_recommendation_integrity.sql` permits the `indexed` snapshot
+status, backfills recommendation fingerprints, and removes duplicate cards
+inside existing reports before adding the unique constraint. It is idempotent
+and must be applied before deploying the matching backend image.
 
 The backend refuses to start against a database without the schema, which is
 intentional: a silently empty database is worse than a failed boot.

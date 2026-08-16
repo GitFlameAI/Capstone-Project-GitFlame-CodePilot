@@ -15,6 +15,7 @@ from recommendation_service.model_client import (
 from recommendation_service.models import (
     SEVERITY_RANK,
     AnalyzeRequest,
+    AnalyzerStatus,
     Finding,
     RepoFile,
     RecommendationResponse,
@@ -67,6 +68,29 @@ class RecommendationService:
                 f"{item.tool}:{item.status.value}" for item in analyzer_report.diagnostics
             ),
         )
+        failed_analyzers = [
+            item
+            for item in analyzer_report.diagnostics
+            if item.status in {AnalyzerStatus.FAILED, AnalyzerStatus.TIMED_OUT}
+        ]
+        if failed_analyzers:
+            failures = ", ".join(
+                f"{item.tool}: {item.message}" for item in failed_analyzers
+            )
+            raise ModelOutputError(
+                f"recommendation analysis is incomplete because analyzers failed: {failures}"
+            )
+        if not prompt_findings:
+            logger.info(
+                "recommendation analysis completed without findings repository_id=%s commit_sha=%s",
+                request.repository.id,
+                request.repository.commit_sha,
+            )
+            return RecommendationResponse(
+                summary="Static analyzers found no supported issues for the selected categories.",
+                recommendations=[],
+            ), InferenceMetrics()
+
         schema = RecommendationResponse.model_json_schema()
         prompt = build_analysis_prompt(
             files,
@@ -89,7 +113,18 @@ class RecommendationService:
         allowed_categories = set(config.recommendations.categories)
         minimum_severity = SEVERITY_RANK[config.recommendations.severity_threshold]
         filtered = []
+        seen_fingerprints: set[str] = set()
+        findings_by_fingerprint = {
+            finding.fingerprint: finding for finding in prompt_findings
+        }
+        duplicate_count = 0
         for recommendation in response.recommendations:
+            finding = findings_by_fingerprint.get(recommendation.finding_fingerprint)
+            if finding is None:
+                raise ModelOutputError(
+                    "model referenced an unknown analyzer finding fingerprint: "
+                    f"{recommendation.finding_fingerprint}"
+                )
             if recommendation.file not in file_lines:
                 raise ModelOutputError(
                     f"model referenced an unknown or excluded file: {recommendation.file}"
@@ -102,28 +137,34 @@ class RecommendationService:
                 raise ModelOutputError(
                     f"model returned disallowed category: {recommendation.category.value}"
                 )
-            matching_findings = [
-                finding
-                for finding in prompt_findings
-                if finding.file == recommendation.file
+            if not (
+                finding.file == recommendation.file
                 and finding.category == recommendation.category
                 and finding.start_line <= recommendation.line <= finding.end_line
-            ]
-            if not matching_findings:
-                raise ModelOutputError(
-                    "model recommendation is not grounded in an analyzer finding: "
-                    f"{recommendation.file}:{recommendation.line}"
-                )
-            if all(
-                finding.severity != recommendation.severity
-                for finding in matching_findings
             ):
+                raise ModelOutputError(
+                    "model recommendation does not match its analyzer finding: "
+                    f"{recommendation.finding_fingerprint}"
+                )
+            if finding.severity != recommendation.severity:
                 raise ModelOutputError(
                     "model changed analyzer severity for recommendation at "
                     f"{recommendation.file}:{recommendation.line}"
                 )
+            if recommendation.finding_fingerprint in seen_fingerprints:
+                duplicate_count += 1
+                continue
+            seen_fingerprints.add(recommendation.finding_fingerprint)
             if SEVERITY_RANK[recommendation.severity] >= minimum_severity:
                 filtered.append(recommendation)
+
+        if duplicate_count:
+            logger.warning(
+                "deduplicated model recommendations repository_id=%s commit_sha=%s duplicates=%d",
+                request.repository.id,
+                request.repository.commit_sha,
+                duplicate_count,
+            )
 
         return RecommendationResponse(summary=response.summary, recommendations=filtered), metrics
 

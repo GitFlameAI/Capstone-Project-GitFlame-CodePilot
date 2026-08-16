@@ -119,6 +119,11 @@ class Finding(BaseModel):
 class Recommendation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    finding_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     severity: Severity
     category: Category
     file: str = Field(min_length=1, max_length=500)
