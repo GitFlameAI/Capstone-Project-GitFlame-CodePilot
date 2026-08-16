@@ -8,6 +8,7 @@ from recommendation_service.findings import build_finding
 from recommendation_service.model_client import InferenceMetrics
 from recommendation_service.models import (
     AnalyzeRequest,
+    AnalyzerReport,
     Category,
     RecommendationResponse,
     RepoFile,
@@ -96,8 +97,10 @@ class RecommendationFoundationTests(unittest.TestCase):
 class FakeRecommendationModel:
     def __init__(self) -> None:
         self.user_prompt = ""
+        self.called = False
 
     async def analyze(self, *, system_prompt, user_prompt, response_schema):
+        self.called = True
         self.user_prompt = user_prompt
         return RecommendationResponse(
             summary="No deterministic analyzers executed yet.",
@@ -105,10 +108,18 @@ class FakeRecommendationModel:
         ), InferenceMetrics()
 
 
+class EmptyAnalyzerOrchestrator:
+    async def analyze(self, repository, files, technologies, categories):
+        return AnalyzerReport()
+
+
 class RecommendationServiceFoundationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_service_passes_revision_and_detected_technologies_to_prompt(self):
+    async def test_service_skips_model_when_analyzers_find_nothing(self):
         model = FakeRecommendationModel()
-        service = RecommendationService(model)
+        service = RecommendationService(
+            model,
+            analyzer_orchestrator=EmptyAnalyzerOrchestrator(),
+        )
         request = AnalyzeRequest.model_validate(
             {
                 "repository": {"id": "owner/repository", "commit_sha": "abc123"},
@@ -123,9 +134,9 @@ class RecommendationServiceFoundationTests(unittest.IsolatedAsyncioTestCase):
         response, _ = await service.analyze(request)
 
         self.assertEqual(response.recommendations, [])
-        self.assertIn("Repository ID: owner/repository", model.user_prompt)
-        self.assertIn("Commit SHA: abc123", model.user_prompt)
-        self.assertIn("Detected languages: go", model.user_prompt)
+        self.assertFalse(model.called)
+        self.assertEqual(model.user_prompt, "")
+        self.assertIn("no supported issues", response.summary)
 
 
 if __name__ == "__main__":

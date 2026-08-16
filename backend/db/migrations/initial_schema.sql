@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS repository_snapshots (
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT repository_snapshots_file_count_check CHECK (file_count >= 0),
     CONSTRAINT repository_snapshots_status_check CHECK (
-        status IN ('fetched', 'failed')
+        status IN ('fetched', 'indexed', 'failed')
     )
 );
 
@@ -359,6 +359,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     severity TEXT NOT NULL,
     problem TEXT NOT NULL,
     suggestion TEXT NOT NULL,
+    finding_fingerprint TEXT NOT NULL,
     confidence DOUBLE PRECISION,
     current_status TEXT NOT NULL DEFAULT 'open',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -368,6 +369,9 @@ CREATE TABLE IF NOT EXISTS recommendations (
     ),
     CONSTRAINT recommendations_confidence_check CHECK (
         confidence IS NULL OR (confidence >= 0 AND confidence <= 1)
+    ),
+    CONSTRAINT recommendations_finding_fingerprint_check CHECK (
+        finding_fingerprint ~ '^[0-9a-f]{64}$'
     ),
     CONSTRAINT recommendations_current_status_check CHECK (
         current_status IN ('open', 'closed', 'deleted')
@@ -495,6 +499,9 @@ CREATE INDEX IF NOT EXISTS idx_recommendation_runs_expires_at
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_run_id
     ON recommendations(recommendation_run_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_recommendations_run_finding
+    ON recommendations(recommendation_run_id, finding_fingerprint);
 
 CREATE INDEX IF NOT EXISTS idx_recommendation_statuses_recommendation_id
     ON recommendation_statuses(recommendation_id);

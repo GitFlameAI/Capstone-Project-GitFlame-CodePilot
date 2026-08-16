@@ -249,7 +249,7 @@ func (s *Server) synchronizeRepositoryIndex(
 			Path: file.Path, ContentHash: hex.EncodeToString(digest[:]),
 		})
 	}
-	_, _ = s.store.SaveRepositorySnapshot(domain.RepositorySnapshot{
+	_, err = s.store.SaveRepositorySnapshot(domain.RepositorySnapshot{
 		RepositoryID: connection.Repository.ID,
 		ConnectionID: connection.ID,
 		Ref:          ref,
@@ -257,6 +257,9 @@ func (s *Server) synchronizeRepositoryIndex(
 		FileCount:    len(files),
 		Status:       "indexed",
 	}, snapshotFiles)
+	if err != nil {
+		return repositoryIndexSync{}, fmt.Errorf("save indexed repository snapshot: %w", err)
+	}
 	observability.LoggerFromContext(ctx).Info(
 		"rag_index",
 		slog.String("event", "rag_index"),

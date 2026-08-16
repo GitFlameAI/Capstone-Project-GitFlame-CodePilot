@@ -101,6 +101,7 @@ func (c *RecommendationClient) AnalyzeRecommendations(ctx context.Context, repos
 	if strings.TrimSpace(result.Summary) == "" {
 		return "", nil, &IntegrationError{Status: http.StatusBadGateway, Code: "invalid_recommendation_response", Detail: "recommendation service returned an empty summary"}
 	}
+	result.Recommendations = repository.NormalizeRecommendations(result.Recommendations)
 	for index := range result.Recommendations {
 		if result.Recommendations[index].ID == "" {
 			result.Recommendations[index].ID = repository.NewID()

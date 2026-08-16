@@ -97,3 +97,76 @@ func TestRepositoryFilesForIndexSkipsBinaryPathsAndContents(t *testing.T) {
 		t.Fatalf("files = %#v, want only main.go", files)
 	}
 }
+
+func TestDecodeGitFlameCollectionSupportsPaginatedEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"content":      `{"content":[{"id":1}]}`,
+		"nestedResult": `{"data":{"results":[{"id":2}]}}`,
+		"nestedValues": `{"data":{"content":{"values":[{"id":3}]}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var decoded []struct {
+				ID int `json:"id"`
+			}
+			if err := decodeGitFlameCollection([]byte(body), []string{"issues", "items", "data"}, &decoded); err != nil {
+				t.Fatalf("decodeGitFlameCollection returned error: %v", err)
+			}
+			if len(decoded) != 1 || decoded[0].ID == 0 {
+				t.Fatalf("decoded = %#v, want one issue", decoded)
+			}
+		})
+	}
+}
+
+func TestRepositoryIssuesRequestsJSONAndReadsContentEnvelope(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "application/json" {
+			t.Fatalf("Accept = %q, want application/json", r.Header.Get("Accept"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"data":{"content":[{"number":7,"title":"Fix API","body":"Return JSON","user":{"login":"kite"}}]}}`)
+	}))
+	defer server.Close()
+
+	client := NewGitFlameClient(server.URL, "token", time.Second)
+	issues, err := client.RepositoryIssues(context.Background(), "owner/repository")
+	if err != nil {
+		t.Fatalf("RepositoryIssues returned error: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "7" || issues[0].Author != "kite" {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestRepositoryIssuesFallsBackAfterUnexpectedSuccessfulResponse(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/api/v1/repos/") {
+			_, _ = fmt.Fprint(w, `{"unexpected":"shape"}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"items":[{"id":"ISSUE-9","title":"Fallback works"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewGitFlameClient(server.URL, "token", time.Second)
+	issues, err := client.RepositoryIssues(context.Background(), "owner/repository")
+	if err != nil {
+		t.Fatalf("RepositoryIssues returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(issues) != 1 || issues[0].ID != "ISSUE-9" {
+		t.Fatalf("issues = %#v", issues)
+	}
+}

@@ -294,15 +294,16 @@ type GeneratedFileOperation struct {
 }
 
 type RecommendationCard struct {
-	ID         string   `json:"id"`
-	Severity   string   `json:"severity"`
-	Category   string   `json:"category,omitempty"`
-	File       string   `json:"file"`
-	Line       *int     `json:"line,omitempty"`
-	Problem    string   `json:"problem"`
-	Suggestion string   `json:"suggestion"`
-	Confidence *float64 `json:"confidence,omitempty"`
-	State      string   `json:"state"`
+	ID                 string   `json:"id"`
+	FindingFingerprint string   `json:"finding_fingerprint"`
+	Severity           string   `json:"severity"`
+	Category           string   `json:"category,omitempty"`
+	File               string   `json:"file"`
+	Line               *int     `json:"line,omitempty"`
+	Problem            string   `json:"problem"`
+	Suggestion         string   `json:"suggestion"`
+	Confidence         *float64 `json:"confidence,omitempty"`
+	State              string   `json:"state"`
 }
 
 type RecommendationReport struct {
